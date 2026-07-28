@@ -1,0 +1,9 @@
+# 运维与恢复
+
+通过 `scripts/start-windows.ps1` 启动，默认仅监听 `127.0.0.1`。启动时获取 `<data-root>/state/instance.lock` 排他锁；已有实例会失败退出（`REQ-002`）。可用 `YUANZHIKU_DATA_ROOT` 覆盖数据根。
+
+每日首次成功启动入队一次低优先级 backup；备份在 `<data-root>/backups`，成功后保留最近 30 个日期项。备份为一致 SQLite 副本和 artifact 的 ZIP，清单为 SHA-256；不含模型、staging 或日志正文（`REQ-040`）。
+
+还原 API 要求 `target_data_root` 不存在或为空且不同于当前根；因此不会覆盖当前库。导出前由 UI 显式传递 `confirmed: true`。reimport 将在写入前验证 zip、manifest、hash、关系和 ID 链冲突（`REQ-041`）。`/api/v1/verify` 提供完整或抽样 hash 校验（`REQ-042`）。
+
+操作日志只记录事件类型、ID、结果和时间，按日保留 30 天，不写正文、路径、令牌或请求体（`REQ-003`, `REQ-042`）。
