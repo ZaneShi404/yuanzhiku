@@ -127,13 +127,20 @@ class TransferService:
                 self.repository.audit("backup", record["id"], "succeeded")
                 return {**record, "archive_path": str(archive_path)}
             except Exception:
-                if record is not None:
-                    # Never leave a record advertised as restorable while a
-                    # later filesystem cleanup may still be pending.
+                if record is None:
+                    archive_path.unlink(missing_ok=True)
+                else:
+                    # Keep a non-success record until the archive is deleted.
+                    # If unlink fails, the next backup reconciles this record.
                     self.repository.update_backup_state(record["id"], "discarding")
-                archive_path.unlink(missing_ok=True)
-                if record is not None:
-                    self.repository.delete_backup_record(record["id"])
+                    try:
+                        archive_path.unlink()
+                    except FileNotFoundError:
+                        self.repository.delete_backup_record(record["id"])
+                    except OSError:
+                        pass
+                    else:
+                        self.repository.delete_backup_record(record["id"])
                 raise
 
     def _reconcile_incomplete_backup_records(self) -> None:

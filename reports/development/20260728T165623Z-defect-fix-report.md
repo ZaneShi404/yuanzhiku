@@ -56,8 +56,8 @@ PDF and DOCX parsing now passes page/paragraph segments to evidence persistence.
 
 | Command | Outcome |
 | --- | --- |
-| `PYTHONPATH=E:/源知库/backend E:/源知库/.venv/Scripts/python.exe -m pytest E:/源知库/tests/unit/test_defect_fixes.py -q` | Passed: `12 passed` before the final retention-delete failure regression was added. |
-| `PYTHONPATH=E:/源知库/backend E:/源知库/.venv/Scripts/python.exe -m pytest E:/源知库/tests/unit/test_defect_fixes.py E:/源知库/tests/unit/test_api.py -q` | Passed after all repairs: `19 passed in 118.36s`. |
+| `PYTHONPATH=E:/源知库/backend E:/源知库/.venv/Scripts/python.exe -m pytest E:/源知库/tests/unit/test_defect_fixes.py -q` | Passed after the final backup-cleanup compensation regression: `14 passed in 85.00s`. |
+| `PYTHONPATH=E:/源知库/backend E:/源知库/.venv/Scripts/python.exe -m pytest E:/源知库/tests/unit/test_defect_fixes.py E:/源知库/tests/unit/test_api.py -q` | Passed before the final focused-only backup cleanup regression: `19 passed in 118.36s`. |
 | `PYTHONPATH=E:/源知库/backend E:/源知库/.venv/Scripts/python.exe -m compileall -q E:/源知库/backend/app` | Passed. |
 | OpenAPI creation smoke test using an isolated `tests/runtime/devfix-smoke-*` root | Passed: `openapi-smoke: passed`. |
 | `git diff --check` | Passed; no whitespace errors. |

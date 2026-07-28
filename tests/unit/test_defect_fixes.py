@@ -356,3 +356,24 @@ def test_retention_delete_failure_keeps_archive_and_success_record(runtime_root:
     retained = next(item for item in services.repository.list_backups() if item["id"] == record["id"])
     assert retained["state"] == "succeeded"
     assert archive_path.is_file()
+
+
+def test_failed_backup_keeps_discarding_record_when_archive_cleanup_fails(runtime_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    app = create_app(runtime_root, acquire_lock=False)
+    services = app.state.services
+    original_unlink = Path.unlink
+
+    def deny_backup_unlink(path: Path, *args, **kwargs):
+        if path.parent == services.paths.backups:
+            raise OSError("injected")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", deny_backup_unlink)
+    monkeypatch.setattr(services.transfers, "_prune_backups", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("injected")))
+    with pytest.raises(RuntimeError, match="injected"):
+        services.transfers.create_backup()
+
+    records = services.repository.list_backups()
+    assert len(records) == 1
+    assert records[0]["state"] == "discarding"
+    assert (services.paths.backups / records[0]["archive_name"]).is_file()
