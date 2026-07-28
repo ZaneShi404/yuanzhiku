@@ -1,0 +1,5 @@
+{
+  "schema_version": 1,
+  "policy": "Only entries in this lockfile may be automatically downloaded. This development baseline contains no approved Docling model downloads.",
+  "models": []
+}

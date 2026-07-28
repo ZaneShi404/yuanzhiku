@@ -1,0 +1,15 @@
+# Local environments and generated test state
+.venv/
+frontend/node_modules/
+tests/runtime/*
+!tests/runtime/.gitkeep
+
+# Local application data and transient files
+data/
+*.pyc
+*.tsbuildinfo
+__pycache__/
+
+# OS/editor files
+.DS_Store
+Thumbs.db
