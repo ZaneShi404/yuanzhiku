@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from urllib.parse import urlparse
 
-from app.adapters.sqlite import SqliteRepository
+from app.ports.repository import RepositoryPort
 from app.domain.models import DouyinCardCreate, ExternalCardCreate
 
 
 class ExternalCardService:
-    def __init__(self, repository: SqliteRepository) -> None:
+    def __init__(self, repository: RepositoryPort) -> None:
         self.repository = repository
 
     @staticmethod

@@ -19,7 +19,9 @@ depends_on = None
 
 def upgrade() -> None:
     migration = Path(__file__).resolve().parents[2] / "migrations" / "postgresql" / "001_initial.sql"
-    op.execute(migration.read_text(encoding="utf-8"))
+    for statement in migration.read_text(encoding="utf-8").split(";"):
+        if statement.strip():
+            op.execute(statement)
 
 
 def downgrade() -> None:

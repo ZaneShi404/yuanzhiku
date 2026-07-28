@@ -10,4 +10,4 @@ Push-Location frontend; npm ci; npm run build; Pop-Location
 
 Docling 是可选的首选解析能力。未验证许可、来源、哈希的模型不会下载；模型缓存路径是 `<data-root>\models`。`backend/models.lock.json` 是唯一允许自动模型来源的审核清单（`REQ-013`）。当前基础安装包含纯本地回退解析器 pypdf、python-docx，绝无云回退（`REQ-014`）。
 
-容器镜像在 `docker-compose.yml` 中固定标签。容器 API/worker 通过 `YUANZHIKU_DATABASE_URL` 选择固定版本的 SQLAlchemy/Alembic/psycopg PostgreSQL 路径；该路径会在 repository 未完成时明确失败，绝不静默回落 SQLite 或声称 PostgreSQL 已投入运行。Docker Desktop/WSL 不可用时可使用 Windows 脚本本地运行，不能将该状态误记为 Compose 验证通过（`REQ-045`）。
+容器镜像在 `docker-compose.yml` 中固定标签。容器 API/worker 通过 `YUANZHIKU_DATABASE_URL` 选择固定版本的 SQLAlchemy/Alembic/psycopg PostgreSQL repository 和迁移路径；连接、driver 或迁移错误会明确失败，绝不静默回落 SQLite。Docker Desktop/WSL 不可用时可使用 Windows 脚本本地运行，不能将该状态误记为 Compose 验证通过（`REQ-045`）。

@@ -4,4 +4,4 @@
 
 SQLite 位于 `<data-root>/state/knowledge.db`，artifact 位于 `<data-root>/artifacts/<sha256>`，临时文件只在 `<data-root>/staging`。完整本地路径不入数据库、API 或日志（`REQ-011`, `REQ-003`）。每次内容解析生成不可变 representation 与 evidence；人类修订创建新的 manual representation（`REQ-020`）。
 
-本地进程内单 worker 用 durable jobs 表轮询；容器部署拆为 API/worker，并提供 PostgreSQL adapter 占位迁移和 Redis 服务，运行时接入由环境配置决定（`REQ-032`, `REQ-045`）。
+本地进程内单 worker 用 durable jobs 表轮询；容器部署拆为 API/worker，并使用 SQLAlchemy/Alembic PostgreSQL repository 和 Redis 服务。PostgreSQL 作业领取使用行锁和 `SKIP LOCKED`，使独立 API/worker 进程不会领取同一作业；运行时后端由环境配置决定（`REQ-032`, `REQ-045`）。

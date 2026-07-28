@@ -5,12 +5,12 @@ from __future__ import annotations
 import hashlib
 import json
 
-from app.adapters.sqlite import SqliteRepository
+from app.ports.repository import RepositoryPort
 from app.domain.models import KnowledgeCreate, KnowledgeType, ManualRepresentationCreate
 
 
 class DocumentService:
-    def __init__(self, repository: SqliteRepository) -> None:
+    def __init__(self, repository: RepositoryPort) -> None:
         self.repository = repository
 
     @staticmethod

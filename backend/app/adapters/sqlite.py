@@ -122,6 +122,8 @@ CREATE TABLE IF NOT EXISTS backups (
 
 
 class SqliteRepository:
+    backend = "sqlite"
+
     def __init__(self, database_path: Path) -> None:
         self.database_path = database_path
         self._lock = threading.RLock()
@@ -602,6 +604,15 @@ class SqliteRepository:
                 topic["source_ids"] = [row["source_id"] for row in connection.execute("SELECT source_id FROM topic_sources WHERE topic_id=?", (topic["id"],))]
             return topics
 
+    def add_source_to_topic(self, topic_id: str, source_id: str) -> bool:
+        with self.connection() as connection:
+            topic = connection.execute("SELECT 1 FROM topics WHERE id=?", (topic_id,)).fetchone()
+            source = connection.execute("SELECT 1 FROM sources WHERE id=?", (source_id,)).fetchone()
+            if topic is None or source is None:
+                return False
+            connection.execute("INSERT OR IGNORE INTO topic_sources(topic_id,source_id) VALUES(?,?)", (topic_id, source_id))
+            return True
+
     def soft_delete_source(self, source_id: str) -> dict[str, Any] | None:
         with self.connection() as connection:
             connection.execute("UPDATE sources SET deleted_at=?, updated_at=? WHERE id=? AND deleted_at IS NULL", (now(), now(), source_id))
@@ -672,6 +683,47 @@ class SqliteRepository:
         for card in rows["external_cards"]:
             card["url"] = redact_url_userinfo(card["url"])
         return rows
+
+    def insert_export_rows(self, rows_by_table: dict[str, list[dict[str, Any]]]) -> None:
+        """Insert validated portable logical rows in foreign-key-safe order."""
+        tables = ["artifacts", "sources", "source_metadata_revisions", "content_versions", "source_relations", "representations", "search_chunks", "evidence", "citations", "knowledge", "knowledge_evidence", "external_cards", "topics", "topic_sources"]
+        with self.connection() as connection:
+            for table in tables:
+                for row in rows_by_table.get(table, []):
+                    columns = list(row)
+                    placeholders = ",".join("?" for _ in columns)
+                    connection.execute(
+                        f"INSERT INTO {table}({','.join(columns)}) VALUES({placeholders})",
+                        [row[column] for column in columns],
+                    )
+
+    def rows_for_backup(self) -> dict[str, list[dict[str, Any]]]:
+        tables = [
+            "settings", "artifacts", "sources", "source_metadata_revisions", "content_versions", "source_relations",
+            "representations", "search_chunks", "evidence", "citations", "knowledge", "knowledge_evidence", "jobs",
+            "job_attempts", "audit_events", "external_cards", "topics", "topic_sources",
+        ]
+        with self.connection() as connection:
+            rows = {table: self._rows(connection.execute(f"SELECT * FROM {table}").fetchall()) for table in tables}
+        for card in rows["external_cards"]:
+            card["url"] = redact_url_userinfo(card["url"])
+        return rows
+
+    def insert_backup_rows(self, rows_by_table: dict[str, list[dict[str, Any]]]) -> None:
+        tables = [
+            "settings", "artifacts", "sources", "source_metadata_revisions", "content_versions", "source_relations",
+            "representations", "search_chunks", "evidence", "citations", "knowledge", "knowledge_evidence", "jobs",
+            "job_attempts", "audit_events", "external_cards", "topics", "topic_sources",
+        ]
+        with self.connection() as connection:
+            for table in tables:
+                for row in rows_by_table.get(table, []):
+                    columns = list(row)
+                    placeholders = ",".join("?" for _ in columns)
+                    connection.execute(
+                        f"INSERT INTO {table}({','.join(columns)}) VALUES({placeholders})",
+                        [row[column] for column in columns],
+                    )
 
     def create_backup_record(self, archive_name: str, manifest_sha256: str, state: str = "succeeded") -> dict[str, Any]:
         backup_id = identifier()

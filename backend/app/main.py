@@ -19,6 +19,7 @@ from app.adapters.sqlite import SqliteRepository
 from app.adapters.storage import ArtifactStore, StorageLimitError
 from app.core.config import DataPaths, InstanceLock, data_paths, database_backend, database_url
 from app.core.operations import OperationalLog
+from app.ports.repository import RepositoryPort
 from app.domain.models import (
     DouyinCardCreate,
     ExportCreate,
@@ -56,13 +57,11 @@ class ApplicationServices:
             from app.adapters.postgres import PostgresRepository
 
             migrations = Path(__file__).resolve().parents[1] / "migrations" / "postgresql"
-            PostgresRepository(selected_database_url, migrations).initialize()
-            raise RuntimeError(
-                "PostgreSQL adapter 未提供可用 repository；拒绝回退到 SQLite。"
-                "请配置已实现的 PostgreSQL repository，或显式使用 SQLite URL。"
-            )
-        self.repository = SqliteRepository(paths.database)
+            self.repository: RepositoryPort = PostgresRepository(selected_database_url, migrations)
+        else:
+            self.repository = SqliteRepository(paths.database)
         self.repository.initialize()
+        self.database_backend = self.repository.backend
         self.artifacts = ArtifactStore(paths)
         self.documents = DocumentService(self.repository)
         self.transfers = TransferService(paths, self.repository, self.artifacts)
@@ -172,7 +171,7 @@ def create_app(root: str | Path | None = None, *, acquire_lock: bool = True) -> 
 
     @app.get(f"{api}/health", tags=["health"])
     def health(svc: ApplicationServices = Depends(get_services)) -> dict[str, Any]:
-        return {"status": "ok", "data_root": str(svc.paths.root), "database": "sqlite", "network": "127.0.0.1 only"}
+        return {"status": "ok", "data_root": str(svc.paths.root), "database": svc.database_backend, "network": "127.0.0.1 only"}
 
     @app.get(f"{api}/capabilities", tags=["health"])
     def capabilities() -> dict[str, Any]:
@@ -368,10 +367,8 @@ def create_app(root: str | Path | None = None, *, acquire_lock: bool = True) -> 
 
     @app.post(f"{api}/topics/{{topic_id}}/sources/{{source_id}}", tags=["taxonomy"])
     def add_topic_source(topic_id: str, source_id: str, svc: ApplicationServices = Depends(get_services)) -> dict[str, Any]:
-        with svc.repository.connection() as connection:
-            if connection.execute("SELECT 1 FROM topics WHERE id=?", (topic_id,)).fetchone() is None or svc.repository.get_source(source_id) is None:
-                raise HTTPException(status_code=404, detail="主题或来源不存在")
-            connection.execute("INSERT OR IGNORE INTO topic_sources(topic_id,source_id) VALUES(?,?)", (topic_id, source_id))
+        if not svc.repository.add_source_to_topic(topic_id, source_id):
+            raise HTTPException(status_code=404, detail="主题或来源不存在")
         return {"topic_id": topic_id, "source_id": source_id}
 
     @app.get(f"{api}/external/cards", tags=["external-cards"])
@@ -459,7 +456,7 @@ def create_app(root: str | Path | None = None, *, acquire_lock: bool = True) -> 
     @app.post(f"{api}/backups/{{backup_id}}/restore", tags=["transfers"])
     def restore_backup(backup_id: str, request: RestoreRequest, svc: ApplicationServices = Depends(get_services)) -> dict[str, Any]:
         try:
-            return svc.transfers.restore_backup(backup_id, request.target_data_root)
+            return svc.transfers.restore_backup(backup_id, request.target_data_root, request.target_database_url)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except ValueError as exc:

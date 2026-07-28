@@ -17,7 +17,8 @@ from typing import Any
 
 from app.adapters.sqlite import SqliteRepository
 from app.adapters.storage import ArtifactStore
-from app.core.config import DataPaths
+from app.core.config import DataPaths, database_backend
+from app.ports.repository import RepositoryPort
 
 ARCHIVE_SCHEMA_VERSION = 1
 
@@ -31,7 +32,7 @@ class ReimportConflict(ValueError):
 
 
 class TransferService:
-    def __init__(self, paths: DataPaths, repository: SqliteRepository, artifacts: ArtifactStore) -> None:
+    def __init__(self, paths: DataPaths, repository: RepositoryPort, artifacts: ArtifactStore) -> None:
         self.paths = paths
         self.repository = repository
         self.artifacts = artifacts
@@ -85,18 +86,28 @@ class TransferService:
         entries: list[dict[str, Any]] = []
         with tempfile.TemporaryDirectory(dir=self.paths.staging) as temp_name:
             temp = Path(temp_name)
-            snapshot = temp / "knowledge.db"
-            self._snapshot_database(snapshot)
             with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
-                self._add_file(archive, snapshot, "state/knowledge.db", entries)
+                if self.repository.backend == "sqlite":
+                    snapshot = temp / "knowledge.db"
+                    self._snapshot_database(snapshot)
+                    self._add_file(archive, snapshot, "state/knowledge.db", entries)
+                records = temp / "records.json"
+                records.write_text(
+                    json.dumps(
+                        {
+                            "schema_version": ARCHIVE_SCHEMA_VERSION,
+                            "records": self.repository.rows_for_backup() if archive_type == "backup" else self.repository.rows_for_export(),
+                        },
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                    encoding="utf-8",
+                )
+                self._add_file(archive, records, "records.json", entries)
                 for artifact in sorted(self.paths.artifacts.rglob("*")):
                     if artifact.is_file():
                         relative = artifact.relative_to(self.paths.artifacts).as_posix()
                         self._add_file(archive, artifact, f"artifacts/{relative}", entries)
-                if archive_type == "export":
-                    records = temp / "records.json"
-                    records.write_text(json.dumps({"schema_version": ARCHIVE_SCHEMA_VERSION, "records": self.repository.rows_for_export()}, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
-                    self._add_file(archive, records, "records.json", entries)
                 manifest = {
                     "schema_version": ARCHIVE_SCHEMA_VERSION,
                     "archive_type": archive_type,
@@ -240,11 +251,11 @@ class TransferService:
         self.repository.audit("integrity_verify", None, "failed" if failures else "succeeded")
         return {"checked": len(selected), "full": full, "valid": not failures, "failures": failures}
 
-    def restore_backup(self, backup_id: str, target_root: str) -> dict[str, Any]:
+    def restore_backup(self, backup_id: str, target_root: str, target_database_url: str | None = None) -> dict[str, Any]:
         record = next((item for item in self.repository.list_backups() if item["id"] == backup_id), None)
         if record is None:
             raise KeyError("备份不存在")
-        return self._restore_archive(self.paths.backups / record["archive_name"], target_root)
+        return self._restore_archive(self.paths.backups / record["archive_name"], target_root, target_database_url)
 
     def _target_paths(self, target_root: str) -> DataPaths:
         target = DataPaths(Path(target_root).expanduser().resolve())
@@ -254,7 +265,7 @@ class TransferService:
             raise ValueError("还原目标必须不存在或为空")
         return target
 
-    def _restore_archive(self, archive_path: Path, target_root: str) -> dict[str, Any]:
+    def _restore_archive(self, archive_path: Path, target_root: str, target_database_url: str | None = None) -> dict[str, Any]:
         verification = self.verify_archive(archive_path)
         if not verification["valid"]:
             raise ValueError("归档验证失败")
@@ -263,24 +274,55 @@ class TransferService:
             manifest = json.loads(archive.read("manifest.json"))
             if manifest["archive_type"] not in {"backup", "export"}:
                 raise ValueError("不支持的归档类型")
-            target.create()
-            for entry in manifest["entries"]:
-                name = entry["path"]
-                if not (name == "state/knowledge.db" or name.startswith("artifacts/")):
-                    continue
-                destination = target.root / name
+            entry_names = {entry["path"] for entry in manifest["entries"]}
+            if "state/knowledge.db" not in entry_names:
+                if not target_database_url or database_backend(target_database_url) != "postgresql":
+                    raise ValueError("PostgreSQL 备份还原需要新的 target_database_url")
+                from app.adapters.postgres import PostgresRepository
+
+                target_repository = PostgresRepository(
+                    target_database_url,
+                    Path(__file__).resolve().parents[2] / "migrations" / "postgresql",
+                )
+                target_repository.initialize()
+                if target_repository.has_user_records():
+                    raise ValueError("PostgreSQL 还原目标必须为空")
+                records_payload = json.loads(archive.read("records.json"))
+                records = records_payload.get("records")
+                if records_payload.get("schema_version") != ARCHIVE_SCHEMA_VERSION or not isinstance(records, dict):
+                    raise ValueError("备份逻辑记录无效")
+                target.create()
+                self._extract_artifacts(archive, manifest, target)
+                target_repository.prepare_backup_restore()
+                target_repository.insert_backup_rows(records)
+                artifact_hashes = [row["sha256"] for row in records.get("artifacts", []) if isinstance(row, dict) and isinstance(row.get("sha256"), str)]
+            else:
+                target.create()
+                self._extract_artifacts(archive, manifest, target)
+                destination = target.database
                 destination.parent.mkdir(parents=True, exist_ok=True)
-                with archive.open(name) as source, destination.open("xb") as output:
+                with archive.open("state/knowledge.db") as source, destination.open("xb") as output:
                     shutil.copyfileobj(source, output)
+                restored_repo = SqliteRepository(target.database)
+                restored_repo.initialize()
+                artifact_hashes = [row["sha256"] for row in restored_repo.rows_for_export()["artifacts"]]
         restored_store = ArtifactStore(target)
-        restored_repo = SqliteRepository(target.database)
-        restored_repo.initialize()
-        artifact_hashes = [row["sha256"] for row in restored_repo.rows_for_export()["artifacts"]]
         invalid = [sha256 for sha256 in artifact_hashes if not restored_store.verify(sha256)]
         if invalid:
             shutil.rmtree(target.root)
             raise ValueError("还原后的 artifact 哈希不匹配")
         return {"target_data_root": str(target.root), "restored_artifacts": len(artifact_hashes), "archive_type": manifest["archive_type"]}
+
+    @staticmethod
+    def _extract_artifacts(archive: zipfile.ZipFile, manifest: dict[str, Any], target: DataPaths) -> None:
+        for entry in manifest["entries"]:
+            name = entry["path"]
+            if not name.startswith("artifacts/"):
+                continue
+            destination = target.root / name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with archive.open(name) as source, destination.open("xb") as output:
+                shutil.copyfileobj(source, output)
 
     def reimport(self, archive_path: str) -> dict[str, Any]:
         path = Path(archive_path).expanduser().resolve()
@@ -362,13 +404,9 @@ class TransferService:
                             created_artifacts.append(sha256)
                         finally:
                             stage.unlink(missing_ok=True)
-                    # The insertion order respects foreign keys. Existing identical rows are left untouched.
-                    with self.repository.connection() as connection:
-                        for table in tables:
-                            for row in pending[table]:
-                                columns = list(row)
-                                placeholders = ",".join("?" for _ in columns)
-                                connection.execute(f"INSERT INTO {table}({','.join(columns)}) VALUES({placeholders})", [row[column] for column in columns])
+                    # The repository owns its dialect-specific transaction and
+                    # parameter binding while preserving foreign-key order.
+                    self.repository.insert_export_rows(pending)
             except Exception:
                 for sha256 in created_artifacts:
                     if self.repository.delete_artifact_if_unreferenced(sha256):

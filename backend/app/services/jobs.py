@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Callable
 
 from app.adapters.parsers import ParsedDocument, parse_local
-from app.adapters.sqlite import SqliteRepository
+from app.ports.repository import RepositoryPort
 from app.adapters.storage import ArtifactStore
 from app.services.documents import DocumentService
 
@@ -34,7 +34,7 @@ class ParserCancelled(RuntimeError):
 class JobService:
     def __init__(
         self,
-        repository: SqliteRepository,
+        repository: RepositoryPort,
         artifacts: ArtifactStore,
         documents: DocumentService,
         backup_runner: Callable[[], dict] | None = None,

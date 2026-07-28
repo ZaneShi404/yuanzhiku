@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import json
 
-from app.adapters.sqlite import SqliteRepository
+from app.ports.repository import RepositoryPort
 
 
 class SearchService:
-    def __init__(self, repository: SqliteRepository) -> None:
+    def __init__(self, repository: RepositoryPort) -> None:
         self.repository = repository
 
     def search(self, query: str, *, include_historical: bool = False, include_incomplete: bool = False, source_type: str | None = None, category: str | None = None, tag: str | None = None, author: str | None = None, language: str | None = None, processing_state: str | None = None, sort: str = "relevance") -> list[dict]:

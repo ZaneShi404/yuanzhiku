@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from app.adapters.sqlite import SqliteRepository
+from app.ports.repository import RepositoryPort
 from app.adapters.storage import ArtifactStore
 
 
 class LifecycleService:
-    def __init__(self, repository: SqliteRepository, artifacts: ArtifactStore) -> None:
+    def __init__(self, repository: RepositoryPort, artifacts: ArtifactStore) -> None:
         self.repository = repository
         self.artifacts = artifacts
 

@@ -7,7 +7,7 @@ import mimetypes
 from pathlib import Path
 from typing import BinaryIO
 
-from app.adapters.sqlite import SqliteRepository
+from app.ports.repository import RepositoryPort
 from app.adapters.storage import ArtifactStore
 from app.domain.models import PasteImportRequest, SourceType
 
@@ -16,7 +16,7 @@ ALLOWED_SUFFIXES = {".pdf", ".docx", ".md", ".markdown", ".txt"}
 
 
 class ImportService:
-    def __init__(self, repository: SqliteRepository, artifacts: ArtifactStore) -> None:
+    def __init__(self, repository: RepositoryPort, artifacts: ArtifactStore) -> None:
         self.repository = repository
         self.artifacts = artifacts
 

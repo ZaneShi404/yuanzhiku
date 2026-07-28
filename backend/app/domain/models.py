@@ -139,6 +139,7 @@ class ExportCreate(BaseModel):
 
 class RestoreRequest(BaseModel):
     target_data_root: str = Field(min_length=1, max_length=1000)
+    target_database_url: str | None = Field(default=None, min_length=1, max_length=4096)
 
 
 class ReimportRequest(BaseModel):
