@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.adapters.sqlite import SqliteRepository
 from app.adapters.storage import ArtifactStore, StorageLimitError
-from app.core.config import DataPaths, InstanceLock, data_paths, database_url
+from app.core.config import DataPaths, InstanceLock, data_paths, database_backend, database_url
 from app.core.operations import OperationalLog
 from app.domain.models import (
     DouyinCardCreate,
@@ -51,11 +51,16 @@ class ApplicationServices:
         self.operations = OperationalLog(paths.logs)
         self.operations.prune()
         selected_database_url = database_url(paths)
-        if selected_database_url.startswith(("postgresql://", "postgres://")):
+        selected_backend = database_backend(selected_database_url)
+        if selected_backend == "postgresql":
             from app.adapters.postgres import PostgresRepository
 
             migrations = Path(__file__).resolve().parents[1] / "migrations" / "postgresql"
             PostgresRepository(selected_database_url, migrations).initialize()
+            raise RuntimeError(
+                "PostgreSQL adapter 未提供可用 repository；拒绝回退到 SQLite。"
+                "请配置已实现的 PostgreSQL repository，或显式使用 SQLite URL。"
+            )
         self.repository = SqliteRepository(paths.database)
         self.repository.initialize()
         self.artifacts = ArtifactStore(paths)

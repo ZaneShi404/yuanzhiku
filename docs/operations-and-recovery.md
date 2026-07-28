@@ -1,6 +1,6 @@
 # 运维与恢复
 
-通过 `scripts/start-windows.ps1` 启动，默认仅监听 `127.0.0.1`。启动时获取 `<data-root>/state/instance.lock` 排他锁；已有实例会失败退出（`REQ-002`）。可用 `YUANZHIKU_DATA_ROOT` 覆盖数据根。`YUANZHIKU_DATABASE_URL` 未设置时使用 SQLite；Compose 显式配置 PostgreSQL URL，并在 repository 未完全实现时拒绝伪装为可用的 PostgreSQL 运行时。
+通过 `scripts/start-windows.ps1` 启动，默认仅监听 `127.0.0.1`。启动时获取 `<data-root>/state/instance.lock` 排他锁；已有实例会失败退出（`REQ-002`）。可用 `YUANZHIKU_DATA_ROOT` 覆盖数据根。`YUANZHIKU_DATABASE_URL` 未设置时使用 SQLite。显式 SQLite URL 使用 `sqlite://`；PostgreSQL 使用 `postgresql://`、`postgres://` 或 SQLAlchemy driver URL（例如 Compose 的 `postgresql+psycopg://...`）。所有 PostgreSQL URL 都进入 PostgreSQL adapter；repository 未完全实现或连接/driver 配置无效时启动明确失败，绝不回落或伪装为 SQLite。
 
 每日首次成功启动入队一次低优先级 backup；备份在 `<data-root>/backups`，成功后保留最近 30 个日期项。备份为一致 SQLite 副本和 artifact 的 ZIP，清单为 SHA-256；不含模型、staging 或日志正文（`REQ-040`）。
 

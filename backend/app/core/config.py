@@ -8,6 +8,7 @@ import socket
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO
+from urllib.parse import urlsplit
 
 DEFAULT_DATA_ROOT = Path(r"E:\源知库\data")
 
@@ -69,6 +70,25 @@ def data_paths(root: str | Path | None = None) -> DataPaths:
 def database_url(paths: DataPaths) -> str:
     """Select SQLite by default; Compose supplies an explicit PostgreSQL URL."""
     return os.environ.get("YUANZHIKU_DATABASE_URL", f"sqlite:///{paths.database.as_posix()}")
+
+
+class DatabaseUrlConfigurationError(ValueError):
+    """Raised when the configured database backend is not supported."""
+
+
+def database_backend(value: str) -> str:
+    """Classify a configured URL without exposing its credentials in errors."""
+    scheme = urlsplit(value).scheme.lower()
+    if scheme == "sqlite":
+        return "sqlite"
+    if scheme in {"postgresql", "postgres"} or scheme.startswith(("postgresql+", "postgres+")):
+        return "postgresql"
+    display_scheme = scheme or "missing"
+    raise DatabaseUrlConfigurationError(
+        "YUANZHIKU_DATABASE_URL 必须使用 sqlite:// URL，或 PostgreSQL URL "
+        "(postgresql://、postgres://、postgresql+<driver>://、postgres+<driver>://)；"
+        f"当前 scheme 为 {display_scheme!r}"
+    )
 
 
 def _available(port: int) -> bool:
