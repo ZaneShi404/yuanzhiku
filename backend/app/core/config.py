@@ -66,6 +66,11 @@ def data_paths(root: str | Path | None = None) -> DataPaths:
     return DataPaths(Path(selected).expanduser().resolve())
 
 
+def database_url(paths: DataPaths) -> str:
+    """Select SQLite by default; Compose supplies an explicit PostgreSQL URL."""
+    return os.environ.get("YUANZHIKU_DATABASE_URL", f"sqlite:///{paths.database.as_posix()}")
+
+
 def _available(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)

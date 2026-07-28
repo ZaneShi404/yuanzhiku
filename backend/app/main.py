@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.adapters.sqlite import SqliteRepository
 from app.adapters.storage import ArtifactStore, StorageLimitError
-from app.core.config import DataPaths, InstanceLock, data_paths
+from app.core.config import DataPaths, InstanceLock, data_paths, database_url
 from app.core.operations import OperationalLog
 from app.domain.models import (
     DouyinCardCreate,
@@ -41,7 +41,7 @@ from app.services.imports import ImportService
 from app.services.jobs import JobService
 from app.services.lifecycle import LifecycleService
 from app.services.search import SearchService
-from app.services.transfers import TransferService
+from app.services.transfers import ReimportConflict, TransferService
 
 
 class ApplicationServices:
@@ -50,6 +50,12 @@ class ApplicationServices:
         self.paths = paths
         self.operations = OperationalLog(paths.logs)
         self.operations.prune()
+        selected_database_url = database_url(paths)
+        if selected_database_url.startswith(("postgresql://", "postgres://")):
+            from app.adapters.postgres import PostgresRepository
+
+            migrations = Path(__file__).resolve().parents[1] / "migrations" / "postgresql"
+            PostgresRepository(selected_database_url, migrations).initialize()
         self.repository = SqliteRepository(paths.database)
         self.repository.initialize()
         self.artifacts = ArtifactStore(paths)
@@ -234,6 +240,15 @@ def create_app(root: str | Path | None = None, *, acquire_lock: bool = True) -> 
             values["tags_json"] = json.dumps(sorted(set(values.pop("tags"))), ensure_ascii=False)
         return _source_view(svc.repository.update_source_metadata(source_id, values))
 
+    @app.get(f"{api}/sources/{{source_id}}/metadata-revisions", tags=["sources"])
+    def metadata_revisions(source_id: str, svc: ApplicationServices = Depends(get_services)) -> list[dict[str, Any]]:
+        if svc.repository.get_source(source_id) is None:
+            raise HTTPException(status_code=404, detail="来源不存在")
+        revisions = svc.repository.metadata_revisions_for_source(source_id)
+        for revision in revisions:
+            revision["snapshot"] = json.loads(revision.pop("snapshot_json"))
+        return revisions
+
     @app.put(f"{api}/sources/{{source_id}}/rights", tags=["sources"])
     def update_rights(source_id: str, rights: RightsCategory, svc: ApplicationServices = Depends(get_services)) -> dict[str, Any]:
         return _source_view(svc.repository.update_rights(source_id, rights.value))
@@ -319,9 +334,13 @@ def create_app(root: str | Path | None = None, *, acquire_lock: bool = True) -> 
     def search(
         q: str = "", include_historical: bool = False, include_incomplete: bool = False, source_type: str | None = None,
         category: str | None = None, tag: str | None = None, author: str | None = None, language: str | None = None,
-        processing_state: str | None = None, svc: ApplicationServices = Depends(get_services),
+        processing_state: str | None = None, sort: str = "relevance", svc: ApplicationServices = Depends(get_services),
     ) -> dict[str, Any]:
-        return {"mode": "短语、关键词、子串匹配；不提供语义检索", "items": svc.search.search(q, include_historical=include_historical, include_incomplete=include_incomplete, source_type=source_type, category=category, tag=tag, author=author, language=language, processing_state=processing_state)}
+        try:
+            items = svc.search.search(q, include_historical=include_historical, include_incomplete=include_incomplete, source_type=source_type, category=category, tag=tag, author=author, language=language, processing_state=processing_state, sort=sort)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {"mode": "短语、关键词、子串匹配；不提供语义检索", "sort": sort, "items": items}
 
     @app.get(f"{api}/tags", tags=["taxonomy"])
     def tags(svc: ApplicationServices = Depends(get_services)) -> list[str]:
@@ -452,6 +471,8 @@ def create_app(root: str | Path | None = None, *, acquire_lock: bool = True) -> 
     def reimport(request: ReimportRequest, svc: ApplicationServices = Depends(get_services)) -> dict[str, Any]:
         try:
             return svc.transfers.reimport(request.archive_path)
+        except ReimportConflict as exc:
+            raise HTTPException(status_code=409, detail=exc.report) from exc
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 

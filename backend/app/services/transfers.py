@@ -8,6 +8,8 @@ import os
 import shutil
 import sqlite3
 import tempfile
+import threading
+import uuid
 import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
@@ -20,11 +22,20 @@ from app.core.config import DataPaths
 ARCHIVE_SCHEMA_VERSION = 1
 
 
+class ReimportConflict(ValueError):
+    """A checked logical-record conflict that must return a 4xx report."""
+
+    def __init__(self, report: dict[str, Any]) -> None:
+        super().__init__("导入逻辑记录冲突")
+        self.report = report
+
+
 class TransferService:
     def __init__(self, paths: DataPaths, repository: SqliteRepository, artifacts: ArtifactStore) -> None:
         self.paths = paths
         self.repository = repository
         self.artifacts = artifacts
+        self._backup_lock = threading.RLock()
 
     @staticmethod
     def _sha256_path(path: Path) -> str:
@@ -55,6 +66,19 @@ class TransferService:
     def _add_file(self, archive: zipfile.ZipFile, path: Path, archive_name: str, entries: list[dict[str, Any]]) -> None:
         archive.write(path, archive_name)
         entries.append({"path": archive_name, "sha256": self._sha256_path(path), "byte_size": path.stat().st_size})
+
+    def _archive_path(self, directory: Path, prefix: str) -> Path:
+        """Reserve a unique archive name before any bytes are written."""
+        directory.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        while True:
+            candidate = directory / f"{prefix}-{timestamp}-{uuid.uuid4().hex}.zip"
+            try:
+                with candidate.open("xb"):
+                    pass
+                return candidate
+            except FileExistsError:
+                continue
 
     def _build_archive(self, archive_path: Path, archive_type: str) -> tuple[dict[str, Any], str]:
         stamp = datetime.now(UTC).isoformat()
@@ -87,39 +111,86 @@ class TransferService:
         return manifest, manifest_sha256
 
     def create_backup(self) -> dict[str, Any]:
-        self.paths.backups.mkdir(parents=True, exist_ok=True)
-        timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-        archive_name = f"backup-{timestamp}.zip"
-        archive_path = self.paths.backups / archive_name
-        _, manifest_sha256 = self._build_archive(archive_path, "backup")
-        if not self.verify_archive(archive_path)["valid"]:
-            archive_path.unlink(missing_ok=True)
-            raise ValueError("备份 SHA-256 验证失败")
-        record = self.repository.create_backup_record(archive_name, manifest_sha256)
-        self._prune_backups(30)
-        self.repository.audit("backup", record["id"], "succeeded")
-        return {**record, "archive_path": str(archive_path)}
+        # A record becomes succeeded only after its own unique archive is complete
+        # and verified. Any exception removes the temporary/published archive and
+        # its record, so restore never advertises a missing successful backup.
+        with self._backup_lock:
+            self._reconcile_incomplete_backup_records()
+            archive_path = self._archive_path(self.paths.backups, "backup")
+            record: dict[str, Any] | None = None
+            try:
+                _, manifest_sha256 = self._build_archive(archive_path, "backup")
+                if not self.verify_archive(archive_path)["valid"]:
+                    raise ValueError("备份 SHA-256 验证失败")
+                record = self.repository.create_backup_record(archive_path.name, manifest_sha256, state="succeeded")
+                self._prune_backups(30, protected_id=record["id"])
+                self.repository.audit("backup", record["id"], "succeeded")
+                return {**record, "archive_path": str(archive_path)}
+            except Exception:
+                if record is not None:
+                    # Never leave a record advertised as restorable while a
+                    # later filesystem cleanup may still be pending.
+                    self.repository.update_backup_state(record["id"], "discarding")
+                archive_path.unlink(missing_ok=True)
+                if record is not None:
+                    self.repository.delete_backup_record(record["id"])
+                raise
 
-    def _prune_backups(self, keep: int) -> None:
-        backups = self.repository.list_backups()
+    def _reconcile_incomplete_backup_records(self) -> None:
+        """Repair records left between the database and filesystem steps."""
+        for backup in self.repository.list_backups():
+            archive_path = self.paths.backups / backup["archive_name"]
+            if backup["state"] == "pruning":
+                if archive_path.is_file():
+                    self.repository.update_backup_state(backup["id"], "succeeded")
+                else:
+                    self.repository.delete_backup_record(backup["id"])
+            elif backup["state"] == "discarding":
+                try:
+                    archive_path.unlink()
+                except FileNotFoundError:
+                    self.repository.delete_backup_record(backup["id"])
+                except OSError:
+                    # Keep a non-success record for a future cleanup attempt.
+                    continue
+                else:
+                    self.repository.delete_backup_record(backup["id"])
+
+    def _prune_backups(self, keep: int, protected_id: str | None = None) -> None:
+        backups = [backup for backup in self.repository.list_backups() if backup["state"] == "succeeded"]
         seen_days: set[str] = set()
         stale: list[dict[str, Any]] = []
         for backup in backups:
             day = backup["created_at"][:10]
+            if backup["id"] == protected_id:
+                if day not in seen_days and len(seen_days) < keep:
+                    seen_days.add(day)
+                continue
             if day in seen_days or len(seen_days) >= keep:
                 stale.append(backup)
             else:
                 seen_days.add(day)
         for backup in stale:
-            (self.paths.backups / backup["archive_name"]).unlink(missing_ok=True)
+            archive_path = self.paths.backups / backup["archive_name"]
+            # Mark first so a file-system deletion failure cannot leave a record
+            # advertised as restorable. Delete the record only after unlinking.
+            self.repository.update_backup_state(backup["id"], "pruning")
+            try:
+                archive_path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                # The archive remains available, so keep it as a successful
+                # backup and retry retention on the next backup operation.
+                self.repository.update_backup_state(backup["id"], "succeeded")
+                continue
             self.repository.delete_backup_record(backup["id"])
 
     def create_export(self, confirmed: bool) -> dict[str, Any]:
         if not confirmed:
             raise ValueError("必须在界面确认后才能导出")
         self.paths.exports.mkdir(parents=True, exist_ok=True)
-        timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-        archive_path = self.paths.exports / f"export-{timestamp}.zip"
+        archive_path = self._archive_path(self.paths.exports, "export")
         manifest, manifest_sha256 = self._build_archive(archive_path, "export")
         verification = self.verify_archive(archive_path)
         if not verification["valid"]:
@@ -219,12 +290,13 @@ class TransferService:
             records = records_payload.get("records")
             if not isinstance(records, dict):
                 raise ValueError("逻辑记录无效")
-            tables = ["artifacts", "sources", "content_versions", "source_relations", "representations", "search_chunks", "evidence", "citations", "knowledge", "knowledge_evidence", "external_cards", "topics", "topic_sources"]
+            tables = ["artifacts", "sources", "source_metadata_revisions", "content_versions", "source_relations", "representations", "search_chunks", "evidence", "citations", "knowledge", "knowledge_evidence", "external_cards", "topics", "topic_sources"]
             primary_keys = {
-                "artifacts": ("sha256",), "sources": ("id",), "content_versions": ("id",), "source_relations": ("id",),
+                "artifacts": ("sha256",), "sources": ("id",), "source_metadata_revisions": ("id",), "content_versions": ("id",), "source_relations": ("id",),
                 "representations": ("id",), "search_chunks": ("id",), "evidence": ("id",), "citations": ("id",), "knowledge": ("id",),
                 "knowledge_evidence": ("knowledge_id", "evidence_id"), "external_cards": ("id",), "topics": ("id",), "topic_sources": ("topic_id", "source_id"),
             }
+            unique_keys = {"external_cards": ("card_type", "url"), "topics": ("name",), "source_metadata_revisions": ("source_id", "ordinal"), "content_versions": ("source_id", "ordinal"), "search_chunks": ("representation_id", "ordinal"), "source_relations": ("source_id", "related_source_id", "relation_type")}
             current = self.repository.rows_for_export()
             conflicts: list[str] = []
             pending: dict[str, list[dict[str, Any]]] = {}
@@ -244,34 +316,57 @@ class TransferService:
                             conflicts.append(f"{table}:{':'.join(key)}")
                     else:
                         pending[table].append(row)
+            # Natural keys are checked before copying an artifact. Same values are
+            # idempotent only if every logical value matches; different values are
+            # a reportable conflict even when the primary key is different.
+            for table, keys in unique_keys.items():
+                existing_by_key = {tuple(row[key] for key in keys): row for row in current[table]}
+                pending_by_key: dict[tuple[Any, ...], dict[str, Any]] = {}
+                for row in pending[table]:
+                    key = tuple(row[key] for key in keys)
+                    comparable = existing_by_key.get(key) or pending_by_key.get(key)
+                    if comparable is not None:
+                        if row != comparable:
+                            conflicts.append(f"{table}:unique:{':'.join(str(value) for value in key)}")
+                    else:
+                        pending_by_key[key] = row
             if conflicts:
-                return {"imported": False, "report": {"conflicts": conflicts, "reason": "同 ID 的逻辑链不同，已拒绝且未写入"}}
+                raise ReimportConflict({"conflicts": sorted(set(conflicts)), "reason": "逻辑链或唯一约束冲突，已拒绝且未写入"})
             artifact_entries = {entry["path"]: entry for entry in manifest.get("entries", [])}
-            for artifact in pending["artifacts"]:
-                sha256 = artifact["sha256"]
-                if self.artifacts.verify(sha256):
-                    continue
-                name = f"artifacts/{sha256[:2]}/{sha256}"
-                if name not in artifact_entries:
-                    raise ValueError("导入缺少 artifact")
-                destination = self.artifacts.artifact_path(sha256)
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                stage = self.paths.staging / f"reimport-{sha256}.part"
-                try:
-                    with archive.open(name) as source, stage.open("xb") as output:
-                        shutil.copyfileobj(source, output)
-                    if self._sha256_path(stage) != sha256:
-                        raise ValueError("导入 artifact 哈希不匹配")
-                    os.replace(stage, destination)
-                finally:
-                    stage.unlink(missing_ok=True)
-            # The insertion order respects foreign keys. Existing identical rows are left untouched.
-            with self.repository.connection() as connection:
-                for table in tables:
-                    for row in pending[table]:
-                        columns = list(row)
-                        placeholders = ",".join("?" for _ in columns)
-                        connection.execute(f"INSERT INTO {table}({','.join(columns)}) VALUES({placeholders})", [row[column] for column in columns])
+            created_artifacts: list[str] = []
+            try:
+                with self.artifacts.operation():
+                    for artifact in pending["artifacts"]:
+                        sha256 = artifact["sha256"]
+                        if self.artifacts.verify(sha256):
+                            continue
+                        name = f"artifacts/{sha256[:2]}/{sha256}"
+                        if name not in artifact_entries:
+                            raise ValueError("导入缺少 artifact")
+                        destination = self.artifacts.artifact_path(sha256)
+                        destination.parent.mkdir(parents=True, exist_ok=True)
+                        stage = self.paths.staging / f"reimport-{sha256}-{uuid.uuid4().hex}.part"
+                        try:
+                            with archive.open(name) as source, stage.open("xb") as output:
+                                shutil.copyfileobj(source, output)
+                            if self._sha256_path(stage) != sha256:
+                                raise ValueError("导入 artifact 哈希不匹配")
+                            os.replace(stage, destination)
+                            created_artifacts.append(sha256)
+                        finally:
+                            stage.unlink(missing_ok=True)
+                    # The insertion order respects foreign keys. Existing identical rows are left untouched.
+                    with self.repository.connection() as connection:
+                        for table in tables:
+                            for row in pending[table]:
+                                columns = list(row)
+                                placeholders = ",".join("?" for _ in columns)
+                                connection.execute(f"INSERT INTO {table}({','.join(columns)}) VALUES({placeholders})", [row[column] for column in columns])
+            except Exception:
+                for sha256 in created_artifacts:
+                    if self.repository.delete_artifact_if_unreferenced(sha256):
+                        self.artifacts.delete(sha256)
+                raise
         imported_count = sum(len(rows) for rows in pending.values())
         self.repository.audit("reimport", None, "succeeded")
         return {"imported": True, "report": {"conflicts": [], "inserted_records": imported_count, "imported_artifacts": len(pending["artifacts"])}}

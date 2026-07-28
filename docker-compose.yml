@@ -5,6 +5,7 @@ services:
       dockerfile: Dockerfile
     environment:
       YUANZHIKU_DATA_ROOT: /data
+      YUANZHIKU_DATABASE_URL: postgresql+psycopg://yuanzhiku:yuanzhiku_local_only@postgres:5432/yuanzhiku
       YUANZHIKU_EMBEDDED_WORKER: "false"
     volumes:
       - ${YUANZHIKU_COMPOSE_DATA_ROOT:?Set to tests/runtime/compose-<run-id> for integration tests}:/data
@@ -22,6 +23,7 @@ services:
       dockerfile: Dockerfile
     environment:
       YUANZHIKU_DATA_ROOT: /data
+      YUANZHIKU_DATABASE_URL: postgresql+psycopg://yuanzhiku:yuanzhiku_local_only@postgres:5432/yuanzhiku
       YUANZHIKU_EMBEDDED_WORKER: "false"
     volumes:
       - ${YUANZHIKU_COMPOSE_DATA_ROOT:?Set to tests/runtime/compose-<run-id> for integration tests}:/data

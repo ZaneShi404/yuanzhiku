@@ -10,6 +10,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Iterator
+from urllib.parse import urlsplit, urlunsplit
 
 
 def now() -> str:
@@ -18,6 +19,17 @@ def now() -> str:
 
 def identifier() -> str:
     return uuid.uuid4().hex
+
+
+def redact_url_userinfo(value: str) -> str:
+    """Return a URL without userinfo for legacy records and portable exports."""
+    parsed = urlsplit(value)
+    if not (parsed.username or parsed.password):
+        return value
+    host = parsed.hostname or ""
+    if parsed.port is not None:
+        host = f"{host}:{parsed.port}"
+    return urlunsplit((parsed.scheme, host, parsed.path, parsed.query, parsed.fragment))
 
 
 SCHEMA = """
@@ -33,6 +45,11 @@ CREATE TABLE IF NOT EXISTS sources (
     tags_json TEXT NOT NULL, processing_state TEXT NOT NULL, imported_at TEXT NOT NULL,
     updated_at TEXT NOT NULL, deleted_at TEXT
 );
+CREATE TABLE IF NOT EXISTS source_metadata_revisions (
+    id TEXT PRIMARY KEY, source_id TEXT NOT NULL REFERENCES sources(id), ordinal INTEGER NOT NULL,
+    snapshot_json TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(source_id, ordinal)
+);
+CREATE INDEX IF NOT EXISTS idx_metadata_revisions_source ON source_metadata_revisions(source_id, ordinal DESC);
 CREATE TABLE IF NOT EXISTS content_versions (
     id TEXT PRIMARY KEY, source_id TEXT NOT NULL REFERENCES sources(id), artifact_sha256 TEXT NOT NULL REFERENCES artifacts(sha256),
     ordinal INTEGER NOT NULL, original_name TEXT NOT NULL, media_type TEXT, completeness TEXT NOT NULL,
@@ -99,7 +116,7 @@ CREATE TABLE IF NOT EXISTS topic_sources (
     PRIMARY KEY(topic_id, source_id)
 );
 CREATE TABLE IF NOT EXISTS backups (
-    id TEXT PRIMARY KEY, archive_name TEXT NOT NULL, manifest_sha256 TEXT NOT NULL, state TEXT NOT NULL, created_at TEXT NOT NULL
+    id TEXT PRIMARY KEY, archive_name TEXT NOT NULL UNIQUE, manifest_sha256 TEXT NOT NULL, state TEXT NOT NULL, created_at TEXT NOT NULL
 );
 """
 
@@ -130,6 +147,22 @@ class SqliteRepository:
             connection.executescript(SCHEMA)
             connection.execute(
                 "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(1, ?)", (now(),)
+            )
+            # Older databases allowed multiple records to point at one archive.
+            # Retain the newest record before adding the uniqueness constraint.
+            duplicate_names = connection.execute(
+                "SELECT archive_name FROM backups GROUP BY archive_name HAVING COUNT(*) > 1"
+            ).fetchall()
+            for duplicate in duplicate_names:
+                rows = connection.execute(
+                    "SELECT id FROM backups WHERE archive_name=? ORDER BY created_at DESC, id DESC",
+                    (duplicate["archive_name"],),
+                ).fetchall()
+                for row in rows[1:]:
+                    connection.execute("DELETE FROM backups WHERE id=?", (row["id"],))
+            connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_backups_archive_name ON backups(archive_name)")
+            connection.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(2, ?)", (now(),)
             )
             defaults = {
                 "parser_timeout_seconds": "86400",
@@ -176,6 +209,32 @@ class SqliteRepository:
                 (sha256, byte_size, now()),
             )
 
+    @staticmethod
+    def _metadata_snapshot(row: sqlite3.Row) -> dict[str, Any]:
+        fields = ("title", "author", "language", "notes", "rights", "categories_json", "tags_json")
+        return {field: row[field] for field in fields}
+
+    def _record_metadata_revision(self, connection: sqlite3.Connection, source_id: str, stamp: str) -> None:
+        source = connection.execute("SELECT * FROM sources WHERE id=?", (source_id,)).fetchone()
+        if source is None:
+            return
+        ordinal = connection.execute(
+            "SELECT COALESCE(MAX(ordinal), 0) + 1 AS ordinal FROM source_metadata_revisions WHERE source_id=?",
+            (source_id,),
+        ).fetchone()["ordinal"]
+        connection.execute(
+            "INSERT INTO source_metadata_revisions(id,source_id,ordinal,snapshot_json,created_at) VALUES(?,?,?,?,?)",
+            (identifier(), source_id, ordinal, json.dumps(self._metadata_snapshot(source), ensure_ascii=False), stamp),
+        )
+
+    @staticmethod
+    def _configured_max_attempts(connection: sqlite3.Connection) -> int:
+        row = connection.execute("SELECT value FROM settings WHERE key='max_retry_attempts'").fetchone()
+        try:
+            return max(0, min(10, int(row["value"]))) if row else 2
+        except (TypeError, ValueError):
+            return 2
+
     def create_source_with_version(
         self,
         *, source_type: str, title: str, author: str | None, language: str, notes: str | None,
@@ -200,7 +259,54 @@ class SqliteRepository:
                    VALUES(?,?,?,?,?,?,?,?)""",
                 (version_id, source_id, artifact_sha256, 1, original_name, media_type, "pending", stamp),
             )
+            self._record_metadata_revision(connection, source_id, stamp)
         return self.get_source(source_id) or {}, self.get_version(version_id) or {}
+
+    def create_ingest(
+        self,
+        *, source_type: str, title: str, author: str | None, language: str, notes: str | None,
+        rights: str, categories: list[str], tags: list[str], artifact_sha256: str, original_name: str,
+        media_type: str | None, byte_size: int, job_payload: dict[str, Any], priority: int,
+        audit_event: str,
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+        """Persist every logical ingest record in one transaction.
+
+        The caller compensates the physical artifact only when this transaction
+        fails and it created the content-addressed file itself.
+        """
+        source_id = identifier()
+        version_id = identifier()
+        job_id = identifier()
+        stamp = now()
+        with self.connection() as connection:
+            connection.execute(
+                "INSERT OR IGNORE INTO artifacts(sha256, byte_size, stored_at) VALUES(?, ?, ?)",
+                (artifact_sha256, byte_size, stamp),
+            )
+            connection.execute(
+                """INSERT INTO sources(id,source_type,title,author,language,notes,rights,categories_json,tags_json,processing_state,imported_at,updated_at,deleted_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,NULL)""",
+                (source_id, source_type, title, author, language, notes, rights, json.dumps(categories), json.dumps(tags), "queued", stamp, stamp),
+            )
+            connection.execute(
+                """INSERT INTO content_versions(id,source_id,artifact_sha256,ordinal,original_name,media_type,completeness,created_at)
+                   VALUES(?,?,?,?,?,?,?,?)""",
+                (version_id, source_id, artifact_sha256, 1, original_name, media_type, "pending", stamp),
+            )
+            connection.execute(
+                """INSERT INTO jobs(id,kind,source_id,content_version_id,artifact_sha256,config_hash,payload_json,priority,state,progress,message,attempt_count,max_attempts,created_at,updated_at)
+                   VALUES(?,?,?,?,?,?,?,?,? ,0,NULL,0,?,?,?)""",
+                (job_id, "parse", source_id, version_id, artifact_sha256, None, json.dumps(job_payload), priority, "queued", self._configured_max_attempts(connection), stamp, stamp),
+            )
+            connection.execute(
+                "INSERT INTO audit_events(id, event_type, entity_id, result, created_at) VALUES(?, ?, ?, ?, ?)",
+                (identifier(), audit_event, source_id, "queued", stamp),
+            )
+            self._record_metadata_revision(connection, source_id, stamp)
+            source = self._row(connection.execute("SELECT * FROM sources WHERE id=?", (source_id,)).fetchone()) or {}
+            version = self._row(connection.execute("SELECT * FROM content_versions WHERE id=?", (version_id,)).fetchone()) or {}
+            job = self._row(connection.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()) or {}
+        return source, version, job
 
     def list_sources(self, include_deleted: bool = False) -> list[dict[str, Any]]:
         where = "" if include_deleted else "WHERE deleted_at IS NULL"
@@ -227,13 +333,25 @@ class SqliteRepository:
             return self.get_source(source_id)
         assignments = ", ".join(f"{key}=?" for key, _ in fields) + ", updated_at=?"
         with self.connection() as connection:
-            connection.execute(f"UPDATE sources SET {assignments} WHERE id=?", [value for _, value in fields] + [now(), source_id])
+            stamp = now()
+            updated = connection.execute(f"UPDATE sources SET {assignments} WHERE id=?", [value for _, value in fields] + [stamp, source_id]).rowcount
+            if updated:
+                self._record_metadata_revision(connection, source_id, stamp)
         return self.get_source(source_id)
 
     def update_rights(self, source_id: str, rights: str) -> dict[str, Any] | None:
         with self.connection() as connection:
-            connection.execute("UPDATE sources SET rights=?, updated_at=? WHERE id=?", (rights, now(), source_id))
+            stamp = now()
+            updated = connection.execute("UPDATE sources SET rights=?, updated_at=? WHERE id=?", (rights, stamp, source_id)).rowcount
+            if updated:
+                self._record_metadata_revision(connection, source_id, stamp)
         return self.get_source(source_id)
+
+    def metadata_revisions_for_source(self, source_id: str) -> list[dict[str, Any]]:
+        with self.connection() as connection:
+            return self._rows(connection.execute(
+                "SELECT * FROM source_metadata_revisions WHERE source_id=? ORDER BY ordinal DESC", (source_id,)
+            ).fetchall())
 
     def add_relation(self, source_id: str, related_source_id: str, relation_type: str) -> dict[str, Any]:
         relation_id = identifier()
@@ -373,7 +491,7 @@ class SqliteRepository:
             connection.execute(
                 """INSERT INTO jobs(id,kind,source_id,content_version_id,artifact_sha256,config_hash,payload_json,priority,state,progress,message,attempt_count,max_attempts,created_at,updated_at)
                    VALUES(?,?,?,?,?,?,?,?,? ,0,NULL,0,?,?,?)""",
-                (job_id, kind, source_id, version_id, artifact_sha256, config_hash, json.dumps(payload), priority, "queued", 2, stamp, stamp),
+                (job_id, kind, source_id, version_id, artifact_sha256, config_hash, json.dumps(payload), priority, "queued", self._configured_max_attempts(connection), stamp, stamp),
             )
             return self._row(connection.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()) or {}
 
@@ -434,6 +552,10 @@ class SqliteRepository:
                         (current["state"], now(), current["state"], job_id, current["attempt_count"]),
                     )
 
+    def touch_job(self, job_id: str) -> None:
+        with self.connection() as connection:
+            connection.execute("UPDATE jobs SET heartbeat_at=?, updated_at=? WHERE id=?", (now(), now(), job_id))
+
     def request_cancel(self, job_id: str) -> dict[str, Any] | None:
         with self.connection() as connection:
             connection.execute("UPDATE jobs SET cancel_requested_at=?, updated_at=? WHERE id=? AND state IN ('queued','retry_wait','running')", (now(), now(), job_id))
@@ -460,7 +582,10 @@ class SqliteRepository:
 
     def list_external_cards(self) -> list[dict[str, Any]]:
         with self.connection() as connection:
-            return self._rows(connection.execute("SELECT * FROM external_cards ORDER BY created_at DESC").fetchall())
+            rows = self._rows(connection.execute("SELECT * FROM external_cards ORDER BY created_at DESC").fetchall())
+        for row in rows:
+            row["url"] = redact_url_userinfo(row["url"])
+        return rows
 
     def create_topic(self, name: str, source_ids: list[str]) -> dict[str, Any]:
         topic_id = identifier()
@@ -491,6 +616,24 @@ class SqliteRepository:
         with self.connection() as connection:
             return [row["artifact_sha256"] for row in connection.execute("SELECT artifact_sha256 FROM content_versions WHERE source_id=?", (source_id,))]
 
+    def delete_artifact_if_unreferenced(self, sha256: str) -> bool:
+        """Remove only an artifact with no remaining logical reference.
+
+        Returning true when no reference exists permits callers to compensate a
+        newly-created file even when its transaction never inserted the DB row.
+        """
+        with self.connection() as connection:
+            referenced = connection.execute(
+                """SELECT 1 FROM content_versions WHERE artifact_sha256=?
+                   UNION SELECT 1 FROM evidence WHERE artifact_sha256=?
+                   UNION SELECT 1 FROM jobs WHERE artifact_sha256=? LIMIT 1""",
+                (sha256, sha256, sha256),
+            ).fetchone()
+            if referenced:
+                return False
+            connection.execute("DELETE FROM artifacts WHERE sha256=?", (sha256,))
+            return True
+
     def purge_source(self, source_id: str) -> list[str]:
         """Delete logical data and return artifacts no longer referenced by active sources."""
         with self.connection() as connection:
@@ -510,22 +653,25 @@ class SqliteRepository:
             connection.execute("DELETE FROM source_relations WHERE source_id=? OR related_source_id=?", (source_id, source_id))
             connection.execute("DELETE FROM topic_sources WHERE source_id=?", (source_id,))
             connection.execute("DELETE FROM content_versions WHERE source_id=?", (source_id,))
+            connection.execute("DELETE FROM source_metadata_revisions WHERE source_id=?", (source_id,))
             connection.execute("DELETE FROM sources WHERE id=?", (source_id,))
             orphaned: list[str] = []
             for sha256 in hashes:
-                active_count = connection.execute(
-                    """SELECT COUNT(*) AS n FROM content_versions v JOIN sources s ON s.id=v.source_id
-                       WHERE v.artifact_sha256=? AND s.deleted_at IS NULL""", (sha256,)
+                reference_count = connection.execute(
+                    "SELECT COUNT(*) AS n FROM content_versions WHERE artifact_sha256=?", (sha256,)
                 ).fetchone()["n"]
-                if not active_count:
+                if not reference_count:
                     connection.execute("DELETE FROM artifacts WHERE sha256=?", (sha256,))
                     orphaned.append(sha256)
             return orphaned
 
     def rows_for_export(self) -> dict[str, list[dict[str, Any]]]:
-        tables = ["artifacts", "sources", "content_versions", "source_relations", "representations", "search_chunks", "evidence", "citations", "knowledge", "knowledge_evidence", "external_cards", "topics", "topic_sources"]
+        tables = ["artifacts", "sources", "source_metadata_revisions", "content_versions", "source_relations", "representations", "search_chunks", "evidence", "citations", "knowledge", "knowledge_evidence", "external_cards", "topics", "topic_sources"]
         with self.connection() as connection:
-            return {table: self._rows(connection.execute(f"SELECT * FROM {table}").fetchall()) for table in tables}
+            rows = {table: self._rows(connection.execute(f"SELECT * FROM {table}").fetchall()) for table in tables}
+        for card in rows["external_cards"]:
+            card["url"] = redact_url_userinfo(card["url"])
+        return rows
 
     def create_backup_record(self, archive_name: str, manifest_sha256: str, state: str = "succeeded") -> dict[str, Any]:
         backup_id = identifier()
@@ -536,6 +682,10 @@ class SqliteRepository:
     def delete_backup_record(self, backup_id: str) -> None:
         with self.connection() as connection:
             connection.execute("DELETE FROM backups WHERE id=?", (backup_id,))
+
+    def update_backup_state(self, backup_id: str, state: str) -> None:
+        with self.connection() as connection:
+            connection.execute("UPDATE backups SET state=? WHERE id=?", (state, backup_id))
 
     def list_backups(self) -> list[dict[str, Any]]:
         with self.connection() as connection:

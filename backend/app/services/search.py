@@ -11,7 +11,9 @@ class SearchService:
     def __init__(self, repository: SqliteRepository) -> None:
         self.repository = repository
 
-    def search(self, query: str, *, include_historical: bool = False, include_incomplete: bool = False, source_type: str | None = None, category: str | None = None, tag: str | None = None, author: str | None = None, language: str | None = None, processing_state: str | None = None) -> list[dict]:
+    def search(self, query: str, *, include_historical: bool = False, include_incomplete: bool = False, source_type: str | None = None, category: str | None = None, tag: str | None = None, author: str | None = None, language: str | None = None, processing_state: str | None = None, sort: str = "relevance") -> list[dict]:
+        if sort not in {"relevance", "updated", "title"}:
+            raise ValueError("不支持的排序方式")
         needle = query.strip().casefold()
         candidates: list[dict] = []
         for source in self.repository.list_sources():
@@ -49,5 +51,9 @@ class SearchService:
             relevance = text.casefold().count(needle) if needle else 1
             if relevance:
                 candidates.append({"kind": "external_card", "id": card["id"], "title": card["title"], "card_type": card["card_type"], "relevance": relevance, "updated_at": card["created_at"]})
+        if sort == "title":
+            return sorted(candidates, key=lambda item: (item["title"].casefold(), item["updated_at"] or ""))
+        if sort == "updated":
+            return sorted(candidates, key=lambda item: (item["updated_at"] or "", item["title"].casefold()), reverse=True)
         # Relevance first, then newest import/update, then title. ISO-8601 timestamps sort chronologically when reversed.
         return sorted(sorted(candidates, key=lambda item: item["title"].casefold()), key=lambda item: (item["relevance"], item["updated_at"] or ""), reverse=True)

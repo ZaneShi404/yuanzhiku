@@ -5,7 +5,9 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
+import threading
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
@@ -32,6 +34,16 @@ class StoredArtifact:
 class ArtifactStore:
     def __init__(self, paths: DataPaths) -> None:
         self.paths = paths
+        # The process-wide instance lock prevents another application instance from
+        # using this data root. This lock additionally serializes file/database
+        # compensations between concurrent requests in this instance.
+        self._operation_lock = threading.RLock()
+
+    @contextmanager
+    def operation(self):
+        """Keep a multi-step artifact operation mutually exclusive."""
+        with self._operation_lock:
+            yield
 
     def artifact_path(self, sha256: str) -> Path:
         return self.paths.artifacts / sha256[:2] / sha256
@@ -45,6 +57,10 @@ class ArtifactStore:
             raise StorageLimitError("可用空间不足：需要文件两倍空间且导入后保留 10GB")
 
     def store_stream(self, stream: BinaryIO, expected_bytes: int | None = None) -> StoredArtifact:
+        with self.operation():
+            return self._store_stream(stream, expected_bytes)
+
+    def _store_stream(self, stream: BinaryIO, expected_bytes: int | None = None) -> StoredArtifact:
         if expected_bytes is not None:
             self.check_capacity(expected_bytes)
         self.paths.staging.mkdir(parents=True, exist_ok=True)

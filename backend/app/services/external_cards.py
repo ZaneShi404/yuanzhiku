@@ -15,17 +15,17 @@ class ExternalCardService:
     @staticmethod
     def _valid_general_url(value: str) -> bool:
         parsed = urlparse(value)
-        return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+        return parsed.scheme in {"http", "https"} and bool(parsed.hostname) and parsed.username is None and parsed.password is None
 
     @staticmethod
     def _valid_douyin_url(value: str) -> bool:
         parsed = urlparse(value)
         host = (parsed.hostname or "").lower()
-        return parsed.scheme == "https" and (host == "douyin.com" or host.endswith(".douyin.com"))
+        return parsed.scheme == "https" and parsed.username is None and parsed.password is None and (host == "douyin.com" or host.endswith(".douyin.com"))
 
     def create(self, request: ExternalCardCreate) -> dict:
         if not self._valid_general_url(request.url):
-            raise ValueError("URL 必须是完整 HTTP 或 HTTPS 地址")
+            raise ValueError("URL 必须是无凭据的完整 HTTP 或 HTTPS 地址")
         return self.repository.create_external_card("general", request.url, request.title, request.author, request.notes, request.tags)
 
     def create_douyin(self, request: DouyinCardCreate) -> dict:

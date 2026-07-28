@@ -21,9 +21,9 @@ class DocumentService:
         if fmt in {"md", "markdown", "txt"}:
             return {"type": "text_range", "heading": heading, "paragraph_ordinal": 1, "utf8_byte_range": [0, len(encoded)], "line_range": [1, end_line], "char_range": [0, len(text)]}
         if fmt == "pdf":
-            return {"type": "pdf_page_char_range", "page": 1, "char_range": [0, len(text)]}
+            return {"type": "pdf_char_range", "page": "unknown", "char_range": [0, len(text)]}
         if fmt == "docx":
-            return {"type": "docx_structure_char_range", "structure": "body", "paragraph_ordinal": 1, "char_range": [0, len(text)]}
+            return {"type": "docx_structure_char_range", "structure": "body", "paragraph_ordinal": "unknown", "char_range": [0, len(text)]}
         return {"type": "text_range", "char_range": [0, len(text)]}
 
     @staticmethod
@@ -32,24 +32,42 @@ class DocumentService:
         chunks = [text[offset:offset + chunk_size] for offset in range(0, len(text), chunk_size)] or [""]
         return [(chunk, hashlib.sha256(chunk.encode("utf-8")).hexdigest()) for chunk in chunks]
 
-    def record_parsed(self, version_id: str, artifact_sha256: str, text: str, parser_name: str, config_hash: str, fmt: str) -> dict:
+    def record_parsed(self, version_id: str, artifact_sha256: str, text: str, parser_name: str, config_hash: str, fmt: str, segments: tuple | list = ()) -> dict:
         representation = self.repository.create_representation(version_id, "extraction", parser_name, config_hash, text)
         version = self.repository.get_version(version_id)
         if version is None:
             raise KeyError("内容版本不存在")
         chunks = self.repository.create_search_chunks(version["source_id"], version_id, representation["id"], self.search_chunk_pairs(text))
-        excerpt = text[:300]
-        evidence = self.repository.create_evidence(
-            version_id=version_id,
-            artifact_sha256=artifact_sha256,
-            representation_id=representation["id"],
-            parser_config_hash=config_hash,
-            locator=self.native_locator(text, fmt),
-            excerpt=excerpt,
-            excerpt_hash=hashlib.sha256(excerpt.encode("utf-8")).hexdigest(),
-        )
-        citation = self.repository.create_citation(evidence["id"])
-        return {"representation": representation, "evidence": evidence, "citation": citation, "search_chunks": chunks}
+        evidence_items: list[dict] = []
+        # PDF/DOCX adapters emit native segments. One evidence record never spans
+        # several pages/paragraphs while pretending to locate only the first.
+        for segment in segments:
+            segment_text = text[segment.start:segment.end]
+            if not segment_text:
+                continue
+            excerpt = segment_text[:300]
+            evidence_items.append(self.repository.create_evidence(
+                version_id=version_id,
+                artifact_sha256=artifact_sha256,
+                representation_id=representation["id"],
+                parser_config_hash=config_hash,
+                locator=segment.locator,
+                excerpt=excerpt,
+                excerpt_hash=hashlib.sha256(excerpt.encode("utf-8")).hexdigest(),
+            ))
+        if not evidence_items:
+            excerpt = text[:300]
+            evidence_items.append(self.repository.create_evidence(
+                version_id=version_id,
+                artifact_sha256=artifact_sha256,
+                representation_id=representation["id"],
+                parser_config_hash=config_hash,
+                locator=self.native_locator(text, fmt),
+                excerpt=excerpt,
+                excerpt_hash=hashlib.sha256(excerpt.encode("utf-8")).hexdigest(),
+            ))
+        citations = [self.repository.create_citation(evidence["id"]) for evidence in evidence_items]
+        return {"representation": representation, "evidence": evidence_items[0], "evidence_items": evidence_items, "citation": citations[0], "citations": citations, "search_chunks": chunks}
 
     def create_manual_representation(self, version_id: str, request: ManualRepresentationCreate) -> dict:
         originals = self.repository.representations_for_version(version_id)

@@ -11,9 +11,11 @@
 | documents | `/documents/{version_id}/representations`, `/representations/{id}/evidence`, `/evidence/{id}`, `/citations`, `/knowledge`, `/knowledge/{id}/publish` | GET/POST | 保持证据链和发布校验 |
 | search | `/search` | GET | `q` 和显式 advanced 过滤参数 |
 | taxonomy | `/tags`, `/topics`, `/topics/{id}/sources` | GET/POST | 固定分类与主题关联 |
-| external | `/external/cards`, `/external/douyin` | GET/POST | 仅元数据，绝不发起 URL 请求 |
+| external | `/external/cards`, `/external/douyin` | GET/POST | 仅元数据，绝不发起 URL 请求；拒绝含用户名或密码的 URL |
 | jobs | `/jobs`, `/jobs/{id}`, `/jobs/{id}/cancel`, `/jobs/{id}/retry`, `/jobs/run-once` | GET/POST | 轮询和协作控制 |
 | lifecycle | `/sources/{id}/delete`, `/sources/{id}/restore`, `/sources/{id}/purge` | POST | 软删、恢复、永久删除 |
 | transfer | `/backups`, `/backups/{id}/restore`, `/exports`, `/reimports`, `/verify` | GET/POST | 新根还原、确认导出、hash 验证 |
+
+`POST /reimports` 在同一主键或自然唯一键的逻辑记录不一致时返回 `409`，响应 `detail` 包含稳定的 `conflicts` 数组和拒绝原因；该检查发生在 artifact 写入前。外部卡 URL 含 userinfo 时返回 `422`，不会持久化或触发任何网络请求。
 
 关键 DTO 定义由 `backend/app/domain/models.py` 中 Pydantic 模型和 FastAPI OpenAPI 生成，字段改动需同时更新本文件及 `docs/acceptance-matrix.md`（`REQ-043`）。
