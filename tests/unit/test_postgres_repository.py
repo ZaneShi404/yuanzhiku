@@ -14,6 +14,7 @@ import pytest
 
 from app.adapters.postgres import PostgresRepository
 from app.adapters.sqlite import BACKUP_TABLE_COLUMNS, BACKUP_TABLES
+from app.services.transfers import BACKUP_CATALOG_STATES
 from app.core.config import data_paths
 from app.domain.models import PasteImportRequest
 from app.main import ApplicationServices, create_app
@@ -114,9 +115,17 @@ def reset_fake_postgres_repository() -> None:
 
 
 def _complete_backup_records() -> dict[str, list[dict[str, Any]]]:
+    return {table: [] for table in BACKUP_TABLE_COLUMNS}
+
+
+def _catalog_record(state: str = "succeeded", ordinal: int = 0) -> dict[str, str]:
+    digest = hashlib.sha256(f"catalog-{state}-{ordinal}".encode()).hexdigest()
     return {
-        table: [{column: None for column in columns}]
-        for table, columns in BACKUP_TABLE_COLUMNS.items()
+        "id": f"backup-{state}-{ordinal}",
+        "archive_name": f"backup-{state}-{ordinal}.zip",
+        "manifest_sha256": digest,
+        "state": state,
+        "created_at": "2026-07-29T00:00:00+00:00",
     }
 
 
@@ -135,9 +144,7 @@ def _logical_backup_archive(path: Path, records: dict[str, list[dict[str, Any]]]
 def test_postgres_logical_backup_archive_includes_catalog(runtime_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     app = create_app(runtime_root, acquire_lock=False)
     records = _complete_backup_records()
-    records["backups"][0].update({
-        "id": "backup-id", "archive_name": "backup.zip", "manifest_sha256": "digest", "state": "succeeded", "created_at": "2026-07-29T00:00:00+00:00",
-    })
+    records["backups"] = [_catalog_record()]
 
     class LogicalBackupSource:
         backend = "postgresql"
@@ -156,7 +163,7 @@ def test_postgres_logical_backup_archive_includes_catalog(runtime_root: Path, mo
 
 def test_postgres_logical_backup_inventory_restores_catalog_and_export_excludes_it(monkeypatch: pytest.MonkeyPatch) -> None:
     source_rows = {table: [] for table in BACKUP_TABLES}
-    source_rows["backups"] = [{"id": "backup-id", "archive_name": "backup.zip", "manifest_sha256": "digest", "state": "succeeded", "created_at": "2026-07-29T00:00:00+00:00"}]
+    source_rows["backups"] = [_catalog_record()]
     connection = _RecordingConnection(source_rows)
     repository = PostgresRepository("postgresql://example", MIGRATIONS)
 
@@ -173,16 +180,24 @@ def test_postgres_logical_backup_inventory_restores_catalog_and_export_excludes_
     assert any(statement.startswith("INSERT INTO backups(") for statement, _ in connection.statements)
 
 
-def test_postgres_logical_restore_preserves_catalog_and_rejects_invalid_target_state(
-    runtime_root: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    "catalog_rows",
+    [
+        pytest.param([], id="empty-catalog"),
+        pytest.param(
+            [_catalog_record(state, ordinal) for ordinal, state in enumerate(sorted(BACKUP_CATALOG_STATES))],
+            id="every-supported-state",
+        ),
+    ],
+)
+def test_postgres_logical_restore_preserves_complete_valid_catalogs(
+    runtime_root: Path, monkeypatch: pytest.MonkeyPatch, catalog_rows: list[dict[str, str]]
 ) -> None:
     app = create_app(runtime_root, acquire_lock=False)
     services = app.state.services
     archive_path = runtime_root / "logical-backup.zip"
     records = _complete_backup_records()
-    records["backups"][0].update({
-        "id": "backup-id", "archive_name": "backup.zip", "manifest_sha256": "digest", "state": "succeeded", "created_at": "2026-07-29T00:00:00+00:00",
-    })
+    records["backups"] = catalog_rows
     _logical_backup_archive(archive_path, records)
     monkeypatch.setattr("app.adapters.postgres.PostgresRepository", _FakePostgresRepository)
 
@@ -190,7 +205,7 @@ def test_postgres_logical_restore_preserves_catalog_and_rejects_invalid_target_s
 
     assert result["archive_type"] == "backup"
     assert _FakePostgresRepository.recorded_rows == records
-    assert _FakePostgresRepository.recorded_rows["backups"][0]["id"] == "backup-id"
+    assert _FakePostgresRepository.recorded_rows["backups"] == catalog_rows
     assert not (runtime_root / "restored" / "state" / "knowledge.db").exists()
 
     _FakePostgresRepository.nonempty = True
@@ -198,7 +213,45 @@ def test_postgres_logical_restore_preserves_catalog_and_rejects_invalid_target_s
         services.transfers._restore_archive(archive_path, str(runtime_root / "nonempty"), "postgresql://target")
 
 
-def test_postgres_logical_restore_rejects_missing_or_malformed_catalog_before_target_initialization(
+@pytest.mark.parametrize(
+    "catalog_rows",
+    [
+        [{column: None for column in BACKUP_TABLE_COLUMNS["backups"]}],
+        [{**_catalog_record(), "id": ""}],
+        [{**_catalog_record(), "archive_name": ["backup.zip"]}],
+        [{**_catalog_record(), "archive_name": "nested/backup.zip"}],
+        [{**_catalog_record(), "manifest_sha256": 123}],
+        [{**_catalog_record(), "manifest_sha256": "not-a-sha256"}],
+        [{**_catalog_record(), "state": ["succeeded"]}],
+        [{**_catalog_record(), "state": "unknown"}],
+        [{**_catalog_record(), "created_at": {"timestamp": "2026-07-29"}}],
+        [{**_catalog_record(), "created_at": "2026-07-29T00:00:00"}],
+        [_catalog_record(), _catalog_record()],
+    ],
+)
+def test_postgres_logical_restore_rejects_invalid_catalog_before_target_initialization_or_mutation(
+    runtime_root: Path, monkeypatch: pytest.MonkeyPatch, catalog_rows: list[dict[str, object]]
+) -> None:
+    app = create_app(runtime_root, acquire_lock=False)
+    services = app.state.services
+    monkeypatch.setattr("app.adapters.postgres.PostgresRepository", _FakePostgresRepository)
+
+    records = _complete_backup_records()
+    records["backups"] = catalog_rows
+    archive_path = runtime_root / "invalid-catalog.zip"
+    _logical_backup_archive(archive_path, records)
+    target = runtime_root / "empty-target"
+    target.mkdir()
+
+    with pytest.raises(ValueError, match="备份目录记录无效"):
+        services.transfers._restore_archive(archive_path, str(target), "postgresql://target")
+
+    assert _FakePostgresRepository.initialized == 0
+    assert target.is_dir()
+    assert list(target.iterdir()) == []
+
+
+def test_postgres_logical_restore_rejects_missing_catalog_before_target_initialization(
     runtime_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     app = create_app(runtime_root, acquire_lock=False)
@@ -212,16 +265,36 @@ def test_postgres_logical_restore_rejects_missing_or_malformed_catalog_before_ta
     with pytest.raises(ValueError, match="逻辑记录不完整"):
         services.transfers._restore_archive(missing_path, str(runtime_root / "missing-target"), "postgresql://target")
 
-    malformed = _complete_backup_records()
-    malformed["backups"] = [{"id": "only-id"}]
-    malformed_path = runtime_root / "malformed-catalog.zip"
-    _logical_backup_archive(malformed_path, malformed)
-    with pytest.raises(ValueError, match="逻辑记录无效"):
-        services.transfers._restore_archive(malformed_path, str(runtime_root / "malformed-target"), "postgresql://target")
-
     assert _FakePostgresRepository.initialized == 0
     assert not (runtime_root / "missing-target").exists()
-    assert not (runtime_root / "malformed-target").exists()
+
+
+def test_sqlite_portable_export_omits_operational_snapshot_and_reimports_business_records(runtime_root: Path) -> None:
+    donor = create_app(runtime_root / "donor", acquire_lock=False).state.services
+    imported = donor.imports.paste(PasteImportRequest(title="portable", text="portable business evidence", rights="owned"))
+    catalog = donor.repository.create_backup_record("prior-backup.zip", hashlib.sha256(b"prior").hexdigest())
+
+    backup = donor.transfers.create_backup()
+    exported = donor.transfers.create_export(True)
+
+    with ZipFile(backup["archive_path"]) as archive:
+        assert "state/knowledge.db" in archive.namelist()
+    with ZipFile(exported["archive_path"]) as archive:
+        manifest = json.loads(archive.read("manifest.json"))
+        records = json.loads(archive.read("records.json"))
+        assert "state/knowledge.db" not in archive.namelist()
+        assert all(entry["path"] != "state/knowledge.db" for entry in manifest["entries"])
+        assert "backups" not in records["records"]
+        assert catalog["id"].encode() not in b"".join(archive.read(name) for name in archive.namelist())
+    assert donor.transfers.verify_archive(Path(exported["archive_path"]))["valid"] is True
+
+    recipient = create_app(runtime_root / "recipient", acquire_lock=False).state.services
+    result = recipient.transfers.reimport(exported["archive_path"])
+
+    assert result["imported"] is True
+    assert recipient.repository.get_source(imported["source"]["id"]) is not None
+    assert recipient.repository.list_backups() == []
+    assert recipient.artifacts.verify(imported["artifact"]["sha256"])
 
 
 @pytest.mark.skipif(
@@ -234,7 +307,9 @@ def test_postgres_logical_backup_restore_preserves_catalog_in_empty_target(
     """Requires separate disposable source and empty target PostgreSQL databases."""
     monkeypatch.setenv("YUANZHIKU_DATABASE_URL", POSTGRES_TEST_URL or "")
     services = ApplicationServices(data_paths(runtime_root))
-    prior = services.repository.create_backup_record(f"prior-{uuid.uuid4().hex}.zip", "prior-digest")
+    prior = services.repository.create_backup_record(
+        f"prior-{uuid.uuid4().hex}.zip", hashlib.sha256(b"prior-catalog").hexdigest()
+    )
     backup = services.transfers.create_backup()
 
     with ZipFile(backup["archive_path"]) as archive:

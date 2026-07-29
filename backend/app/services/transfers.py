@@ -21,6 +21,7 @@ from app.core.config import DataPaths, database_backend
 from app.ports.repository import RepositoryPort
 
 ARCHIVE_SCHEMA_VERSION = 1
+BACKUP_CATALOG_STATES = frozenset({"succeeded", "pruning", "discarding"})
 
 
 class ReimportConflict(ValueError):
@@ -87,7 +88,10 @@ class TransferService:
         with tempfile.TemporaryDirectory(dir=self.paths.staging) as temp_name:
             temp = Path(temp_name)
             with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
-                if self.repository.backend == "sqlite":
+                # A SQLite snapshot is an operational complete-backup artifact.
+                # Portable exports are limited to portable logical records and
+                # artifacts, so they cannot carry local backup state.
+                if self.repository.backend == "sqlite" and archive_type == "backup":
                     snapshot = temp / "knowledge.db"
                     self._snapshot_database(snapshot)
                     self._add_file(archive, snapshot, "state/knowledge.db", entries)
@@ -294,7 +298,44 @@ class TransferService:
 
     @classmethod
     def _backup_records(cls, records_payload: Any) -> dict[str, list[dict[str, Any]]]:
-        return cls._logical_records(records_payload, BACKUP_TABLES)
+        records = cls._logical_records(records_payload, BACKUP_TABLES)
+        cls._validate_backup_catalog(records["backups"])
+        return records
+
+    @staticmethod
+    def _validate_backup_catalog(rows: list[dict[str, Any]]) -> None:
+        """Reject untrusted backup catalog rows before a PostgreSQL target is touched."""
+        identifiers: set[str] = set()
+        archive_names: set[str] = set()
+        for row in rows:
+            identifier = row["id"]
+            archive_name = row["archive_name"]
+            manifest_sha256 = row["manifest_sha256"]
+            state = row["state"]
+            created_at = row["created_at"]
+            if not all(isinstance(value, str) and value.strip() for value in row.values()):
+                raise ValueError("备份目录记录无效")
+            if (
+                "/" in archive_name
+                or "\\" in archive_name
+                or archive_name in {".", ".."}
+                or not archive_name.endswith(".zip")
+            ):
+                raise ValueError("备份目录记录无效")
+            if len(manifest_sha256) != 64 or any(character not in "0123456789abcdefABCDEF" for character in manifest_sha256):
+                raise ValueError("备份目录记录无效")
+            if state not in BACKUP_CATALOG_STATES:
+                raise ValueError("备份目录记录无效")
+            try:
+                timestamp = f"{created_at[:-1]}+00:00" if created_at.endswith("Z") else created_at
+                if datetime.fromisoformat(timestamp).tzinfo is None:
+                    raise ValueError
+            except ValueError as exc:
+                raise ValueError("备份目录记录无效") from exc
+            if identifier in identifiers or archive_name in archive_names:
+                raise ValueError("备份目录记录无效")
+            identifiers.add(identifier)
+            archive_names.add(archive_name)
 
     @classmethod
     def _export_records(cls, records_payload: Any) -> dict[str, list[dict[str, Any]]]:
