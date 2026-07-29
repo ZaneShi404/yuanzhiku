@@ -120,6 +120,40 @@ CREATE TABLE IF NOT EXISTS backups (
 );
 """
 
+EXPORT_TABLES = (
+    "artifacts", "sources", "source_metadata_revisions", "content_versions", "source_relations", "representations",
+    "search_chunks", "evidence", "citations", "knowledge", "knowledge_evidence", "external_cards", "topics",
+    "topic_sources",
+)
+
+BACKUP_TABLES = (
+    "settings", "artifacts", "sources", "source_metadata_revisions", "content_versions", "source_relations",
+    "representations", "search_chunks", "evidence", "citations", "knowledge", "knowledge_evidence", "jobs",
+    "job_attempts", "audit_events", "external_cards", "topics", "topic_sources", "backups",
+)
+
+BACKUP_TABLE_COLUMNS = {
+    "settings": ("key", "value", "updated_at"),
+    "artifacts": ("sha256", "byte_size", "stored_at"),
+    "sources": ("id", "source_type", "title", "author", "language", "notes", "rights", "categories_json", "tags_json", "processing_state", "imported_at", "updated_at", "deleted_at"),
+    "source_metadata_revisions": ("id", "source_id", "ordinal", "snapshot_json", "created_at"),
+    "content_versions": ("id", "source_id", "artifact_sha256", "ordinal", "original_name", "media_type", "completeness", "created_at"),
+    "source_relations": ("id", "source_id", "related_source_id", "relation_type", "created_at"),
+    "representations": ("id", "content_version_id", "kind", "parser_name", "config_hash", "parent_representation_id", "text_content", "created_at"),
+    "search_chunks": ("id", "source_id", "content_version_id", "representation_id", "ordinal", "text_content", "text_hash", "created_at"),
+    "evidence": ("id", "content_version_id", "artifact_sha256", "representation_id", "parser_config_hash", "locator_json", "excerpt", "excerpt_hash", "is_validated", "created_at"),
+    "citations": ("id", "evidence_id", "created_at"),
+    "knowledge": ("id", "kind", "statement", "status", "created_at", "published_at"),
+    "knowledge_evidence": ("knowledge_id", "evidence_id"),
+    "jobs": ("id", "kind", "source_id", "content_version_id", "artifact_sha256", "config_hash", "payload_json", "priority", "state", "progress", "message", "attempt_count", "max_attempts", "created_at", "updated_at", "heartbeat_at", "started_at", "completed_at", "cancel_requested_at"),
+    "job_attempts": ("id", "job_id", "attempt_number", "state", "started_at", "ended_at", "outcome"),
+    "audit_events": ("id", "event_type", "entity_id", "result", "created_at"),
+    "external_cards": ("id", "card_type", "url", "title", "author", "notes", "tags_json", "created_at"),
+    "topics": ("id", "name", "created_at"),
+    "topic_sources": ("topic_id", "source_id"),
+    "backups": ("id", "archive_name", "manifest_sha256", "state", "created_at"),
+}
+
 
 class SqliteRepository:
     backend = "sqlite"
@@ -677,18 +711,16 @@ class SqliteRepository:
             return orphaned
 
     def rows_for_export(self) -> dict[str, list[dict[str, Any]]]:
-        tables = ["artifacts", "sources", "source_metadata_revisions", "content_versions", "source_relations", "representations", "search_chunks", "evidence", "citations", "knowledge", "knowledge_evidence", "external_cards", "topics", "topic_sources"]
         with self.connection() as connection:
-            rows = {table: self._rows(connection.execute(f"SELECT * FROM {table}").fetchall()) for table in tables}
+            rows = {table: self._rows(connection.execute(f"SELECT * FROM {table}").fetchall()) for table in EXPORT_TABLES}
         for card in rows["external_cards"]:
             card["url"] = redact_url_userinfo(card["url"])
         return rows
 
     def insert_export_rows(self, rows_by_table: dict[str, list[dict[str, Any]]]) -> None:
         """Insert validated portable logical rows in foreign-key-safe order."""
-        tables = ["artifacts", "sources", "source_metadata_revisions", "content_versions", "source_relations", "representations", "search_chunks", "evidence", "citations", "knowledge", "knowledge_evidence", "external_cards", "topics", "topic_sources"]
         with self.connection() as connection:
-            for table in tables:
+            for table in EXPORT_TABLES:
                 for row in rows_by_table.get(table, []):
                     columns = list(row)
                     placeholders = ",".join("?" for _ in columns)
@@ -698,25 +730,15 @@ class SqliteRepository:
                     )
 
     def rows_for_backup(self) -> dict[str, list[dict[str, Any]]]:
-        tables = [
-            "settings", "artifacts", "sources", "source_metadata_revisions", "content_versions", "source_relations",
-            "representations", "search_chunks", "evidence", "citations", "knowledge", "knowledge_evidence", "jobs",
-            "job_attempts", "audit_events", "external_cards", "topics", "topic_sources",
-        ]
         with self.connection() as connection:
-            rows = {table: self._rows(connection.execute(f"SELECT * FROM {table}").fetchall()) for table in tables}
+            rows = {table: self._rows(connection.execute(f"SELECT * FROM {table}").fetchall()) for table in BACKUP_TABLES}
         for card in rows["external_cards"]:
             card["url"] = redact_url_userinfo(card["url"])
         return rows
 
     def insert_backup_rows(self, rows_by_table: dict[str, list[dict[str, Any]]]) -> None:
-        tables = [
-            "settings", "artifacts", "sources", "source_metadata_revisions", "content_versions", "source_relations",
-            "representations", "search_chunks", "evidence", "citations", "knowledge", "knowledge_evidence", "jobs",
-            "job_attempts", "audit_events", "external_cards", "topics", "topic_sources",
-        ]
         with self.connection() as connection:
-            for table in tables:
+            for table in BACKUP_TABLES:
                 for row in rows_by_table.get(table, []):
                     columns = list(row)
                     placeholders = ",".join("?" for _ in columns)

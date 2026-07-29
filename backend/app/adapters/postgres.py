@@ -15,7 +15,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Iterator
 
-from app.adapters.sqlite import SqliteRepository, identifier, now, redact_url_userinfo
+from app.adapters.sqlite import BACKUP_TABLES, EXPORT_TABLES, SqliteRepository, identifier, now, redact_url_userinfo
 
 
 _JSON_COLUMNS = {"categories_json", "tags_json", "snapshot_json", "locator_json", "payload_json"}
@@ -199,39 +199,24 @@ class PostgresRepository(SqliteRepository):
         return rows
 
     def rows_for_export(self) -> dict[str, list[dict[str, Any]]]:
-        tables = [
-            "artifacts", "sources", "source_metadata_revisions", "content_versions", "source_relations",
-            "representations", "search_chunks", "evidence", "citations", "knowledge", "knowledge_evidence",
-            "external_cards", "topics", "topic_sources",
-        ]
         with self.connection() as connection:
             connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
-            rows = {table: self._rows(connection.execute(f"SELECT * FROM {table}").fetchall()) for table in tables}
+            rows = {table: self._rows(connection.execute(f"SELECT * FROM {table}").fetchall()) for table in EXPORT_TABLES}
         for card in rows["external_cards"]:
             card["url"] = redact_url_userinfo(card["url"])
         return rows
 
     def rows_for_backup(self) -> dict[str, list[dict[str, Any]]]:
-        tables = [
-            "settings", "artifacts", "sources", "source_metadata_revisions", "content_versions", "source_relations",
-            "representations", "search_chunks", "evidence", "citations", "knowledge", "knowledge_evidence", "jobs",
-            "job_attempts", "audit_events", "external_cards", "topics", "topic_sources",
-        ]
         with self.connection() as connection:
             connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
-            rows = {table: self._rows(connection.execute(f"SELECT * FROM {table}").fetchall()) for table in tables}
+            rows = {table: self._rows(connection.execute(f"SELECT * FROM {table}").fetchall()) for table in BACKUP_TABLES}
         for card in rows["external_cards"]:
             card["url"] = redact_url_userinfo(card["url"])
         return rows
 
     def insert_backup_rows(self, rows_by_table: dict[str, list[dict[str, Any]]]) -> None:
-        tables = [
-            "settings", "artifacts", "sources", "source_metadata_revisions", "content_versions", "source_relations",
-            "representations", "search_chunks", "evidence", "citations", "knowledge", "knowledge_evidence", "jobs",
-            "job_attempts", "audit_events", "external_cards", "topics", "topic_sources",
-        ]
         with self.connection() as connection:
-            for table in tables:
+            for table in BACKUP_TABLES:
                 for row in rows_by_table.get(table, []):
                     columns = list(row)
                     placeholders = ",".join("?" for _ in columns)

@@ -15,7 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from app.adapters.sqlite import SqliteRepository
+from app.adapters.sqlite import BACKUP_TABLE_COLUMNS, BACKUP_TABLES, EXPORT_TABLES, SqliteRepository
 from app.adapters.storage import ArtifactStore
 from app.core.config import DataPaths, database_backend
 from app.ports.repository import RepositoryPort
@@ -238,8 +238,8 @@ class TransferService:
                     actual = hashlib.sha256(archive.read(path)).hexdigest()
                     if actual != entry.get("sha256"):
                         errors.append("条目哈希不匹配")
-                if manifest.get("archive_type") == "export" and "records.json" not in names:
-                    errors.append("导出缺少逻辑记录")
+                if manifest.get("archive_type") in {"backup", "export"} and "records.json" not in names:
+                    errors.append("归档缺少逻辑记录")
         except (zipfile.BadZipFile, json.JSONDecodeError, OSError, ValueError):
             errors.append("归档无法验证")
         return {"valid": not errors, "errors": sorted(set(errors))}
@@ -265,6 +265,41 @@ class TransferService:
             raise ValueError("还原目标必须不存在或为空")
         return target
 
+    @staticmethod
+    def _records_payload(archive: zipfile.ZipFile) -> dict[str, Any]:
+        try:
+            payload = json.loads(archive.read("records.json"))
+        except (KeyError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise ValueError("逻辑记录无效") from exc
+        if not isinstance(payload, dict):
+            raise ValueError("逻辑记录无效")
+        return payload
+
+    @staticmethod
+    def _logical_records(records_payload: Any, expected_tables: tuple[str, ...]) -> dict[str, list[dict[str, Any]]]:
+        if not isinstance(records_payload, dict) or records_payload.get("schema_version") != ARCHIVE_SCHEMA_VERSION:
+            raise ValueError("逻辑记录无效")
+        records = records_payload.get("records")
+        if not isinstance(records, dict) or set(records) != set(expected_tables):
+            raise ValueError("逻辑记录不完整")
+        for table in expected_tables:
+            rows = records[table]
+            if not isinstance(rows, list) or any(
+                not isinstance(row, dict)
+                or tuple(row) != BACKUP_TABLE_COLUMNS[table]
+                for row in rows
+            ):
+                raise ValueError("逻辑记录无效")
+        return records
+
+    @classmethod
+    def _backup_records(cls, records_payload: Any) -> dict[str, list[dict[str, Any]]]:
+        return cls._logical_records(records_payload, BACKUP_TABLES)
+
+    @classmethod
+    def _export_records(cls, records_payload: Any) -> dict[str, list[dict[str, Any]]]:
+        return cls._logical_records(records_payload, EXPORT_TABLES)
+
     def _restore_archive(self, archive_path: Path, target_root: str, target_database_url: str | None = None) -> dict[str, Any]:
         verification = self.verify_archive(archive_path)
         if not verification["valid"]:
@@ -272,10 +307,13 @@ class TransferService:
         target = self._target_paths(target_root)
         with zipfile.ZipFile(archive_path) as archive:
             manifest = json.loads(archive.read("manifest.json"))
-            if manifest["archive_type"] not in {"backup", "export"}:
+            archive_type = manifest.get("archive_type")
+            if archive_type not in {"backup", "export"}:
                 raise ValueError("不支持的归档类型")
             entry_names = {entry["path"] for entry in manifest["entries"]}
             if "state/knowledge.db" not in entry_names:
+                records_payload = self._records_payload(archive)
+                records = self._backup_records(records_payload) if archive_type == "backup" else self._export_records(records_payload)
                 if not target_database_url or database_backend(target_database_url) != "postgresql":
                     raise ValueError("PostgreSQL 备份还原需要新的 target_database_url")
                 from app.adapters.postgres import PostgresRepository
@@ -287,15 +325,14 @@ class TransferService:
                 target_repository.initialize()
                 if target_repository.has_user_records():
                     raise ValueError("PostgreSQL 还原目标必须为空")
-                records_payload = json.loads(archive.read("records.json"))
-                records = records_payload.get("records")
-                if records_payload.get("schema_version") != ARCHIVE_SCHEMA_VERSION or not isinstance(records, dict):
-                    raise ValueError("备份逻辑记录无效")
                 target.create()
                 self._extract_artifacts(archive, manifest, target)
-                target_repository.prepare_backup_restore()
-                target_repository.insert_backup_rows(records)
-                artifact_hashes = [row["sha256"] for row in records.get("artifacts", []) if isinstance(row, dict) and isinstance(row.get("sha256"), str)]
+                if archive_type == "backup":
+                    target_repository.prepare_backup_restore()
+                    target_repository.insert_backup_rows(records)
+                else:
+                    target_repository.insert_export_rows(records)
+                artifact_hashes = [row["sha256"] for row in records["artifacts"] if isinstance(row.get("sha256"), str)]
             else:
                 target.create()
                 self._extract_artifacts(archive, manifest, target)
@@ -333,13 +370,9 @@ class TransferService:
             manifest = json.loads(archive.read("manifest.json"))
             if manifest.get("archive_type") != "export":
                 raise ValueError("仅支持 reimport 导出归档")
-            records_payload = json.loads(archive.read("records.json"))
-            if records_payload.get("schema_version") != ARCHIVE_SCHEMA_VERSION:
-                raise ValueError("逻辑记录 schema 不兼容")
-            records = records_payload.get("records")
-            if not isinstance(records, dict):
-                raise ValueError("逻辑记录无效")
-            tables = ["artifacts", "sources", "source_metadata_revisions", "content_versions", "source_relations", "representations", "search_chunks", "evidence", "citations", "knowledge", "knowledge_evidence", "external_cards", "topics", "topic_sources"]
+            records_payload = self._records_payload(archive)
+            records = self._export_records(records_payload)
+            tables = EXPORT_TABLES
             primary_keys = {
                 "artifacts": ("sha256",), "sources": ("id",), "source_metadata_revisions": ("id",), "content_versions": ("id",), "source_relations": ("id",),
                 "representations": ("id",), "search_chunks": ("id",), "evidence": ("id",), "citations": ("id",), "knowledge": ("id",),
