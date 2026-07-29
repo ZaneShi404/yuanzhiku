@@ -115,6 +115,29 @@ def test_search_and_file_import(client: TestClient) -> None:
     assert any(item["id"] == uploaded.json()["source"]["id"] for item in output["items"])
 
 
+def test_file_import_preserves_utf8_multipart_metadata(client: TestClient) -> None:
+    uploaded = client.post(
+        "/api/v1/imports/file",
+        data={
+            "rights": "owned",
+            "title": "合成中文标题",
+            "author": "中文作者",
+            "notes": "中文备注",
+            "categories": '["document"]',
+            "tags": '["中文标签"]',
+            "language": "zh",
+        },
+        files={"file": ("synthetic.txt", "中文文件正文".encode("utf-8"), "text/plain")},
+    )
+    assert uploaded.status_code == 201, uploaded.text
+    source = client.get(f"/api/v1/sources/{uploaded.json()['source']['id']}")
+    assert source.status_code == 200, source.text
+    assert source.json()["title"] == "合成中文标题"
+    assert source.json()["author"] == "中文作者"
+    assert source.json()["notes"] == "中文备注"
+    assert source.json()["tags"] == ["中文标签"]
+
+
 def test_manual_representation_and_reimport(client: TestClient, runtime_root: Path) -> None:
     imported = import_and_run(client)
     version_id = imported["content_version"]["id"]

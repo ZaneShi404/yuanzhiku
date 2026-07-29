@@ -101,31 +101,40 @@ def _available(port: int) -> bool:
             return False
 
 
+def saved_port(paths: DataPaths) -> int | None:
+    """Return the saved local-port preference without changing it."""
+    if not paths.port_file.exists():
+        return None
+    try:
+        port = int(json.loads(paths.port_file.read_text(encoding="utf-8"))["port"])
+    except (TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
+        raise RuntimeError("保存的本地端口配置无效；请显式指定 -Port") from exc
+    if not 1024 <= port <= 65535:
+        raise RuntimeError("保存的本地端口配置无效；请显式指定 -Port")
+    return port
+
+
 def choose_port(paths: DataPaths, requested_port: int | None = None) -> int:
     paths.create()
     if requested_port is not None:
         if not 1024 <= requested_port <= 65535:
             raise ValueError("端口必须在 1024 至 65535 之间")
-        port = requested_port
-    elif paths.port_file.exists():
-        try:
-            port = int(json.loads(paths.port_file.read_text(encoding="utf-8"))["port"])
-        except (ValueError, KeyError, json.JSONDecodeError):
-            port = 0
-        if port and _available(port):
-            return port
-        port = 0
-    else:
-        port = 0
-    if not port:
-        for candidate in range(8765, 8866):
-            if _available(candidate):
-                port = candidate
-                break
-    if not port or not _available(port):
-        raise RuntimeError("没有可用的本地端口")
-    paths.port_file.write_text(json.dumps({"port": port}), encoding="utf-8")
-    return port
+        if not _available(requested_port):
+            raise RuntimeError("请求的本地端口不可用；未修改保存的端口偏好")
+        paths.port_file.write_text(json.dumps({"port": requested_port}), encoding="utf-8")
+        return requested_port
+
+    port = saved_port(paths)
+    if port is not None:
+        if not _available(port):
+            raise RuntimeError("保存的本地端口不可用；未修改保存的端口偏好")
+        return port
+
+    for candidate in range(8765, 8866):
+        if _available(candidate):
+            paths.port_file.write_text(json.dumps({"port": candidate}), encoding="utf-8")
+            return candidate
+    raise RuntimeError("没有可用的本地端口")
 
 
 class InstanceLock:

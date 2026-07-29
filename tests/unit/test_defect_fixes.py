@@ -15,6 +15,7 @@ from zipfile import ZipFile
 import pytest
 from fastapi.testclient import TestClient
 
+from app.core.config import choose_port, data_paths
 from app.domain.models import PasteImportRequest
 from app.main import create_app
 from app.services.jobs import JobService, ParserCircuitBreaker
@@ -59,6 +60,30 @@ def parse(client: TestClient) -> dict:
 
 def artifact_files(root: Path) -> list[Path]:
     return [path for path in (root / "artifacts").rglob("*") if path.is_file()]
+
+
+def test_port_preference_persists_explicit_selection_and_never_rewrites_busy_value(
+    runtime_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = data_paths(runtime_root / "port-preference")
+    available = {18080, 18081}
+    monkeypatch.setattr("app.core.config._available", lambda port: port in available)
+
+    assert choose_port(paths, 18080) == 18080
+    assert json.loads(paths.port_file.read_text(encoding="utf-8")) == {"port": 18080}
+    assert choose_port(paths) == 18080
+
+    assert choose_port(paths, 18081) == 18081
+    assert json.loads(paths.port_file.read_text(encoding="utf-8")) == {"port": 18081}
+
+    with pytest.raises(RuntimeError, match="未修改保存的端口偏好"):
+        choose_port(paths, 18082)
+    assert json.loads(paths.port_file.read_text(encoding="utf-8")) == {"port": 18081}
+
+    available.remove(18081)
+    with pytest.raises(RuntimeError, match="未修改保存的端口偏好"):
+        choose_port(paths)
+    assert json.loads(paths.port_file.read_text(encoding="utf-8")) == {"port": 18081}
 
 
 def test_ingest_failure_compensates_only_new_artifact(runtime_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
