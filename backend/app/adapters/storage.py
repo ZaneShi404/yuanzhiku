@@ -48,6 +48,11 @@ class ArtifactStore:
     def artifact_path(self, sha256: str) -> Path:
         return self.paths.artifacts / sha256[:2] / sha256
 
+    def staging_path(self) -> Path:
+        """Return a short, exclusive-create-ready path below the staging area."""
+        self.paths.staging.mkdir(parents=True, exist_ok=True)
+        return self.paths.staging / f"{uuid.uuid4().hex}.part"
+
     def check_capacity(self, expected_bytes: int) -> None:
         if expected_bytes < 0 or expected_bytes > MAX_FILE_BYTES:
             raise StorageLimitError("文件大小超过 2GB 限制")
@@ -63,8 +68,7 @@ class ArtifactStore:
     def _store_stream(self, stream: BinaryIO, expected_bytes: int | None = None) -> StoredArtifact:
         if expected_bytes is not None:
             self.check_capacity(expected_bytes)
-        self.paths.staging.mkdir(parents=True, exist_ok=True)
-        stage = self.paths.staging / f"{uuid.uuid4().hex}.part"
+        stage = self.staging_path()
         digest = hashlib.sha256()
         size = 0
         try:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import sqlite3
 import tempfile
@@ -22,6 +23,12 @@ from app.ports.repository import RepositoryPort
 
 ARCHIVE_SCHEMA_VERSION = 1
 BACKUP_CATALOG_STATES = frozenset({"succeeded", "pruning", "discarding"})
+SAFE_ARCHIVE_BASENAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,250}\.zip\Z")
+WINDOWS_RESERVED_BASENAMES = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{number}" for number in range(1, 10)}
+    | {f"LPT{number}" for number in range(1, 10)}
+)
 
 
 class ReimportConflict(ValueError):
@@ -315,12 +322,7 @@ class TransferService:
             created_at = row["created_at"]
             if not all(isinstance(value, str) and value.strip() for value in row.values()):
                 raise ValueError("备份目录记录无效")
-            if (
-                "/" in archive_name
-                or "\\" in archive_name
-                or archive_name in {".", ".."}
-                or not archive_name.endswith(".zip")
-            ):
+            if not TransferService._safe_archive_basename(archive_name):
                 raise ValueError("备份目录记录无效")
             if len(manifest_sha256) != 64 or any(character not in "0123456789abcdefABCDEF" for character in manifest_sha256):
                 raise ValueError("备份目录记录无效")
@@ -337,6 +339,18 @@ class TransferService:
             identifiers.add(identifier)
             archive_names.add(archive_name)
 
+    @staticmethod
+    def _safe_archive_basename(archive_name: str) -> bool:
+        """Accept only portable Windows-safe backup archive basenames."""
+        if not SAFE_ARCHIVE_BASENAME.fullmatch(archive_name):
+            return False
+        if any(character in archive_name for character in '<>:"/\\|?*'):
+            return False
+        if any(ord(character) < 32 or 127 <= ord(character) <= 159 for character in archive_name):
+            return False
+        stem = archive_name.split(".", 1)[0].rstrip(" .").upper()
+        return stem not in WINDOWS_RESERVED_BASENAMES
+
     @classmethod
     def _export_records(cls, records_payload: Any) -> dict[str, list[dict[str, Any]]]:
         return cls._logical_records(records_payload, EXPORT_TABLES)
@@ -345,7 +359,6 @@ class TransferService:
         verification = self.verify_archive(archive_path)
         if not verification["valid"]:
             raise ValueError("归档验证失败")
-        target = self._target_paths(target_root)
         with zipfile.ZipFile(archive_path) as archive:
             manifest = json.loads(archive.read("manifest.json"))
             archive_type = manifest.get("archive_type")
@@ -357,6 +370,7 @@ class TransferService:
                 records = self._backup_records(records_payload) if archive_type == "backup" else self._export_records(records_payload)
                 if not target_database_url or database_backend(target_database_url) != "postgresql":
                     raise ValueError("PostgreSQL 备份还原需要新的 target_database_url")
+                target = self._target_paths(target_root)
                 from app.adapters.postgres import PostgresRepository
 
                 target_repository = PostgresRepository(
@@ -375,6 +389,7 @@ class TransferService:
                     target_repository.insert_export_rows(records)
                 artifact_hashes = [row["sha256"] for row in records["artifacts"] if isinstance(row.get("sha256"), str)]
             else:
+                target = self._target_paths(target_root)
                 target.create()
                 self._extract_artifacts(archive, manifest, target)
                 destination = target.database
@@ -468,7 +483,7 @@ class TransferService:
                             raise ValueError("导入缺少 artifact")
                         destination = self.artifacts.artifact_path(sha256)
                         destination.parent.mkdir(parents=True, exist_ok=True)
-                        stage = self.paths.staging / f"reimport-{sha256}-{uuid.uuid4().hex}.part"
+                        stage = self.artifacts.staging_path()
                         try:
                             with archive.open(name) as source, stage.open("xb") as output:
                                 shutil.copyfileobj(source, output)

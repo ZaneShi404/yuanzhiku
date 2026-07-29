@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import queue
 import shutil
 import sqlite3
@@ -19,7 +20,7 @@ from app.main import create_app
 from app.services.jobs import JobService, ParserCircuitBreaker
 
 
-RUN_ROOT = Path(__file__).resolve().parents[1] / "runtime" / "devfix-20260728T230000Z"
+RUN_ROOT = Path(os.environ.get("YUANZHIKU_TEST_RUNTIME", Path(__file__).resolve().parents[1] / "runtime")) / "defect-fixes"
 
 
 @pytest.fixture()

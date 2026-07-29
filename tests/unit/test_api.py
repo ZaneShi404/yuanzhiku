@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 
@@ -11,7 +12,12 @@ from app.main import create_app
 
 @pytest.fixture()
 def runtime_root() -> Path:
-    root = Path(__file__).resolve().parents[1] / "runtime" / "pytest-api"
+    isolated_root = os.environ.get("YUANZHIKU_TEST_RUNTIME")
+    root = (
+        Path(isolated_root) / "api" / "case"
+        if isolated_root
+        else Path(__file__).resolve().parents[1] / "runtime" / "pytest-api"
+    )
     if root.exists():
         shutil.rmtree(root)
     root.mkdir(parents=True)
