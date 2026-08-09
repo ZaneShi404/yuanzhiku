@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "artifact_type": "normalized_archive_report_metadata",
+  "purpose": "Defines the JSON sidecar contract for normalized archive reports. The paired Markdown file is the human-readable record.",
+  "file_pair": {
+    "markdown_extension": ".md",
+    "metadata_extension": ".json",
+    "same_stem_required": true
+  },
+  "required_fields": [
+    "schema_version",
+    "report_id",
+    "recorded_at_utc",
+    "report_kind",
+    "author_role",
+    "independence",
+    "product_version",
+    "decision_scope",
+    "verdict",
+    "requirements",
+    "defects",
+    "evidence_refs",
+    "release_gates"
+  ],
+  "optional_fields": [
+    "archive_run_id",
+    "archive_manifest_sha256",
+    "supersedes_report_id",
+    "snapshot_chain",
+    "recommended_snapshot_run_id",
+    "summary"
+  ],
+  "enums": {
+    "report_kind": ["archive_snapshot", "version_summary", "development", "testing", "acceptance", "infrastructure"],
+    "author_role": ["development", "testing", "acceptance", "release_management", "infrastructure"],
+    "independence": ["independent", "non_independent", "not_applicable"],
+    "decision_scope": ["archive_local", "version_archive", "release"],
+    "verdict": ["accepted", "rejected", "blocked", "not_applicable"],
+    "gate_status": ["passed", "blocked", "not_applicable"]
+  },
+  "safety": {
+    "relative_references_only": true,
+    "forbidden_content": [
+      "command lines",
+      "absolute local paths",
+      "runtime output bodies",
+      "request bodies",
+      "process identifiers",
+      "credentials",
+      "cookies",
+      "tokens"
+    ],
+    "historical_reports": "Historical Markdown reports remain unchanged and are registered as legacy_inferred when no sidecar is present."
+  }
+}

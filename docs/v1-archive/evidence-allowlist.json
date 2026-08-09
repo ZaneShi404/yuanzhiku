@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "purpose": "V1 current audit selected synthetic runtime evidence",
+  "entries": [
+    {
+      "source": "tests/runtime/independent-port-lifecycle-retest-20260729T164836/port-lifecycle-results.json",
+      "archive_path": "evidence/runtime/independent-port-lifecycle-retest-20260729T164836/port-lifecycle-results.json",
+      "category": "acceptance",
+      "tier": "T1",
+      "source_run_id": "20260729T164836",
+      "requirements": ["REQ-002", "REQ-003"],
+      "defects": [],
+      "purpose": "Real Windows launcher and saved-port lifecycle result for isolated synthetic data."
+    },
+    {
+      "source": "tests/runtime/independent-port-lifecycle-retest-20260729T164836/multipart-results.json",
+      "archive_path": "evidence/runtime/independent-port-lifecycle-retest-20260729T164836/multipart-results.json",
+      "category": "acceptance",
+      "tier": "T1",
+      "source_run_id": "20260729T164836",
+      "requirements": ["REQ-010", "REQ-011"],
+      "defects": [],
+      "purpose": "Standards-compliant UTF-8 multipart metadata result using isolated synthetic data."
+    },
+    {
+      "source": "tests/runtime/independent-windows-backup-retest-20260729T064142Z/independent-verifier-results.json",
+      "archive_path": "evidence/runtime/independent-windows-backup-retest-20260729T064142Z/independent-verifier-results.json",
+      "category": "testing",
+      "tier": "T1",
+      "source_run_id": "20260729T064142Z",
+      "requirements": ["REQ-040", "REQ-041", "REQ-042"],
+      "defects": ["DEF-BACK-001", "DEF-BACK-002"],
+      "purpose": "Independent Windows archive safety, long-path reimport, and database-selection result."
+    },
+    {
+      "source": "tests/runtime/video-upgrade-v1-1-0-20260808T093256Z/local-validation.json",
+      "archive_path": "evidence/runtime/video-upgrade-v1-1-0-20260808T093256Z/local-validation.json",
+      "category": "testing",
+      "tier": "T1",
+      "source_run_id": "20260808T093256Z",
+      "requirements": ["REQ-015", "REQ-016", "REQ-017", "REQ-033a", "REQ-041", "REQ-042", "REQ-043", "REQ-044", "REQ-046"],
+      "defects": [],
+      "purpose": "Declarative local validation summary for the v1.1.0 local-video upgrade; no media, paths, runtime output, or credentials."
+    }
+  ]
+}

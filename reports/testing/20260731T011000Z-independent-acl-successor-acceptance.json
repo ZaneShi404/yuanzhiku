@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "report_id": "RPT-INDEPENDENT-ACL-SUCCESSOR-ACCEPTANCE-20260731T011000Z-001",
+  "recorded_at_utc": "2026-07-31T01:10:00Z",
+  "report_kind": "acceptance",
+  "author_role": "acceptance",
+  "independence": "independent",
+  "product_version": "v1.0.0",
+  "archive_run_id": "20260731T010513Z-acl-sealing-remediated",
+  "archive_manifest_sha256": "437146f5d6b8360b50c1e8db15697ed63766370b8dac5a7d5b05854b876c2784",
+  "decision_scope": "archive_local",
+  "verdict": "accepted",
+  "requirements": [
+    "REQ-046"
+  ],
+  "defects": [
+    {
+      "defect_id": "DEF-ARCH-011",
+      "relationship": "accepted"
+    },
+    {
+      "defect_id": "DEF-ARCH-012",
+      "relationship": "accepted"
+    }
+  ],
+  "evidence_refs": [
+    "reports/versions/v1.0.0/version-summary.md"
+  ],
+  "release_gates": [
+    {
+      "gate_id": "GATE-ARCHIVE-IMMUTABILITY",
+      "status": "passed",
+      "requirements": [
+        "REQ-046"
+      ]
+    },
+    {
+      "gate_id": "GATE-VERSION-CHAIN",
+      "status": "passed",
+      "requirements": [
+        "REQ-046"
+      ]
+    }
+  ],
+  "summary": "Independent archive-local acceptance confirmed immutable published members and package equivalence. Product release gates remain blocked."
+}

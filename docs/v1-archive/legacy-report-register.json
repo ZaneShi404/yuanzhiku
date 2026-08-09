@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "purpose": "Enumerates the pre-normalization Markdown reports that may be recorded as legacy_inferred without a JSON sidecar.",
+  "entries": [
+    {"source_path": "reports/development/2026-07-28-development-report.md", "source_sha256": "cc750847e04286bb1eaa1e7be9698646624c0ef5f8207f151d4803fb2a2ec69b"},
+    {"source_path": "reports/development/20260728T-postgres-repository-repair.md", "source_sha256": "ecf83a3a9e46516ef49bec5ff3f17f136586a434bb58f2c1f2936c42b8aafde5"},
+    {"source_path": "reports/development/20260728T165623Z-defect-fix-report.md", "source_sha256": "c76a1ad44f754b2240e4525d71ddd6ce18b9ab751ae92e2ee3546d7113c1d3df"},
+    {"source_path": "reports/development/20260728T173841Z-postgresql-url-selection-repair.md", "source_sha256": "447cedf7383324b35f2cfc5271e4ca1888cbbeb254db82142af51f6edfcedb77"},
+    {"source_path": "reports/development/20260729-041016-postgres-backup-catalog-repair.md", "source_sha256": "541ca4e3fc5b1099459de9b7fab8efc308a9cdbee0b0e6ab257139cfaf51ae4f"},
+    {"source_path": "reports/development/20260729T053724Z-pg-backup-catalog-portable-export-repair.md", "source_sha256": "e584177d290a54a85b3f2406f62b6655f83f81085c6bd1dd5a17cf465aaee012"},
+    {"source_path": "reports/development/20260729T062534Z-backup-export-repair.md", "source_sha256": "76f087ab2d2a9a6f537ab2a7a939a77a46815ca5f6ecf5365ea1394cb3dc6f87"},
+    {"source_path": "reports/infrastructure/20260729-014251-environment-preparation.md", "source_sha256": "2273ef2cf39291fbe9412c445321a061c72fb660287c5dfbf7a6dad5d42d8927"},
+    {"source_path": "reports/infrastructure/20260729-104716-docker-readiness-check.md", "source_sha256": "a38e13617fd25c1b2bb8c1a02bba7bdefe911d9c9a8242b372ef243dca0d53bd"},
+    {"source_path": "reports/testing/20260728T172345Z-independent-retest-report.md", "source_sha256": "d7201ff3b041e640c376219c432ce7b45d836603dd40da08f33a99f1ea136e2a"},
+    {"source_path": "reports/testing/20260728T181807Z-database-frontend-independent-retest.md", "source_sha256": "3db9af793d3ac1ed062bb896cd22fee5454e899eb5c3323e724fe1e6d82a3d9f"},
+    {"source_path": "reports/testing/20260728T225152Z-independent-test-report.md", "source_sha256": "438eff7e7d06d7bcd556fa32f08f83786ada55c921a726be33989370ca158fc7"},
+    {"source_path": "reports/testing/20260729-1127-postgres-regression-check.md", "source_sha256": "3896317b0149ea5e0fae7cd897ebba7de5020b1e5ec1397b9283c5950a4abfed"},
+    {"source_path": "reports/testing/20260729T050712Z-independent-pg-backup-retest.md", "source_sha256": "7b692e428d7dc365bcaf13fef57f4c58ac15a4a2e717bbd96dbc0f8d48f2c581"},
+    {"source_path": "reports/testing/20260729T061118Z-independent-backup-export-retest.md", "source_sha256": "781f84b69cb02df379840cef08928ad40218550b78c8683b8e7bd28a40fe52b8"},
+    {"source_path": "reports/testing/20260729T070015Z-independent-windows-backup-retest.md", "source_sha256": "428b42cab56c5aab25bbf4a5a95e91b265691a82dbdea56304cc4e1468a59b70"},
+    {"source_path": "reports/testing/20260729T164836Z-independent-port-lifecycle-retest.md", "source_sha256": "3792f8d084424264c69b9faf76fbca50f2552f81e0ec130340075f2aa03e4542"},
+    {"source_path": "reports/testing/20260730T120300Z-independent-archive-review-remediation.md", "source_sha256": "8aedeb76690b822d4d8cf048d6f1ec36a57cb5c2dd23c68f53e1dc1dc1d158d2"},
+    {"source_path": "reports/testing/20260730T123000Z-independent-successor-archive-rejection.md", "source_sha256": "2280f136e1627e77eb27a91cc18964c3c699841a97dacae06ca87665803485f3"},
+    {"source_path": "reports/testing/20260730T131500Z-independent-archive-contract-review.md", "source_sha256": "07a2709e386a0620b65aa4eeb31a0c0988b3dc92a247856df606b13501fd5e14"},
+    {"source_path": "reports/testing/20260730T134000Z-independent-archive-validation-scope-correction.md", "source_sha256": "d46d90bf6a9414181be0a877c481f8cba9790e440ae2749ee0b07a0a88e77f3c"},
+    {"source_path": "reports/testing/20260730T134500Z-independent-archive-contract-rerun.md", "source_sha256": "a1d7017a253b108759aed28618980c2c12617c84358a01ee31365383d2e3fdd6"},
+    {"source_path": "reports/testing/20260730T141000Z-independent-successor-archive-acceptance-rejection.md", "source_sha256": "3000c6a8f692ef87b428ee801055252aafd1e6ce08a74aa2a49f1072bb1115b2"},
+    {"source_path": "reports/testing/20260730T150000Z-independent-successor-archive-acceptance.md", "source_sha256": "28569d2efad208a7c3dd26e8e4233ff61ae3e04b5600b9a17e7f63ccf944ef52"}
+  ]
+}
