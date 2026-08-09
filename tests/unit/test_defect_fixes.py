@@ -211,6 +211,9 @@ def test_reimport_unique_card_conflict_returns_409_before_artifact_copy(client: 
     before = artifact_files(runtime_root)
     response = client.post("/api/v1/reimports", json={"archive_path": exported["archive_path"]})
     assert response.status_code == 409, response.text
+    assert response.json()["detail"]["code"] == "reimport_conflict"
+    assert response.json()["detail"]["message"] == "导入逻辑记录冲突"
+    assert response.json()["detail"]["reason"] == "逻辑链或唯一约束冲突，已拒绝且未写入"
     assert response.json()["detail"]["conflicts"]
     assert artifact_files(runtime_root) == before
 
@@ -251,6 +254,102 @@ def test_parser_circuit_breaker_and_configured_retry_are_observable(runtime_root
     assert services.repository.get_source(imported["source"]["id"])["processing_state"] == "failed"
 
 
+def test_permanent_delete_audit_retention_preserves_current_and_other_events(runtime_root: Path) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    services = create_app(runtime_root, acquire_lock=False).state.services
+    cutoff = datetime.now(UTC) - timedelta(days=366)
+    with services.repository.connection() as connection:
+        connection.execute(
+            "INSERT INTO audit_events(id,event_type,entity_id,result,created_at) VALUES(?,?,?,?,?)",
+            ("expired", "source_permanent_delete", "expired-source", "succeeded", (cutoff - timedelta(microseconds=1)).isoformat()),
+        )
+        connection.execute(
+            "INSERT INTO audit_events(id,event_type,entity_id,result,created_at) VALUES(?,?,?,?,?)",
+            ("retained", "source_permanent_delete", "retained-source", "succeeded", (cutoff + timedelta(days=1)).isoformat()),
+        )
+        connection.execute(
+            "INSERT INTO audit_events(id,event_type,entity_id,result,created_at) VALUES(?,?,?,?,?)",
+            ("other", "source_soft_delete", "other-source", "succeeded", (cutoff - timedelta(days=1)).isoformat()),
+        )
+
+    removed = services.repository.prune_source_permanent_delete_audit_events()
+
+    with services.repository.connection() as connection:
+        ids = {row["id"] for row in connection.execute("SELECT id FROM audit_events").fetchall()}
+    assert removed == 1
+    assert ids == {"retained", "other"}
+    with pytest.raises(ValueError, match="不得少于 366 天"):
+        services.repository.prune_source_permanent_delete_audit_events(365)
+
+
+def test_permanent_delete_audit_precedes_cleanup_and_rejects_invalid_source(runtime_root: Path) -> None:
+    services = create_app(runtime_root, acquire_lock=False).state.services
+    with pytest.raises(KeyError, match="来源不存在"):
+        services.lifecycle.purge("missing")
+    with services.repository.connection() as connection:
+        assert connection.execute("SELECT COUNT(*) AS n FROM audit_events").fetchone()["n"] == 0
+
+    imported = services.imports.paste(PasteImportRequest(title="to purge", text="purge text", rights="owned"))
+    source_id = imported["source"]["id"]
+    services.lifecycle.delete(source_id)
+    services.lifecycle.purge(source_id)
+
+    with services.repository.connection() as connection:
+        rows = connection.execute(
+            "SELECT result FROM audit_events WHERE event_type=? AND entity_id=? ORDER BY created_at ASC",
+            ("source_permanent_delete", source_id),
+        ).fetchall()
+    assert [row["result"] for row in rows] == ["started", "succeeded"]
+
+
+    app = create_app(runtime_root, acquire_lock=False)
+    services = app.state.services
+    observed: list[int] = []
+    worker = JobService(
+        services.repository,
+        services.artifacts,
+        services.documents,
+        integrity_runner=lambda sample_size: observed.append(sample_size) or {"valid": True, "checked": sample_size},
+    )
+    services.repository.create_job(
+        "integrity_sample", None, None, None, None, {"date": "2030-01-02", "sample_size": 20_000}, priority=1_000
+    )
+
+    succeeded = worker.run_once()
+
+    assert succeeded is not None and succeeded["state"] == "succeeded"
+    assert succeeded["message"] == "空闲完整性抽样完成"
+    assert observed == [10_000]
+    assert services.repository.get_settings()["last_integrity_sample_date"] == "2030-01-02"
+
+    services.repository.update_settings({"max_retry_attempts": 0})
+    services.repository.create_job(
+        "integrity_sample", None, None, None, None, {"date": "2030-01-03", "sample_size": 1}, priority=1_000
+    )
+    failed = JobService(
+        services.repository,
+        services.artifacts,
+        services.documents,
+        integrity_runner=lambda _sample_size: {"valid": False, "failures": ["never-persisted"]},
+    ).run_once()
+
+    assert failed is not None and failed["state"] == "failed"
+    assert failed["message"] == "本地处理失败"
+    assert services.repository.get_settings()["last_integrity_sample_date"] == "2030-01-02"
+
+
+def test_manual_full_integrity_verify_checks_every_catalogued_artifact(runtime_root: Path) -> None:
+    services = create_app(runtime_root, acquire_lock=False).state.services
+    services.imports.paste(PasteImportRequest(title="first", text="first artifact", rights="owned"))
+    services.imports.paste(PasteImportRequest(title="second", text="second artifact", rights="owned"))
+
+    result = services.transfers.verify_artifacts(full=True, sample_size=1)
+
+    assert result["valid"] is True
+    assert result["checked"] == 2
+
+
 def test_external_userinfo_rejected_and_legacy_export_redacts(client: TestClient, runtime_root: Path) -> None:
     rejected = client.post("/api/v1/external/cards", json={"url": "https://user:secret@example.test/path", "title": "secret"})
     assert rejected.status_code == 422
@@ -280,6 +379,52 @@ def test_metadata_revisions_and_search_sort(client: TestClient) -> None:
     assert result.status_code == 200
     assert result.json()["sort"] == "title"
     assert client.get("/api/v1/search", params={"sort": "invalid"}).status_code == 422
+
+
+def test_metadata_update_can_clear_nullable_fields_without_nulling_required_columns(client: TestClient) -> None:
+    imported = client.post("/api/v1/imports/paste", json={
+        "title": "带可清空元数据的来源",
+        "text": "metadata clear",
+        "rights": "owned",
+        "author": "原作者",
+        "notes": "原备注",
+        "source_date": "2024-01-02",
+    })
+    assert imported.status_code == 201, imported.text
+    source_id = imported.json()["source"]["id"]
+
+    cleared = client.put(f"/api/v1/sources/{source_id}/metadata", json={
+        "author": None,
+        "notes": None,
+        "source_date": None,
+    })
+
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["author"] is None
+    assert cleared.json()["notes"] is None
+    assert cleared.json()["source_date"] is None
+    assert cleared.json()["title"] == "带可清空元数据的来源"
+    assert cleared.json()["language"] == "zh"
+    revision = client.get(f"/api/v1/sources/{source_id}/metadata-revisions").json()[0]["snapshot"]
+    assert revision["author"] is None
+    assert revision["notes"] is None
+    assert revision["source_date"] is None
+    rejected = client.put(f"/api/v1/sources/{source_id}/metadata", json={"title": None})
+    assert rejected.status_code == 422
+
+
+def test_http_and_request_validation_errors_use_stable_envelopes(client: TestClient) -> None:
+    missing = client.get("/api/v1/sources/missing")
+    assert missing.status_code == 404
+    assert missing.json()["detail"] == {"code": "http_404", "message": "来源不存在"}
+
+    method_not_allowed = client.post("/api/v1/health")
+    assert method_not_allowed.status_code == 405
+    assert method_not_allowed.json()["detail"] == {"code": "http_405", "message": "请求方法不被允许"}
+
+    invalid = client.put("/api/v1/settings", json={"job_lease_seconds": 1})
+    assert invalid.status_code == 422
+    assert invalid.json()["detail"] == {"code": "request_validation", "message": "请求字段无效"}
 
 
 class _HangingProcess:

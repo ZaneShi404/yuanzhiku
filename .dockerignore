@@ -1,0 +1,12 @@
+.git
+.zcode
+.venv
+__pycache__
+**/__pycache__
+*.pyc
+*.tsbuildinfo
+data
+reports
+tests/runtime
+frontend/node_modules
+frontend/dist

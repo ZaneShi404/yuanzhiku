@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "report_id": "RPT-LOCAL-VIDEO-V1-1-0-VALIDATION-20260808T094612Z-001",
+  "recorded_at_utc": "2026-08-08T09:46:12Z",
+  "report_kind": "testing",
+  "author_role": "testing",
+  "independence": "non_independent",
+  "product_version": "v1.1.0",
+  "decision_scope": "release",
+  "verdict": "blocked",
+  "requirements": ["REQ-015", "REQ-016", "REQ-017", "REQ-033a", "REQ-041", "REQ-042", "REQ-043", "REQ-044", "REQ-046"],
+  "defects": [],
+  "evidence_refs": [
+    "reports/development/20260808T094612Z-local-video-v1-1-0-upgrade.md",
+    "tests/runtime/video-upgrade-v1-1-0-20260808T093256Z/local-validation.json"
+  ],
+  "release_gates": [
+    {"gate_id": "GATE-LOCAL-VIDEO-UNIT", "status": "passed", "requirements": ["REQ-015", "REQ-016", "REQ-017", "REQ-033a", "REQ-041", "REQ-042", "REQ-043"]},
+    {"gate_id": "GATE-LOCAL-VIDEO-UI", "status": "passed", "requirements": ["REQ-044"]},
+    {"gate_id": "GATE-ARCHIVE-CONTRACT", "status": "passed", "requirements": ["REQ-046"]},
+    {"gate_id": "GATE-FFMPEG-REAL-MEDIA", "status": "blocked", "requirements": ["REQ-015", "REQ-016"]},
+    {"gate_id": "GATE-PG-PHYSICAL", "status": "blocked", "requirements": ["REQ-045"]},
+    {"gate_id": "GATE-COMPOSE-PHYSICAL", "status": "blocked", "requirements": ["REQ-045"]},
+    {"gate_id": "GATE-BROWSER-BLACKBOX", "status": "blocked", "requirements": ["REQ-001", "REQ-044"]}
+  ],
+  "summary": "Local v1.1.0 video validation passed within controlled test coverage. Release remains blocked because real FFmpeg and ffprobe validation and existing physical gates are not complete."
+}

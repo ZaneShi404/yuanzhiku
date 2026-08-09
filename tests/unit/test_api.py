@@ -63,7 +63,15 @@ def test_health_openapi_and_paste_evidence_chain(client: TestClient) -> None:
     assert evidence["locator"]["type"] == "text_range"
 
 
-def test_knowledge_publish_requires_evidence(client: TestClient) -> None:
+def test_errors_use_stable_structured_detail(client: TestClient) -> None:
+    missing = client.get("/api/v1/sources/does-not-exist")
+    assert missing.status_code == 404
+    assert missing.json()["detail"] == {"code": "http_404", "message": "来源不存在"}
+
+    invalid = client.post("/api/v1/imports/paste", json={"title": "missing rights", "text": "body"})
+    assert invalid.status_code == 422
+    assert invalid.json()["detail"] == {"code": "request_validation", "message": "请求字段无效"}
+
     no_evidence = client.post("/api/v1/knowledge", json={"kind": "fact", "statement": "没有证据的事实"}).json()
     blocked = client.post(f"/api/v1/knowledge/{no_evidence['id']}/publish")
     assert blocked.status_code == 422
@@ -73,6 +81,21 @@ def test_knowledge_publish_requires_evidence(client: TestClient) -> None:
     evidence_id = client.get(f"/api/v1/representations/{representation['id']}/evidence").json()[0]["id"]
     knowledge = client.post("/api/v1/knowledge", json={"kind": "fact", "statement": "有证据的事实", "evidence_ids": [evidence_id]})
     assert client.post(f"/api/v1/knowledge/{knowledge.json()['id']}/publish").json()["status"] == "published"
+
+
+def test_retry_rejects_nonterminal_job_with_stable_conflict(client: TestClient) -> None:
+    imported = client.post("/api/v1/imports/paste", json={
+        "title": "retry state", "text": "retry body", "rights": "owned",
+    })
+    assert imported.status_code == 201
+
+    response = client.post(f"/api/v1/jobs/{imported.json()['job']['id']}/retry")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "code": "http_409",
+        "message": "仅失败、阻塞或已取消的作业可以手动重试",
+    }
 
 
 def test_external_douyin_is_literal_only(client: TestClient) -> None:
@@ -113,6 +136,35 @@ def test_search_and_file_import(client: TestClient) -> None:
     client.post("/api/v1/jobs/run-once")
     output = client.get("/api/v1/search", params={"q": "本地文件"}).json()
     assert any(item["id"] == uploaded.json()["source"]["id"] for item in output["items"])
+
+
+def test_original_artifact_uses_safe_framework_disposition(client: TestClient) -> None:
+    uploaded = client.post(
+        "/api/v1/imports/file",
+        data={"rights": "owned", "categories": "[]", "tags": "[]"},
+        files={"file": ('unsafe"name.txt', b"local text", "text/plain")},
+    )
+    assert uploaded.status_code == 201, uploaded.text
+
+    original = client.get(f"/api/v1/sources/{uploaded.json()['source']['id']}/original")
+    assert original.status_code == 200
+    assert original.headers["x-content-type-options"] == "nosniff"
+    assert original.headers["content-security-policy"] == "sandbox; default-src 'none'; frame-ancestors 'self'"
+    assert original.headers["content-disposition"].startswith("attachment;")
+    assert 'unsafe"name.txt' not in original.headers["content-disposition"]
+
+
+def test_file_import_rejects_oversized_content_length_before_persisting(client: TestClient, runtime_root: Path) -> None:
+    response = client.post(
+        "/api/v1/imports/file",
+        headers={"content-length": str(2 * 1024 * 1024 * 1024 + 1)},
+        data={"rights": "owned", "categories": "[]", "tags": "[]"},
+        files={"file": ("synthetic.txt", b"small body", "text/plain")},
+    )
+
+    assert response.status_code == 413, response.text
+    assert client.get("/api/v1/sources").json() == []
+    assert not [path for path in (runtime_root / "artifacts").rglob("*") if path.is_file()]
 
 
 def test_file_import_preserves_utf8_multipart_metadata(client: TestClient) -> None:

@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import socket
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO
@@ -56,6 +58,10 @@ class DataPaths:
     @property
     def lock_file(self) -> Path:
         return self.state / "instance.lock"
+
+    @property
+    def maintenance_lock_file(self) -> Path:
+        return self.state / "maintenance.lock"
 
     def create(self) -> None:
         for path in (self.root, self.state, self.artifacts, self.staging, self.models, self.backups, self.exports, self.logs):
@@ -137,6 +143,36 @@ def choose_port(paths: DataPaths, requested_port: int | None = None) -> int:
     raise RuntimeError("没有可用的本地端口")
 
 
+class InterprocessLock:
+    """A thread-reentrant wrapper around a Windows-compatible process file lock."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._guard = threading.RLock()
+        self._depth = 0
+        self._lock: InstanceLock | None = None
+
+    def __enter__(self) -> None:
+        self._guard.acquire()
+        try:
+            if self._depth == 0:
+                self._lock = InstanceLock(self.path)
+                self._lock.acquire(timeout_seconds=30.0)
+            self._depth += 1
+        except Exception:
+            self._guard.release()
+            raise
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        try:
+            self._depth -= 1
+            if self._depth == 0 and self._lock is not None:
+                self._lock.release()
+                self._lock = None
+        finally:
+            self._guard.release()
+
+
 class InstanceLock:
     """A Windows-compatible advisory exclusive lock retained for app lifetime."""
 
@@ -144,27 +180,32 @@ class InstanceLock:
         self.path = path
         self.handle: IO[bytes] | None = None
 
-    def acquire(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.handle = self.path.open("a+b")
-        try:
-            if os.name == "nt":
-                import msvcrt
+    def acquire(self, timeout_seconds: float = 0.0) -> None:
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.handle = self.path.open("a+b")
+            try:
+                if os.name == "nt":
+                    import msvcrt
 
-                self.handle.seek(0)
-                if self.handle.tell() == 0:
-                    self.handle.write(b"0")
-                    self.handle.flush()
                     self.handle.seek(0)
-                msvcrt.locking(self.handle.fileno(), msvcrt.LK_NBLCK, 1)
-            else:
-                import fcntl
+                    if self.handle.tell() == 0:
+                        self.handle.write(b"0")
+                        self.handle.flush()
+                        self.handle.seek(0)
+                    msvcrt.locking(self.handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
 
-                fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError as exc:
-            self.handle.close()
-            self.handle = None
-            raise RuntimeError("该数据根已有运行中的源知库实例") from exc
+                    fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return
+            except OSError as exc:
+                self.handle.close()
+                self.handle = None
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("该数据根已有运行中的源知库实例") from exc
+                time.sleep(0.05)
 
     def release(self) -> None:
         if self.handle is None:

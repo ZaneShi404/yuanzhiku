@@ -1,12 +1,13 @@
 # API 契约
 
-基础 URL：`http://127.0.0.1:<port>/api/v1`。所有 JSON 使用 UTF-8，错误为 `{ "detail": "稳定错误码或中文说明" }`。OpenAPI 位于 `/openapi.json`。
+基础 URL：`http://127.0.0.1:<port>/api/v1`。所有 JSON 使用 UTF-8。错误统一为 `{ "detail": { "code": "stable_code", "message": "中文说明" } }`；`code` 是面向客户端的稳定分类，`message` 是可直接展示的说明。`POST /reimports` 的 `409` 在此基础上额外包含 `conflicts` 数组和 `reason`。OpenAPI 位于 `/openapi.json`。
 
 | 区域 | 端点 | 方法 | 要点 |
 |---|---|---|---|
 | health | `/health`, `/capabilities` | GET | 运行状态、功能与本地限制 |
 | settings | `/settings` | GET, PUT | 非敏感设置、端口和断路器 |
 | imports | `/imports/file`, `/imports/paste` | POST | rights 必填；文件 multipart、文本 JSON |
+| videos | `/videos/local`, `/videos/{source_id}`, `/videos/{source_id}/stream`, `/videos/{source_id}/frames/{frame_id}`, `/videos/{source_id}/transcribe`, `/videos/{source_id}/summarize` | GET/POST | 仅本地 MP4/WebM artifact；本地播放、关键帧和受控未来 AI 作业 |
 | sources | `/sources`, `/sources/{id}`, `/sources/{id}/metadata`, `/sources/{id}/rights`, `/sources/{id}/relations` | GET/PUT/POST | 不返回本地原路径 |
 | documents | `/documents/{version_id}/representations`, `/representations/{id}/evidence`, `/evidence/{id}`, `/citations`, `/knowledge`, `/knowledge/{id}/publish` | GET/POST | 保持证据链和发布校验 |
 | search | `/search` | GET | `q` 和显式 advanced 过滤参数 |
@@ -16,6 +17,31 @@
 | lifecycle | `/sources/{id}/delete`, `/sources/{id}/restore`, `/sources/{id}/purge` | POST | 软删、恢复、永久删除 |
 | transfer | `/backups`, `/backups/{id}/restore`, `/exports`, `/reimports`, `/verify` | GET/POST | 新根还原、PostgreSQL restore 另需空的 `target_database_url`、确认导出、hash 验证 |
 
-`POST /reimports` 在同一主键或自然唯一键的逻辑记录不一致时返回 `409`，响应 `detail` 包含稳定的 `conflicts` 数组和拒绝原因；该检查发生在 artifact 写入前。外部卡 URL 含 userinfo 时返回 `422`，不会持久化或触发任何网络请求。
+`POST /reimports` 在同一主键或自然唯一键的逻辑记录不一致时返回 `409`，响应 `detail` 为 `{ "code": "reimport_conflict", "message": "导入逻辑记录冲突", "conflicts": [...], "reason": "..." }`；该检查发生在 artifact 写入前。外部卡 URL 含 userinfo 时返回 `422`，不会持久化或触发任何网络请求。
 
 关键 DTO 定义由 `backend/app/domain/models.py` 中 Pydantic 模型和 FastAPI OpenAPI 生成，字段改动需同时更新本文件及 `docs/acceptance-matrix.md`（`REQ-043`）。
+
+## 本地视频
+
+`POST /videos/local` 使用 multipart，字段与 `/imports/file` 相同：`file`、`rights`、可选 `title`、`author`、`language`、`notes`、`source_date`、JSON 数组格式的 `categories` 与 `tags`。仅接受文件名后缀为 `.mp4` 或 `.webm` 的本地文件；`rights` 必填。成功时响应 source、content version、artifact 和 `video_analyze` 作业。接口不接收 URL，也不会下载、探测或代理网页视频。
+
+`GET /videos/{source_id}` 默认返回最新本地视频版本；可选 `version_id` 只能选择同一来源的已存视频版本。`analysis` 在分析未完成时为 `null`。完成后 `analysis.metadata` 包含容器、时长毫秒、尺寸及音视频编码，`analysis.frames` 按 `ordinal` 返回关键帧 id、artifact hash、时间毫秒和可选尺寸。
+
+`GET /videos/{source_id}/stream` 与 `GET /videos/{source_id}/frames/{frame_id}` 同样接受可选 `version_id`，并严格只从该版本的原 artifact 或分析帧读取内容。播放流只服务活动来源的 MP4/WebM artifact，支持单一 `Range: bytes=...` 请求；有效范围返回 `206` 和 `Content-Range`，无效或多范围请求返回 `416`。帧接口只服务该版本当前分析记录中的 JPEG 帧。两类响应均包含 `X-Content-Type-Options: nosniff` 和 sandbox CSP。
+
+`POST /videos/{source_id}/transcribe` 与 `/summarize` 仅创建未来媒体 AI 作业。默认服务未配置，该作业最终为 `blocked`，消息为“未配置媒体 AI 服务”，不产生任何外部网络请求，也不改变已完成视频的状态。
+
+
+`PUT /sources/{id}/metadata` 接受一个局部 JSON 对象。响应为更新后的来源详情；来源不存在时返回 `404`。请求中省略的字段保持既有值，不会被覆盖。
+
+| 字段 | 类型 | 显式 `null` | 规则 |
+|---|---|---|---|
+| `title` | 非空字符串 | 拒绝（`422`） | 1 至 500 个字符 |
+| `author` | 字符串或 `null` | 清除 | 最多 300 个字符 |
+| `language` | 非空字符串 | 拒绝（`422`） | 最多 32 个字符 |
+| `notes` | 字符串或 `null` | 清除 | 最多 4000 个字符 |
+| `source_date` | ISO-8601 日期或 `null` | 清除 | 与 `imported_at` 独立 |
+| `categories` | 固定分类数组 | 拒绝（`422`） | 只能取固定分类；空数组有效 |
+| `tags` | 字符串数组 | 拒绝（`422`） | 空数组有效 |
+
+`title`、`language`、`categories` 和 `tags` 不接受显式 `null`；客户端应提交有效值或省略字段。`author`、`notes` 与 `source_date` 使用 JSON `null` 表示清除。错误遵循本文件开头的稳定错误信封；Pydantic 请求校验失败为 `422`。

@@ -52,12 +52,40 @@ def test_postgres_repository_construction_and_application_dispatch(
 
     monkeypatch.setenv("YUANZHIKU_DATABASE_URL", url)
     monkeypatch.setattr(PostgresRepository, "initialize", initialized)
+    monkeypatch.setattr(PostgresRepository, "prune_source_permanent_delete_audit_events", lambda self: 0)
     services = ApplicationServices(data_paths(runtime_root))
 
     assert isinstance(services.repository, PostgresRepository)
     assert services.database_backend == "postgresql"
     assert selected == [services.repository]
     assert not (runtime_root / "state" / "knowledge.db").exists()
+
+
+def test_postgres_initial_schema_leaves_later_revision_objects_to_alembic() -> None:
+    schema = MIGRATIONS.joinpath("001_initial.sql").read_text(encoding="utf-8")
+
+    assert "source_date DATE" not in schema
+    assert "locator_hash" not in schema
+    assert "idx_citations_evidence" not in schema
+    assert "idx_evidence_representation_locator_excerpt" not in schema
+    assert "retry_count" not in schema
+    assert "lease_token" not in schema
+    assert "idx_audit_events_type_created_at" not in schema
+
+
+def test_postgres_evidence_migration_declares_missing_citation_backfill_and_safe_downgrade() -> None:
+    migration = (
+        Path(__file__).resolve().parents[2] / "backend" / "alembic" / "versions" / "006_evidence_bundles.py"
+    ).read_text(encoding="utf-8")
+
+    assert "evidence-bundle-generated-citation" in migration
+    assert "WHERE citations.id IS NULL" in migration
+    assert "tc.constraint_type='UNIQUE'" in migration
+    assert "table_name='evidence'" in migration
+    assert "table_name='citations'" in migration
+    assert migration.index("DROP INDEX IF EXISTS idx_citations_evidence") < migration.index(
+        "ALTER TABLE evidence DROP COLUMN IF EXISTS locator_hash"
+    )
 
 
 class _RecordingConnection:
@@ -75,6 +103,9 @@ class _RecordingConnection:
             def fetchall(self) -> list[dict[str, Any]]:
                 return self.values
 
+            def fetchone(self) -> dict[str, Any] | None:
+                return self.values[0] if self.values else None
+
         table = statement.removeprefix("SELECT * FROM ").split()[0]
         return Result(self.rows.get(table, []))
 
@@ -82,6 +113,8 @@ class _RecordingConnection:
 class _FakePostgresRepository:
     backend = "postgresql"
     initialized = 0
+    empty_target_checks = 0
+    migrations = 0
     recorded_rows: dict[str, list[dict[str, Any]]] | None = None
     export_rows: dict[str, list[dict[str, Any]]] | None = None
     nonempty = False
@@ -90,8 +123,17 @@ class _FakePostgresRepository:
         self.database_url = database_url
         self.migrations_directory = migrations_directory
 
+    def assert_empty_restore_target(self) -> None:
+        type(self).empty_target_checks += 1
+        if type(self).nonempty:
+            raise ValueError("PostgreSQL 还原目标必须为空")
+
+    def migrate_to_head(self) -> None:
+        type(self).migrations += 1
+
     def initialize(self) -> None:
         type(self).initialized += 1
+
 
     def has_user_records(self) -> bool:
         return type(self).nonempty
@@ -109,6 +151,8 @@ class _FakePostgresRepository:
 @pytest.fixture(autouse=True)
 def reset_fake_postgres_repository() -> None:
     _FakePostgresRepository.initialized = 0
+    _FakePostgresRepository.empty_target_checks = 0
+    _FakePostgresRepository.migrations = 0
     _FakePostgresRepository.recorded_rows = None
     _FakePostgresRepository.export_rows = None
     _FakePostgresRepository.nonempty = False
@@ -141,6 +185,30 @@ def _logical_backup_archive(path: Path, records: dict[str, list[dict[str, Any]]]
         archive.writestr("manifest.json", json.dumps(manifest))
 
 
+def _logical_export_archive(
+    path: Path,
+    records: dict[str, list[dict[str, Any]]],
+    *,
+    manifest_entries: list[dict[str, object]] | None = None,
+    extra_members: list[tuple[str, bytes]] | None = None,
+) -> None:
+    payload = json.dumps({"schema_version": 1, "records": records}, separators=(",", ":")).encode()
+    additional_members = extra_members or []
+    entries = manifest_entries or [
+        {"path": "records.json", "sha256": hashlib.sha256(payload).hexdigest(), "byte_size": len(payload)},
+        *[
+            {"path": name, "sha256": hashlib.sha256(content).hexdigest(), "byte_size": len(content)}
+            for name, content in additional_members
+        ],
+    ]
+    manifest = {"schema_version": 1, "archive_type": "export", "entries": entries}
+    with ZipFile(path, "w") as archive:
+        archive.writestr("records.json", payload)
+        for name, content in additional_members:
+            archive.writestr(name, content)
+        archive.writestr("manifest.json", json.dumps(manifest))
+
+
 def test_postgres_logical_backup_archive_includes_catalog(runtime_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     app = create_app(runtime_root, acquire_lock=False)
     records = _complete_backup_records()
@@ -159,6 +227,70 @@ def test_postgres_logical_backup_archive_includes_catalog(runtime_root: Path, mo
     with ZipFile(archive_path) as archive:
         payload = json.loads(archive.read("records.json"))
     assert payload["records"]["backups"] == records["backups"]
+
+
+def test_archive_verification_rejects_duplicate_members_and_manifest_size_mismatch(runtime_root: Path) -> None:
+    services = create_app(runtime_root, acquire_lock=False).state.services
+    records = {table: [] for table in services.repository.rows_for_export()}
+
+    duplicate = runtime_root / "duplicate.zip"
+    _logical_export_archive(duplicate, records, extra_members=[("records.json", b"duplicate")])
+    duplicate_verification = services.transfers.verify_archive(duplicate)
+    assert duplicate_verification["valid"] is False
+    assert duplicate_verification["errors"] == ["归档无法验证"]
+
+    payload = json.dumps({"schema_version": 1, "records": records}, separators=(",", ":")).encode()
+    mismatch = runtime_root / "size-mismatch.zip"
+    _logical_export_archive(
+        mismatch,
+        records,
+        manifest_entries=[
+            {"path": "records.json", "sha256": hashlib.sha256(payload).hexdigest(), "byte_size": len(payload) + 1}
+        ],
+    )
+    mismatch_verification = services.transfers.verify_archive(mismatch)
+    assert mismatch_verification["valid"] is False
+    assert "条目字节数不匹配" in mismatch_verification["errors"]
+
+
+def test_archive_verification_rejects_undeclared_v2_member_before_reimport(runtime_root: Path) -> None:
+    services = create_app(runtime_root, acquire_lock=False).state.services
+    exported = services.transfers.create_export(True)
+    archive_path = Path(exported["archive_path"])
+    with ZipFile(archive_path) as archive:
+        members = {name: archive.read(name) for name in archive.namelist()}
+
+    tampered = runtime_root / "undeclared-member.zip"
+    with ZipFile(tampered, "w") as archive:
+        for name, content in members.items():
+            archive.writestr(name, content)
+        archive.writestr("undeclared.txt", b"not declared")
+
+    verification = services.transfers.verify_archive(tampered)
+    assert verification["valid"] is False
+    assert "归档成员未由 manifest 完整声明" in verification["errors"]
+    with pytest.raises(ValueError, match="导入归档验证失败"):
+        services.transfers.reimport(str(tampered))
+
+
+def test_v1_source_records_without_source_date_upgrade_to_null(runtime_root: Path) -> None:
+    services = create_app(runtime_root, acquire_lock=False).state.services
+    source = services.imports.paste(PasteImportRequest(title="legacy source", text="legacy text", rights="owned"))["source"]
+    rows = services.repository.rows_for_export()
+    legacy_columns = tuple(column for column in BACKUP_TABLE_COLUMNS["sources"] if column != "source_date")
+    rows["sources"] = [{column: source[column] for column in legacy_columns}]
+    sha256 = rows["artifacts"][0]["sha256"]
+    archive_path = runtime_root / "legacy-source-date.zip"
+    _logical_export_archive(
+        archive_path,
+        rows,
+        extra_members=[(f"artifacts/{sha256[:2]}/{sha256}", services.artifacts.read_bytes(sha256))],
+    )
+
+    verification = services.transfers.verify_archive(archive_path)
+    assert verification["valid"] is True
+    restored = services.transfers._export_records({"schema_version": 1, "records": rows})
+    assert restored["sources"] == [{**source, "source_date": None}]
 
 
 def test_postgres_logical_backup_inventory_restores_catalog_and_export_excludes_it(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -204,6 +336,9 @@ def test_postgres_logical_restore_preserves_complete_valid_catalogs(
     result = services.transfers._restore_archive(archive_path, str(runtime_root / "restored"), "postgresql://target")
 
     assert result["archive_type"] == "backup"
+    assert _FakePostgresRepository.empty_target_checks == 1
+    assert _FakePostgresRepository.migrations == 1
+    assert _FakePostgresRepository.initialized == 1
     assert _FakePostgresRepository.recorded_rows == records
     assert _FakePostgresRepository.recorded_rows["backups"] == catalog_rows
     assert not (runtime_root / "restored" / "state" / "knowledge.db").exists()
@@ -354,6 +489,7 @@ def test_postgres_logical_backup_restore_preserves_catalog_in_empty_target(
 ) -> None:
     """Requires separate disposable source and empty target PostgreSQL databases."""
     monkeypatch.setenv("YUANZHIKU_DATABASE_URL", POSTGRES_TEST_URL or "")
+    PostgresRepository(POSTGRES_TEST_URL or "", MIGRATIONS).migrate_to_head()
     services = ApplicationServices(data_paths(runtime_root))
     prior = services.repository.create_backup_record(
         f"prior-{uuid.uuid4().hex}.zip", hashlib.sha256(b"prior-catalog").hexdigest()
@@ -377,10 +513,31 @@ def test_postgres_logical_backup_restore_preserves_catalog_in_empty_target(
     assert not (runtime_root / "restored" / "state" / "knowledge.db").exists()
 
 
+def test_postgres_claim_recovers_expired_leases_before_selecting_a_job(monkeypatch: pytest.MonkeyPatch) -> None:
+    repository = PostgresRepository("postgresql://example", MIGRATIONS)
+    calls: list[_RecordingConnection] = []
+    connection = _RecordingConnection({})
+
+    @contextmanager
+    def fake_connection():
+        yield connection
+
+    monkeypatch.setattr(repository, "connection", fake_connection)
+    monkeypatch.setattr(repository, "_recover_stale_jobs", lambda current: calls.append(current))
+
+    assert repository.claim_next_job() is None
+    assert calls == [connection]
+    assert connection.statements == [(
+        "SELECT id FROM jobs WHERE state IN ('queued','retry_wait') "
+        "ORDER BY priority DESC, created_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED",
+        None,
+    )]
+
 @pytest.mark.skipif(not POSTGRES_TEST_URL, reason="POSTGRES_TEST_URL is not configured for PostgreSQL integration")
 def test_postgres_repository_normal_api_worker_workflow(runtime_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Requires an isolated disposable PostgreSQL database URL supplied by the runner."""
     monkeypatch.setenv("YUANZHIKU_DATABASE_URL", POSTGRES_TEST_URL or "")
+    PostgresRepository(POSTGRES_TEST_URL or "", MIGRATIONS).migrate_to_head()
     services = ApplicationServices(data_paths(runtime_root))
 
     imported = services.imports.paste(

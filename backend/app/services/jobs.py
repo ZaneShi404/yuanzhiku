@@ -2,25 +2,92 @@
 
 from __future__ import annotations
 
+import ctypes
 import json
 import multiprocessing
+import os
 import queue
+import shutil
+import threading
 import time
 from pathlib import Path
 from typing import Callable
 
-from app.adapters.parsers import ParsedDocument, parse_local
+from app.domain.media import MediaProcessingLimits
+from app.domain.parsing import ParsedDocument
+from app.ports.parser import DocumentParserPort
+from app.ports.media import MediaAiUnavailable, MediaInputInvalid, MediaProcessingCancelled, MediaToolUnavailable
 from app.ports.repository import RepositoryPort
-from app.adapters.storage import ArtifactStore
+from app.ports.storage import ArtifactStoragePort
 from app.services.documents import DocumentService
+from app.services.videos import VideoService
 
 
-def _parse_worker(result_queue, artifact_path: str, filename: str, media_type: str | None) -> None:
+def _parse_worker(
+    result_queue,
+    parser: DocumentParserPort,
+    artifact_path: str,
+    filename: str,
+    media_type: str | None,
+    workspace: str,
+    maximum_bytes: int,
+) -> None:
     try:
-        result_queue.put(("result", parse_local(Path(artifact_path), filename, media_type)))
+        # The only adapter invocation is inside the parser port. No parser may
+        # initiate a cloud fallback or write outside this per-job workspace.
+        try:
+            result = parser.parse(Path(artifact_path), filename, media_type, Path(workspace), maximum_bytes)
+        except TypeError:
+            # Allows small deterministic parser fakes used by isolated tests.
+            result = parser.parse(Path(artifact_path), filename, media_type, Path(workspace))
+        result_queue.put(("result", result))
     except BaseException:
         # Parent deliberately keeps parser details out of durable logs/messages.
         result_queue.put(("error", None))
+
+
+def _resident_memory_bytes(process_id: int) -> int | None:
+    """Read process RSS without making psutil a mandatory runtime dependency."""
+    try:
+        import psutil  # type: ignore[import-not-found]
+
+        process = psutil.Process(process_id)
+        return process.memory_info().rss + sum(child.memory_info().rss for child in process.children(recursive=True))
+    except (ImportError, OSError):
+        pass
+    if os.name == "nt":
+        try:
+            process_query_information = 0x0400
+            process_vm_read = 0x0010
+            handle = ctypes.windll.kernel32.OpenProcess(process_query_information | process_vm_read, False, process_id)
+            if not handle:
+                return None
+            try:
+                class ProcessMemoryCountersEx(ctypes.Structure):
+                    _fields_ = [
+                        ("cb", ctypes.c_ulong), ("PageFaultCount", ctypes.c_ulong), ("PeakWorkingSetSize", ctypes.c_size_t),
+                        ("WorkingSetSize", ctypes.c_size_t), ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                        ("QuotaPagedPoolUsage", ctypes.c_size_t), ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                        ("QuotaNonPagedPoolUsage", ctypes.c_size_t), ("PagefileUsage", ctypes.c_size_t),
+                        ("PeakPagefileUsage", ctypes.c_size_t), ("PrivateUsage", ctypes.c_size_t),
+                    ]
+
+                counters = ProcessMemoryCountersEx()
+                counters.cb = ctypes.sizeof(counters)
+                if ctypes.windll.psapi.GetProcessMemoryInfo(handle, ctypes.byref(counters), counters.cb):
+                    return int(counters.WorkingSetSize)
+            finally:
+                ctypes.windll.kernel32.CloseHandle(handle)
+        except (AttributeError, OSError):
+            return None
+    return None
+
+
+def _directory_size(path: Path) -> int:
+    try:
+        return sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
+    except OSError:
+        return 0
 
 
 class ParserCircuitBreaker(RuntimeError):
@@ -31,20 +98,37 @@ class ParserCancelled(RuntimeError):
     pass
 
 
+class JobLeaseLost(RuntimeError):
+    pass
+
+
 class JobService:
     def __init__(
         self,
         repository: RepositoryPort,
-        artifacts: ArtifactStore,
+        artifacts: ArtifactStoragePort,
         documents: DocumentService,
         backup_runner: Callable[[], dict] | None = None,
         parse_runner: Callable[[Path, str, str | None, float, float, Callable[[], bool], Callable[[], None]], ParsedDocument] | None = None,
+        *,
+        parser: DocumentParserPort | None = None,
+        integrity_runner: Callable[[int], dict] | None = None,
+        videos: VideoService | None = None,
     ) -> None:
         self.repository = repository
         self.artifacts = artifacts
         self.documents = documents
+        self.videos = videos
+        if parser is None:
+            from app.adapters.parsers import LocalDocumentParser
+
+            parser = LocalDocumentParser(artifacts.paths.models, Path(__file__).resolve().parents[2] / "models.lock.json")
+        self.parser = parser
         self.backup_runner = backup_runner
+        self.integrity_runner = integrity_runner
         self.parse_runner = parse_runner or self._run_parser_with_circuit_breakers
+        self._memory_limit_mb = 2048
+        self._disk_limit_mb = 1024
 
     def run_once(self) -> dict | None:
         job = self.repository.claim_next_job()
@@ -53,31 +137,158 @@ class JobService:
         job_id = job["id"]
         try:
             if self.repository.job_cancel_requested(job_id):
-                self.repository.update_job(job_id, state="cancelled", message="已在执行前取消", done=True)
+                self._finish(job, "cancelled", "已在执行前取消")
                 return self.repository.get_job(job_id)
             if job["kind"] == "parse":
                 self._parse(job)
+            elif job["kind"] == "video_analyze":
+                self._video_analyze(job)
+            elif job["kind"] in {"video_transcribe", "video_summarize"}:
+                self._finish(job, "blocked", "未配置媒体 AI 服务", progress=100)
             elif job["kind"] == "backup":
                 if self.backup_runner is None:
-                    self.repository.update_job(job_id, state="blocked", message="备份服务不可用", done=True)
+                    self._finish(job, "blocked", "备份服务不可用")
                 else:
-                    self.backup_runner()
-                    self.repository.update_job(job_id, state="succeeded", progress=100, message="备份完成", done=True)
+                    self._run_with_lease_heartbeat(job, self.backup_runner)
+                    payload = json.loads(job["payload_json"])
+                    settings = (
+                        {"last_backup_date": payload["date"]}
+                        if isinstance(payload.get("date"), str)
+                        else None
+                    )
+                    self._finish(job, "succeeded", "备份完成", progress=100, settings=settings)
+            elif job["kind"] == "integrity_sample":
+                if self.integrity_runner is None:
+                    self._finish(job, "blocked", "完整性抽样服务不可用")
+                else:
+                    payload = json.loads(job["payload_json"])
+                    sample_size = payload.get("sample_size", 10)
+                    if not isinstance(sample_size, int) or isinstance(sample_size, bool):
+                        raise ValueError("完整性抽样参数无效")
+                    result = self._run_with_lease_heartbeat(
+                        job,
+                        lambda: self.integrity_runner(max(1, min(10_000, sample_size))),
+                    )
+                    if not result.get("valid"):
+                        raise RuntimeError("空闲完整性抽样发现校验失败")
+                    settings = (
+                        {"last_integrity_sample_date": payload["date"]}
+                        if isinstance(payload.get("date"), str)
+                        else None
+                    )
+                    self._finish(job, "succeeded", "空闲完整性抽样完成", progress=100, settings=settings)
             else:
-                self.repository.update_job(job_id, state="failed", message="未知作业类型", done=True)
+                self._finish(job, "failed", "未知作业类型")
+        except JobLeaseLost:
+            return self.repository.get_job(job_id)
         except ParserCancelled:
-            self.repository.update_job(job_id, state="cancelled", message="解析已取消", done=True)
+            try:
+                self._finish(job, "cancelled", "解析已取消")
+            except JobLeaseLost:
+                pass
+        except MediaProcessingCancelled:
+            try:
+                if self._finish(job, "cancelled", "视频分析已取消"):
+                    self.repository.set_version_completeness(job["content_version_id"], "incomplete")
+                    self.repository.update_processing(job["source_id"], "cancelled")
+            except JobLeaseLost:
+                pass
+        except MediaToolUnavailable:
+            try:
+                self._finish(job, "blocked", "未找到本地 FFmpeg 或 ffprobe", progress=100)
+                self.repository.set_version_completeness(job["content_version_id"], "incomplete")
+                self.repository.update_processing(job["source_id"], "blocked")
+            except JobLeaseLost:
+                pass
+        except MediaInputInvalid:
+            try:
+                self._finish(job, "failed", "本地视频无法分析")
+                self.repository.set_version_completeness(job["content_version_id"], "incomplete")
+                self.repository.update_processing(job["source_id"], "failed")
+            except JobLeaseLost:
+                pass
+        except MediaAiUnavailable:
+            try:
+                self._finish(job, "blocked", "未配置媒体 AI 服务", progress=100)
+            except JobLeaseLost:
+                pass
         except ParserCircuitBreaker as exc:
-            self.repository.set_version_completeness(job["content_version_id"], "incomplete")
-            self.repository.update_processing(job["source_id"], "failed")
-            self.repository.update_job(job_id, state="failed", message=str(exc), done=True)
+            try:
+                if self._finish(job, "failed", str(exc)):
+                    self.repository.set_version_completeness(job["content_version_id"], "incomplete")
+                    self.repository.update_processing(job["source_id"], "failed")
+            except JobLeaseLost:
+                pass
         except Exception:
             # No exception detail is persisted because it may include source paths or content.
-            state = "retry_wait" if job["attempt_count"] < job["max_attempts"] else "failed"
-            self.repository.update_job(job_id, state=state, message="本地处理失败", done=state == "failed")
-            if job["source_id"] and state == "failed":
-                self.repository.update_processing(job["source_id"], "failed")
+            retry_count = job.get("retry_count", max(0, job["attempt_count"] - 1))
+            state = "retry_wait" if retry_count < job["max_attempts"] else "failed"
+            try:
+                if self._finish(job, state, "本地处理失败", outcome="retryable_failure"):
+                    if state == "failed" and job["kind"] == "parse" and job["content_version_id"]:
+                        self.repository.set_version_completeness(job["content_version_id"], "incomplete")
+                    if job["source_id"] and state == "failed":
+                        self.repository.update_processing(job["source_id"], "failed")
+            except JobLeaseLost:
+                pass
         return self.repository.get_job(job_id)
+
+    def _finish(
+        self,
+        job: dict,
+        state: str,
+        message: str,
+        *,
+        progress: int | None = None,
+        outcome: str | None = None,
+        settings: dict[str, str | int] | None = None,
+    ) -> bool:
+        updated = self.repository.update_job(
+            job["id"],
+            job["lease_token"],
+            state=state,
+            progress=progress,
+            message=message,
+            done=True,
+            outcome=outcome,
+            settings=settings,
+        )
+        if not updated:
+            raise JobLeaseLost()
+        return True
+
+    def _heartbeat(self, job: dict) -> None:
+        if not self.repository.touch_job(job["id"], job["lease_token"]):
+            raise JobLeaseLost()
+
+    def _run_with_lease_heartbeat(self, job: dict, runner: Callable[[], object]) -> object:
+        """Run non-parser work while renewing the claim at a bounded interval."""
+        result: list[object] = []
+        failure: list[BaseException] = []
+
+        def execute() -> None:
+            try:
+                result.append(runner())
+            except BaseException as exc:
+                failure.append(exc)
+
+        worker = threading.Thread(target=execute, daemon=True)
+        worker.start()
+        lease_seconds = self._lease_seconds()
+        interval = max(1.0, min(30.0, lease_seconds / 3))
+        while worker.is_alive():
+            worker.join(timeout=interval)
+            if worker.is_alive():
+                self._heartbeat(job)
+        if failure:
+            raise failure[0]
+        return result[0] if result else None
+
+    def _lease_seconds(self) -> int:
+        try:
+            return max(60, min(86_400, int(self.repository.get_settings().get("job_lease_seconds", "300"))))
+        except (TypeError, ValueError):
+            return 300
 
     def _run_parser_with_circuit_breakers(
         self,
@@ -89,10 +300,17 @@ class JobService:
         cancelled: Callable[[], bool],
         heartbeat: Callable[[], None],
     ) -> ParsedDocument:
-        """Execute local parsing in a child process that can be stopped safely."""
+        """Execute parsing in a child process with bounded time, RSS and disk."""
         context = multiprocessing.get_context("spawn")
         result_queue = context.Queue(maxsize=1)
-        process = context.Process(target=_parse_worker, args=(result_queue, str(artifact_path), filename, media_type), daemon=True)
+        workspace = self.artifacts.staging_path().with_suffix("")
+        workspace.mkdir(parents=True, exist_ok=False)
+        maximum_bytes = self._memory_limit_mb * 1024 * 1024
+        process = context.Process(
+            target=_parse_worker,
+            args=(result_queue, self.parser, str(artifact_path), filename, media_type, str(workspace), maximum_bytes),
+            daemon=True,
+        )
         process.start()
         started = last_progress = time.monotonic()
         try:
@@ -104,6 +322,12 @@ class JobService:
                     raise ParserCircuitBreaker("解析超时断路器已触发")
                 if current - last_progress >= no_progress_seconds:
                     raise ParserCircuitBreaker("解析无进展断路器已触发")
+                process_id = getattr(process, "pid", None)
+                rss = _resident_memory_bytes(process_id) if isinstance(process_id, int) and process_id > 0 else None
+                if rss is not None and rss > maximum_bytes:
+                    raise ParserCircuitBreaker("解析内存断路器已触发")
+                if _directory_size(workspace) > self._disk_limit_mb * 1024 * 1024:
+                    raise ParserCircuitBreaker("解析临时磁盘断路器已触发")
                 heartbeat()
                 try:
                     kind, payload = result_queue.get(timeout=min(0.1, max(0.01, no_progress_seconds)))
@@ -125,15 +349,60 @@ class JobService:
                 process.terminate()
             process.join(timeout=1)
             result_queue.close()
+            shutil.rmtree(workspace, ignore_errors=True)
+
+    def _video_analyze(self, job: dict) -> None:
+        if self.videos is None:
+            if self._finish(job, "blocked", "本地视频分析服务不可用", progress=100):
+                self.repository.set_version_completeness(job["content_version_id"], "incomplete")
+                self.repository.update_processing(job["source_id"], "blocked")
+            return
+        settings = self.repository.get_settings()
+        try:
+            maximum_frames = max(1, min(32, int(settings.get("video_max_frames", "12"))))
+            timeout_seconds = max(60.0, min(86_400.0, float(settings.get("video_timeout_seconds", "3600"))))
+            memory_limit_mb = max(64, min(32_768, int(settings.get("video_memory_limit_mb", "2048"))))
+            disk_limit_mb = max(64, min(32_768, int(settings.get("video_disk_limit_mb", "1024"))))
+        except (TypeError, ValueError):
+            maximum_frames = 12
+            timeout_seconds = 3600.0
+            memory_limit_mb = 2048
+            disk_limit_mb = 1024
+        limits = MediaProcessingLimits(
+            timeout_seconds=timeout_seconds,
+            maximum_memory_bytes=memory_limit_mb * 1024 * 1024,
+            maximum_workspace_bytes=disk_limit_mb * 1024 * 1024,
+        )
+        self.videos.analyze(
+            version_id=job["content_version_id"],
+            artifact_sha256=job["artifact_sha256"],
+            maximum_frames=maximum_frames,
+            limits=limits,
+            cancelled=lambda: self.repository.job_cancel_requested(job["id"]),
+            heartbeat=lambda: self._heartbeat(job),
+            progress=lambda value, message: self._update_video_progress(job, value, message),
+        )
+        if self.repository.job_cancel_requested(job["id"]):
+            self._finish(job, "cancelled", "视频分析已取消")
+            return
+        if self._finish(job, "succeeded", "本地视频分析完成", progress=100):
+            self.repository.set_version_completeness(job["content_version_id"], "complete")
+            self.repository.update_processing(job["source_id"], "succeeded")
+
+    def _update_video_progress(self, job: dict, progress: int, message: str) -> None:
+        if not self.repository.update_job(job["id"], job["lease_token"], progress=progress, message=message):
+            raise JobLeaseLost()
 
     def _parse(self, job: dict) -> None:
         if self.repository.job_cancel_requested(job["id"]):
-            self.repository.update_job(job["id"], state="cancelled", message="已取消", done=True)
+            self._finish(job, "cancelled", "已取消")
             return
         payload = json.loads(job["payload_json"])
         settings = self.repository.get_settings()
         timeout_seconds = float(settings.get("parser_timeout_seconds", "86400"))
         no_progress_seconds = float(settings.get("parser_no_progress_seconds", "86400"))
+        self._memory_limit_mb = int(settings.get("parser_memory_limit_mb", "2048"))
+        self._disk_limit_mb = int(settings.get("parser_disk_limit_mb", "1024"))
         result = self.parse_runner(
             self.artifacts.artifact_path(job["artifact_sha256"]),
             payload["filename"],
@@ -141,23 +410,56 @@ class JobService:
             timeout_seconds,
             no_progress_seconds,
             lambda: self.repository.job_cancel_requested(job["id"]),
-            lambda: self.repository.touch_job(job["id"]),
+            lambda: self._heartbeat(job),
         )
+        capability = self.parser.capability()
         if result.parser_name != "docling-local":
-            self.repository.audit("parser_fallback", job["content_version_id"], result.parser_name)
+            reason = capability.get("unavailable_reason") or result.parser_name
+            self.repository.audit("parser_fallback", job["content_version_id"], str(reason))
         if result.blocked_reason:
             state = "blocked" if result.blocked_reason == "awaiting_ocr" or "加密" in result.blocked_reason else "failed"
-            self.repository.set_version_completeness(job["content_version_id"], "incomplete")
-            self.repository.update_processing(job["source_id"], "awaiting_ocr" if result.blocked_reason == "awaiting_ocr" else state)
-            self.repository.update_job(job["id"], state=state, progress=100, message=result.blocked_reason, done=True)
+            if self._finish(job, state, result.blocked_reason, progress=100):
+                self.repository.set_version_completeness(job["content_version_id"], "incomplete")
+                self.repository.update_processing(job["source_id"], "awaiting_ocr" if result.blocked_reason == "awaiting_ocr" else state)
             return
         if self.repository.job_cancel_requested(job["id"]):
-            self.repository.update_job(job["id"], state="cancelled", message="已取消", done=True)
+            self._finish(job, "cancelled", "已取消")
             return
-        output = self.documents.record_parsed(job["content_version_id"], job["artifact_sha256"], result.text, result.parser_name, result.config_hash, result.format, result.segments)
-        indexed = bool(self.repository.search_chunks_for_representation(output["representation"]["id"]))
-        if not output["evidence"]["id"] or not indexed or not self.artifacts.verify(job["artifact_sha256"]):
+        chunks, evidence_items = self.documents.parsed_bundle(
+            result.text, result.config_hash, result.format, result.segments
+        )
+        existing = self.repository.find_extraction_representation(job["content_version_id"], result.parser_name, result.config_hash)
+        if existing is None or not self.repository.representation_bundle_complete(
+            existing["id"],
+            version_id=job["content_version_id"],
+            artifact_sha256=job["artifact_sha256"],
+            kind="extraction",
+            parser_name=result.parser_name,
+            config_hash=result.config_hash,
+            text=result.text,
+            chunks=chunks,
+            evidence=evidence_items,
+        ):
+            with self.artifacts.operation():
+                output = self.documents.record_parsed(
+                    job["content_version_id"], job["artifact_sha256"], result.text,
+                    result.parser_name, result.config_hash, result.format, result.segments,
+                )
+                representation = output["representation"]
+        else:
+            representation = existing
+        if not self.repository.representation_bundle_complete(
+            representation["id"],
+            version_id=job["content_version_id"],
+            artifact_sha256=job["artifact_sha256"],
+            kind="extraction",
+            parser_name=result.parser_name,
+            config_hash=result.config_hash,
+            text=result.text,
+            chunks=chunks,
+            evidence=evidence_items,
+        ) or not self.artifacts.verify(job["artifact_sha256"]):
             raise RuntimeError("输出、证据、索引或 artifact 校验失败")
-        self.repository.set_version_completeness(job["content_version_id"], "complete")
-        self.repository.update_processing(job["source_id"], "succeeded")
-        self.repository.update_job(job["id"], state="succeeded", progress=100, message="本地解析完成", done=True)
+        if self._finish(job, "succeeded", "本地解析完成", progress=100):
+            self.repository.set_version_completeness(job["content_version_id"], "complete")
+            self.repository.update_processing(job["source_id"], "succeeded")

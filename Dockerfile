@@ -1,7 +1,7 @@
 FROM node:22.13.1-bookworm-slim AS web-build
 WORKDIR /workspace/frontend
-COPY frontend/package.json ./
-RUN npm install --ignore-scripts
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci --ignore-scripts
 COPY frontend/ ./
 RUN npm run build
 
@@ -11,6 +11,10 @@ WORKDIR /workspace
 COPY backend/requirements.lock ./backend/requirements.lock
 RUN pip install --no-cache-dir -r backend/requirements.lock
 COPY backend/ ./backend/
-COPY --from=web-build /workspace/frontend/dist ./frontend/dist
 EXPOSE 8765
 CMD ["python", "-m", "uvicorn", "app.main:application", "--factory", "--host", "0.0.0.0", "--port", "8765", "--no-access-log"]
+
+FROM nginx:1.27.4-alpine AS web
+COPY frontend/nginx.conf /etc/nginx/conf.d/default.conf
+COPY --from=web-build /workspace/frontend/dist /usr/share/nginx/html
+EXPOSE 80

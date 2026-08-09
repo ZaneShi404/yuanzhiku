@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field, HttpUrl, field_validator
+from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
 
 
 class RightsCategory(str, Enum):
@@ -56,6 +56,7 @@ class PasteImportRequest(BaseModel):
     language: str = Field(default="zh", max_length=32)
     author: str | None = Field(default=None, max_length=300)
     notes: str | None = Field(default=None, max_length=4000)
+    source_date: date | None = None
     categories: list[str] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
 
@@ -73,8 +74,17 @@ class SourceMetadataUpdate(BaseModel):
     author: str | None = Field(default=None, max_length=300)
     language: str | None = Field(default=None, max_length=32)
     notes: str | None = Field(default=None, max_length=4000)
+    source_date: date | None = None
     categories: list[str] | None = None
     tags: list[str] | None = None
+
+    @model_validator(mode="after")
+    def required_fields_are_not_cleared(self) -> "SourceMetadataUpdate":
+        non_nullable = {"title", "language", "categories", "tags"}
+        cleared = non_nullable.intersection(self.model_fields_set)
+        if any(getattr(self, field) is None for field in cleared):
+            raise ValueError("标题、语言、分类和标签不能设为 null；请提交有效值或省略字段")
+        return self
 
     @field_validator("categories")
     @classmethod
@@ -130,6 +140,13 @@ class TopicCreate(BaseModel):
 class SettingsUpdate(BaseModel):
     parser_timeout_seconds: int | None = Field(default=None, ge=60, le=86_400)
     parser_no_progress_seconds: int | None = Field(default=None, ge=60, le=86_400)
+    parser_memory_limit_mb: int | None = Field(default=None, ge=64, le=32_768)
+    parser_disk_limit_mb: int | None = Field(default=None, ge=64, le=32_768)
+    video_timeout_seconds: int | None = Field(default=None, ge=60, le=86_400)
+    video_memory_limit_mb: int | None = Field(default=None, ge=64, le=32_768)
+    video_disk_limit_mb: int | None = Field(default=None, ge=64, le=32_768)
+    video_max_frames: int | None = Field(default=None, ge=1, le=32)
+    job_lease_seconds: int | None = Field(default=None, ge=60, le=86_400)
     max_retry_attempts: int | None = Field(default=None, ge=0, le=10)
 
 

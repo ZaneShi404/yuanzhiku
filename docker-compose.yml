@@ -1,8 +1,6 @@
 services:
   api:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: yuanzhiku-application:local
     environment:
       YUANZHIKU_DATA_ROOT: /data
       YUANZHIKU_DATABASE_URL: postgresql+psycopg://yuanzhiku:yuanzhiku_local_only@postgres:5432/yuanzhiku
@@ -14,13 +12,13 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_started
     restart: "no"
   worker:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: yuanzhiku-application:local
     environment:
       YUANZHIKU_DATA_ROOT: /data
       YUANZHIKU_DATABASE_URL: postgresql+psycopg://yuanzhiku:yuanzhiku_local_only@postgres:5432/yuanzhiku
@@ -31,18 +29,34 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_started
     restart: "no"
+  migrate:
+    image: yuanzhiku-application:local
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: application
+    environment:
+      YUANZHIKU_DATABASE_URL: postgresql+psycopg://yuanzhiku:yuanzhiku_local_only@postgres:5432/yuanzhiku
+    command: ["python", "-m", "app.migrate"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
   web:
-    image: nginx:1.27.4-alpine
-    volumes:
-      - ./frontend/nginx.conf:/etc/nginx/conf.d/default.conf:ro
-      - ./frontend/dist:/usr/share/nginx/html:ro
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: web
     ports:
       - "127.0.0.1:5173:80"
     depends_on:
-      - api
+      api:
+        condition: service_started
     restart: "no"
   postgres:
     image: postgres:17.2-alpine

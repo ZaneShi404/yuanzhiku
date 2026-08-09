@@ -1,39 +1,32 @@
-"""Local-only parsing adapters. No network or model download code exists here."""
+"""Local parsing adapters with an explicit, offline-only Docling policy."""
 
 from __future__ import annotations
 
 import hashlib
 import io
-from dataclasses import dataclass
+import json
 from pathlib import Path
+from typing import Any
 
-
-@dataclass(frozen=True)
-class ParsedSegment:
-    """A text range with a parser-proven native location."""
-
-    start: int
-    end: int
-    locator: dict[str, int | str]
-
-
-@dataclass(frozen=True)
-class ParsedDocument:
-    text: str
-    parser_name: str
-    config_hash: str
-    format: str
-    blocked_reason: str | None = None
-    segments: tuple[ParsedSegment, ...] = ()
+from app.domain.parsing import ParsedDocument, ParsedSegment
 
 
 def _config_hash(name: str, version: str) -> str:
     return hashlib.sha256(f"{name}:{version}:local-only".encode("ascii")).hexdigest()
 
 
-def parse_local(artifact_path: Path, filename: str, media_type: str | None = None) -> ParsedDocument:
+def _read_limited(artifact_path: Path, maximum_bytes: int | None = None) -> bytes:
+    size = artifact_path.stat().st_size
+    if maximum_bytes is not None and size > maximum_bytes:
+        raise ValueError("解析输入超过进程内存限制")
+    with artifact_path.open("rb") as stream:
+        return stream.read()
+
+
+def parse_local(artifact_path: Path, filename: str, media_type: str | None = None, maximum_bytes: int | None = None) -> ParsedDocument:
+    """Parse with the existing fully local fallback adapters only."""
     suffix = Path(filename).suffix.lower()
-    raw = artifact_path.read_bytes()
+    raw = _read_limited(artifact_path, maximum_bytes)
     if suffix in {".txt", ".md", ".markdown"}:
         try:
             return ParsedDocument(raw.decode("utf-8"), "native-utf8", _config_hash("native-utf8", "1"), suffix[1:])
@@ -81,3 +74,81 @@ def parse_local(artifact_path: Path, filename: str, media_type: str | None = Non
         except Exception:
             return ParsedDocument("", "python-docx-local", _config_hash("python-docx-local", "1.1.2"), "docx", "DOCX 无法本地解析")
     return ParsedDocument("", "unsupported-local", _config_hash("unsupported-local", "1"), suffix.lstrip("."), "不支持的文档类型")
+
+
+class LocalDocumentParser:
+    """Docling-first only when an approved, complete local cache is present.
+
+    The current model lock intentionally authorizes no model downloads. This
+    adapter never triggers Docling's implicit first-use network downloads.
+    """
+
+    def __init__(self, models_directory: Path, lockfile: Path) -> None:
+        self.models_directory = models_directory
+        self.lockfile = lockfile
+
+    def _model_status(self) -> tuple[bool, str, dict[str, Any]]:
+        try:
+            lock = json.loads(self.lockfile.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return False, "模型锁文件无效", {}
+        models = lock.get("models")
+        if not isinstance(models, list) or not models:
+            return False, "没有已批准的 Docling 模型", {}
+        for model in models:
+            if not isinstance(model, dict):
+                return False, "模型锁文件无效", {}
+            relative_path = model.get("cache_path")
+            expected_hash = model.get("sha256")
+            if not isinstance(relative_path, str) or not isinstance(expected_hash, str):
+                return False, "模型锁文件缺少 cache_path 或 sha256", {}
+            candidate = self.models_directory / relative_path
+            if not candidate.is_file():
+                return False, "已批准的 Docling 模型未缓存", {}
+            digest = hashlib.sha256(candidate.read_bytes()).hexdigest()
+            if digest != expected_hash:
+                return False, "已批准的 Docling 模型哈希不匹配", {}
+        return True, "", lock
+
+    def capability(self) -> dict[str, object]:
+        ready, reason, lock = self._model_status()
+        try:
+            import docling  # type: ignore[import-not-found]
+
+            package_available = True
+            package_version = getattr(docling, "__version__", "unknown")
+        except ImportError:
+            package_available = False
+            package_version = None
+        configured = len(lock.get("models", [])) if lock else 0
+        enabled = ready and package_available
+        return {
+            "preferred": "docling",
+            "enabled": enabled,
+            "configured_model_downloads": configured,
+            "package_version": package_version,
+            "unavailable_reason": None if enabled else (reason or "Docling Python 包未安装"),
+            "fallbacks": ["pypdf", "python-docx", "native-utf8"],
+            "cloud_fallback": False,
+        }
+
+    def parse(self, artifact_path: Path, filename: str, media_type: str | None, workspace: Path, maximum_bytes: int | None = None) -> ParsedDocument:
+        suffix = Path(filename).suffix.lower()
+        # TXT/Markdown are deliberately native UTF-8. PDF uses Docling only
+        # after the cache is completely verified; otherwise no implicit network
+        # request is permitted and the safe local fallback is selected.
+        ready, _, _ = self._model_status()
+        if suffix == ".pdf" and ready:
+            try:
+                from docling.document_converter import DocumentConverter  # type: ignore[import-not-found]
+
+                workspace.mkdir(parents=True, exist_ok=True)
+                result = DocumentConverter().convert(str(artifact_path))
+                text = result.document.export_to_markdown()
+                if text.strip():
+                    return ParsedDocument(text, "docling-local", _config_hash("docling-local", "approved-cache"), "pdf")
+            except Exception:
+                # No exception content reaches durable job messages. The native
+                # fallback is preferred over a cloud or first-use model download.
+                pass
+        return parse_local(artifact_path, filename, media_type, maximum_bytes)

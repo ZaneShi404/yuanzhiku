@@ -8,11 +8,11 @@ import shutil
 import threading
 import uuid
 from contextlib import contextmanager
-from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
 
-from app.core.config import DataPaths
+from app.core.config import DataPaths, InterprocessLock
+from app.domain.artifacts import StoredArtifact
 
 MAX_FILE_BYTES = 2 * 1024 * 1024 * 1024
 MIN_FREE_AFTER = 10 * 1024 * 1024 * 1024
@@ -23,14 +23,6 @@ class StorageLimitError(ValueError):
     pass
 
 
-@dataclass(frozen=True)
-class StoredArtifact:
-    sha256: str
-    byte_size: int
-    path: Path
-    was_new: bool
-
-
 class ArtifactStore:
     def __init__(self, paths: DataPaths) -> None:
         self.paths = paths
@@ -38,11 +30,12 @@ class ArtifactStore:
         # using this data root. This lock additionally serializes file/database
         # compensations between concurrent requests in this instance.
         self._operation_lock = threading.RLock()
+        self._maintenance_lock = InterprocessLock(paths.maintenance_lock_file)
 
     @contextmanager
     def operation(self):
-        """Keep a multi-step artifact operation mutually exclusive."""
-        with self._operation_lock:
+        """Keep file/database orchestration mutually exclusive across workers."""
+        with self._operation_lock, self._maintenance_lock:
             yield
 
     def artifact_path(self, sha256: str) -> Path:

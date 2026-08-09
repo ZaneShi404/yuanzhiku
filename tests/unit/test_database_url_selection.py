@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import os
 import re
 import shutil
+import sys
+import types
+import uuid
 from pathlib import Path
 
 import pytest
@@ -12,15 +16,16 @@ from app.core.config import DatabaseUrlConfigurationError, data_paths, database_
 from app.main import ApplicationServices
 
 
-RUN_ROOT = Path(__file__).resolve().parents[1] / "runtime" / "pgfix-20260728T173841Z"
+RUN_ROOT = Path(os.environ.get("YUANZHIKU_TEST_RUNTIME", Path(__file__).resolve().parents[1] / "runtime")) / "database-url-selection"
 COMPOSE_PATH = Path(__file__).resolve().parents[2] / "docker-compose.yml"
+DOCKERFILE_PATH = Path(__file__).resolve().parents[2] / "Dockerfile"
+DOCKERIGNORE_PATH = Path(__file__).resolve().parents[2] / ".dockerignore"
 
 
 @pytest.fixture()
 def runtime_root() -> Path:
     RUN_ROOT.mkdir(parents=True, exist_ok=True)
-    root = RUN_ROOT / "database-url-selection"
-    shutil.rmtree(root, ignore_errors=True)
+    root = RUN_ROOT / uuid.uuid4().hex
     root.mkdir()
     yield root
     shutil.rmtree(root, ignore_errors=True)
@@ -95,6 +100,65 @@ def test_unsupported_database_url_fails_before_sqlite_creation(
         ApplicationServices(data_paths(runtime_root))
 
     assert not (runtime_root / "state" / "knowledge.db").exists()
+
+
+def test_postgres_initialize_checks_schema_without_provisioning(monkeypatch: pytest.MonkeyPatch) -> None:
+    repository = PostgresRepository(
+        "postgresql+psycopg://user:password@127.0.0.1:5432/yuanzhiku",
+        Path(__file__).resolve().parents[2] / "backend" / "migrations" / "postgresql",
+    )
+    calls: list[str] = []
+
+    class FakeConnection:
+        def __enter__(self) -> "FakeConnection":
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+        def execute(self, _statement: object) -> None:
+            return None
+
+    class FakeEngine:
+        def connect(self) -> FakeConnection:
+            return FakeConnection()
+
+        def dispose(self) -> None:
+            calls.append("dispose")
+
+    sqlalchemy = types.ModuleType("sqlalchemy")
+    sqlalchemy.create_engine = lambda *_args, **_kwargs: FakeEngine()
+    sqlalchemy.text = lambda statement: statement
+    monkeypatch.setitem(sys.modules, "sqlalchemy", sqlalchemy)
+    monkeypatch.setattr(repository, "_assert_schema_ready", lambda: calls.append("schema"))
+    monkeypatch.setattr(repository, "_ensure_settings_defaults", lambda: calls.append("settings"))
+    monkeypatch.setattr(
+        repository,
+        "migrate_to_head",
+        lambda: (_ for _ in ()).throw(AssertionError("initialize must not migrate")),
+    )
+
+    repository.initialize()
+
+    assert calls == ["schema", "settings"]
+
+
+def test_compose_assigns_migrations_to_one_shot_service_and_web_uses_built_output() -> None:
+    compose = COMPOSE_PATH.read_text(encoding="utf-8")
+    dockerfile = DOCKERFILE_PATH.read_text(encoding="utf-8")
+    dockerignore = DOCKERIGNORE_PATH.read_text(encoding="utf-8")
+
+    assert 'image: yuanzhiku-application:local' in compose
+    assert compose.count('image: yuanzhiku-application:local') == 3
+    assert 'command: ["python", "-m", "app.migrate"]' in compose
+    assert compose.count("condition: service_completed_successfully") == 2
+    assert "frontend/dist:/usr/share/nginx/html" not in compose
+    assert "target: web" in compose
+    assert "COPY frontend/package.json frontend/package-lock.json ./" in dockerfile
+    assert "RUN npm ci --ignore-scripts" in dockerfile
+    assert "COPY --from=web-build /workspace/frontend/dist /usr/share/nginx/html" in dockerfile
+    assert "COPY --from=web-build /workspace/frontend/dist ./frontend/dist" not in dockerfile
+    assert "frontend/dist" in dockerignore
 
 
 def test_default_database_url_retains_local_sqlite(runtime_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:

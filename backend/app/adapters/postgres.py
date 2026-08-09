@@ -18,7 +18,8 @@ from typing import Any, Iterator
 from app.adapters.sqlite import BACKUP_TABLES, EXPORT_TABLES, SqliteRepository, identifier, now, redact_url_userinfo
 
 
-_JSON_COLUMNS = {"categories_json", "tags_json", "snapshot_json", "locator_json", "payload_json"}
+_JSON_COLUMNS = {"categories_json", "tags_json", "snapshot_json", "locator_json", "payload_json", "metadata_json"}
+_MIGRATION_ADVISORY_LOCK = 902807281
 
 
 class PostgresMigrationAdapter:
@@ -127,8 +128,6 @@ class PostgresRepository(SqliteRepository):
 
     def initialize(self) -> None:
         try:
-            from alembic import command
-            from alembic.config import Config
             from sqlalchemy import create_engine, text
         except ImportError as exc:
             raise RuntimeError("PostgreSQL 运行时需要 SQLAlchemy、Alembic 和 psycopg") from exc
@@ -147,29 +146,94 @@ class PostgresRepository(SqliteRepository):
                 "YUANZHIKU_DATABASE_URL、PostgreSQL 服务、凭据和 psycopg driver"
             ) from exc
 
-        project_root = self.migrations_directory.parents[1]
-        configuration = Config(str(project_root / "alembic.ini"))
-        configuration.set_main_option("script_location", str(project_root / "alembic"))
-        configuration.set_main_option("sqlalchemy.url", sqlalchemy_url)
-        try:
-            # API and worker can start together in Compose. A transaction-scoped
-            # advisory lock ensures only one process upgrades the shared schema.
-            with engine.begin() as connection:
-                connection.execute(text("SELECT pg_advisory_xact_lock(902807281)"))
-                command.upgrade(configuration, "head")
-        except Exception as exc:
-            engine.dispose()
-            raise RuntimeError("无法迁移 PostgreSQL schema；数据库未作为 SQLite 使用") from exc
-
         self._engine = engine
         self._text = text
         try:
+            self._assert_schema_ready()
             self._ensure_settings_defaults()
         except Exception:
             self._engine.dispose()
             self._engine = None
             self._text = None
             raise
+
+    def _alembic_config(self):
+        from alembic.config import Config
+
+        project_root = self.migrations_directory.parents[1]
+        configuration = Config(str(project_root / "alembic.ini"))
+        configuration.set_main_option("script_location", str(project_root / "alembic"))
+        configuration.set_main_option("sqlalchemy.url", self._sqlalchemy_url(self.database_url))
+        return configuration
+
+    def _assert_schema_ready(self) -> None:
+        try:
+            from alembic.runtime.migration import MigrationContext
+            from alembic.script import ScriptDirectory
+
+            configuration = self._alembic_config()
+            expected_heads = set(ScriptDirectory.from_config(configuration).get_heads())
+            assert self._engine is not None
+            with self._engine.connect() as connection:
+                actual_heads = set(MigrationContext.configure(connection).get_current_heads())
+        except Exception as exc:
+            raise RuntimeError("无法检查 PostgreSQL schema 状态；数据库未作为 SQLite 使用") from exc
+        if actual_heads != expected_heads:
+            raise RuntimeError("PostgreSQL schema 未就绪；请先运行专用 migrate 服务")
+
+    def assert_empty_restore_target(self) -> None:
+        """Reject a restore database that already contains user-visible tables."""
+        try:
+            from sqlalchemy import create_engine, text
+        except ImportError as exc:
+            raise RuntimeError("PostgreSQL 还原需要 SQLAlchemy、Alembic 和 psycopg") from exc
+
+        engine: Any | None = None
+        try:
+            engine = create_engine(self._sqlalchemy_url(self.database_url), pool_pre_ping=True)
+            with engine.connect() as connection:
+                tables = connection.execute(
+                    text(
+                        "SELECT table_name FROM information_schema.tables "
+                        "WHERE table_schema = current_schema() "
+                        "AND table_type = 'BASE TABLE'"
+                    )
+                ).scalars().all()
+        except Exception as exc:
+            raise RuntimeError("无法检查 PostgreSQL 还原目标；数据库未作为 SQLite 使用") from exc
+        finally:
+            if engine is not None:
+                engine.dispose()
+        if tables:
+            raise ValueError("PostgreSQL 还原目标必须为空")
+
+    def migrate_to_head(self) -> None:
+        """Provision an explicit PostgreSQL target; API and workers never call this."""
+        try:
+            from alembic import command
+            from sqlalchemy import create_engine, text
+        except ImportError as exc:
+            raise RuntimeError("PostgreSQL 迁移需要 SQLAlchemy、Alembic 和 psycopg") from exc
+        engine: Any | None = None
+        try:
+            engine = create_engine(self._sqlalchemy_url(self.database_url), pool_pre_ping=True)
+            with engine.connect() as connection:
+                connection.execute(
+                    text("SELECT pg_advisory_lock(:lock_id)"),
+                    {"lock_id": _MIGRATION_ADVISORY_LOCK},
+                )
+                try:
+                    command.upgrade(self._alembic_config(), "head")
+                finally:
+                    connection.execute(
+                        text("SELECT pg_advisory_unlock(:lock_id)"),
+                        {"lock_id": _MIGRATION_ADVISORY_LOCK},
+                    )
+        except Exception as exc:
+            raise RuntimeError("无法迁移 PostgreSQL schema；数据库未作为 SQLite 使用") from exc
+        finally:
+            if engine is not None:
+                engine.dispose()
 
     @contextmanager
     def connection(self) -> Iterator[_PostgresConnection]:
@@ -182,8 +246,16 @@ class PostgresRepository(SqliteRepository):
         defaults = {
             "parser_timeout_seconds": "86400",
             "parser_no_progress_seconds": "86400",
+            "parser_memory_limit_mb": "2048",
+            "parser_disk_limit_mb": "1024",
+            "video_timeout_seconds": "3600",
+            "video_memory_limit_mb": "2048",
+            "video_disk_limit_mb": "1024",
+            "video_max_frames": "12",
+            "job_lease_seconds": "300",
             "max_retry_attempts": "2",
             "last_backup_date": "",
+            "last_integrity_sample_date": "",
         }
         with self.connection() as connection:
             for key, value in defaults.items():
@@ -231,7 +303,7 @@ class PostgresRepository(SqliteRepository):
 
     def has_user_records(self) -> bool:
         tables = (
-            "artifacts", "sources", "source_metadata_revisions", "content_versions", "source_relations",
+            "artifacts", "sources", "source_metadata_revisions", "content_versions", "video_analyses", "video_frames", "source_relations",
             "representations", "search_chunks", "evidence", "citations", "knowledge", "knowledge_evidence",
             "jobs", "job_attempts", "audit_events", "external_cards", "topics", "topic_sources", "backups",
         )
@@ -239,27 +311,5 @@ class PostgresRepository(SqliteRepository):
             return any(connection.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone() is not None for table in tables)
 
     def claim_next_job(self) -> dict[str, Any] | None:
-        """Claim one job atomically across the separate Compose API/worker processes."""
-        with self.connection() as connection:
-            row = connection.execute(
-                "SELECT id FROM jobs WHERE state IN ('queued','retry_wait') "
-                "ORDER BY priority DESC, created_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED"
-            ).fetchone()
-            if row is None:
-                return None
-            job_id = row["id"]
-            stamp = now()
-            updated = connection.execute(
-                "UPDATE jobs SET state='running', attempt_count=attempt_count+1, started_at=?, heartbeat_at=?, updated_at=? "
-                "WHERE id=? AND state IN ('queued','retry_wait')",
-                (stamp, stamp, stamp, job_id),
-            ).rowcount
-            if not updated:
-                return None
-            current = connection.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
-            assert current is not None
-            connection.execute(
-                "INSERT INTO job_attempts(id,job_id,attempt_number,state,started_at) VALUES(?,?,?,?,?)",
-                (identifier(), job_id, current["attempt_count"], "running", stamp),
-            )
-            return current
+        """Reuse fenced leasing with PostgreSQL row-level claim locks."""
+        return super().claim_next_job()

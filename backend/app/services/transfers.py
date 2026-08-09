@@ -15,13 +15,21 @@ import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
-from app.adapters.sqlite import BACKUP_TABLE_COLUMNS, BACKUP_TABLES, EXPORT_TABLES, SqliteRepository
+from app.adapters.sqlite import (
+    BACKUP_TABLE_COLUMNS,
+    BACKUP_TABLES,
+    EXPORT_TABLES,
+    SqliteRepository,
+    redact_url_userinfo,
+)
 from app.adapters.storage import ArtifactStore
 from app.core.config import DataPaths, database_backend
 from app.ports.repository import RepositoryPort
 
-ARCHIVE_SCHEMA_VERSION = 1
+ARCHIVE_SCHEMA_VERSION = 5
+SUPPORTED_ARCHIVE_SCHEMA_VERSIONS = frozenset({1, 2, 3, 4, ARCHIVE_SCHEMA_VERSION})
 BACKUP_CATALOG_STATES = frozenset({"succeeded", "pruning", "discarding"})
 SAFE_ARCHIVE_BASENAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,250}\.zip\Z")
 WINDOWS_RESERVED_BASENAMES = frozenset(
@@ -57,11 +65,63 @@ class TransferService:
     @staticmethod
     def _safe_members(archive: zipfile.ZipFile) -> list[zipfile.ZipInfo]:
         members = archive.infolist()
+        seen: set[str] = set()
         for member in members:
             candidate = Path(member.filename)
-            if member.is_dir() or candidate.is_absolute() or ".." in candidate.parts or "\\" in member.filename:
+            if (
+                member.is_dir()
+                or member.filename in seen
+                or candidate.is_absolute()
+                or ".." in candidate.parts
+                or "\\" in member.filename
+            ):
                 raise ValueError("归档含不安全路径")
+            seen.add(member.filename)
         return members
+
+    @staticmethod
+    def _ordered_rows(rows: dict[str, list[dict[str, Any]]], tables: tuple[str, ...]) -> dict[str, list[dict[str, Any]]]:
+        """Serialize rows in the portable contract order, never adapter SELECT order."""
+        normalized: dict[str, list[dict[str, Any]]] = {}
+        for table in tables:
+            columns = BACKUP_TABLE_COLUMNS[table]
+            normalized[table] = [
+                {column: row.get(column) for column in columns}
+                for row in rows.get(table, [])
+            ]
+        return normalized
+
+    @staticmethod
+    def _artifact_members(rows: dict[str, list[dict[str, Any]]]) -> list[tuple[str, Path]]:
+        members: list[tuple[str, Path]] = []
+        for artifact in rows["artifacts"]:
+            sha256 = artifact.get("sha256")
+            if not isinstance(sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", sha256):
+                raise ValueError("artifact 记录无效")
+            members.append((f"artifacts/{sha256[:2]}/{sha256}", Path(sha256)))
+        return members
+
+    @staticmethod
+    def _entry_map(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        entries = manifest.get("entries")
+        if not isinstance(entries, list):
+            raise ValueError("manifest 条目无效")
+        mapped: dict[str, dict[str, Any]] = {}
+        for entry in entries:
+            path = entry.get("path") if isinstance(entry, dict) else None
+            digest = entry.get("sha256") if isinstance(entry, dict) else None
+            byte_size = entry.get("byte_size") if isinstance(entry, dict) else None
+            if (
+                not isinstance(path, str)
+                or path in mapped
+                or not isinstance(digest, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", digest)
+                or not isinstance(byte_size, int)
+                or byte_size < 0
+            ):
+                raise ValueError("manifest 条目无效")
+            mapped[path] = entry
+        return mapped
 
     def _snapshot_database(self, destination: Path) -> None:
         source = sqlite3.connect(self.paths.database)
@@ -71,6 +131,78 @@ class TransferService:
         finally:
             target.close()
             source.close()
+
+    def _sanitize_snapshot_external_cards(self, snapshot: Path) -> None:
+        """Remove legacy URL userinfo from the copied snapshot before it is archived."""
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = sqlite3.connect(snapshot)
+            rows = connection.execute("SELECT id,url FROM external_cards").fetchall()
+            for card_id, value in rows:
+                redacted = redact_url_userinfo(value)
+                if redacted != value:
+                    connection.execute("UPDATE external_cards SET url=? WHERE id=?", (redacted, card_id))
+            connection.commit()
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def _sqlite_snapshot_records(self, snapshot: Path, schema_version: int) -> dict[str, list[dict[str, Any]]]:
+        """Read a backup snapshot without initializing or repairing its contents."""
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = sqlite3.connect(f"{snapshot.resolve().as_uri()}?mode=ro", uri=True)
+            connection.row_factory = sqlite3.Row
+            rows = {
+                table: [dict(row) for row in connection.execute(f"SELECT * FROM {table}").fetchall()]
+                for table in BACKUP_TABLES
+            }
+        except (OSError, sqlite3.DatabaseError) as exc:
+            raise ValueError("SQLite 状态快照无效") from exc
+        finally:
+            if connection is not None:
+                connection.close()
+        for card in rows["external_cards"]:
+            if urlsplit(card["url"]).username is not None or urlsplit(card["url"]).password is not None:
+                raise ValueError("SQLite 状态快照无效")
+        try:
+            return self._backup_records({"schema_version": schema_version, "records": rows})
+        except ValueError as exc:
+            raise ValueError("SQLite 状态快照无效") from exc
+
+    @staticmethod
+    def _canonical_records(records: dict[str, list[dict[str, Any]]]) -> dict[str, list[str]]:
+        return {
+            table: sorted(
+                json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                for row in records[table]
+            )
+            for table in BACKUP_TABLES
+        }
+
+    def _validate_sqlite_snapshot_records(
+        self,
+        archive: zipfile.ZipFile,
+        records: dict[str, list[dict[str, Any]]],
+        schema_version: int,
+    ) -> None:
+        with tempfile.TemporaryDirectory(dir=self.paths.staging) as temporary:
+            snapshot = Path(temporary) / "knowledge.db"
+            with archive.open("state/knowledge.db") as source, snapshot.open("xb") as output:
+                shutil.copyfileobj(source, output)
+            snapshot_records = self._sqlite_snapshot_records(snapshot, schema_version)
+        if self._canonical_records(snapshot_records) != self._canonical_records(records):
+            raise ValueError("SQLite 状态快照与逻辑记录不一致")
+
+    @staticmethod
+    def _sha256_member(archive: zipfile.ZipFile, archive_name: str) -> tuple[str, int]:
+        digest = hashlib.sha256()
+        byte_size = 0
+        with archive.open(archive_name) as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+                byte_size += len(chunk)
+        return digest.hexdigest(), byte_size
 
     def _add_file(self, archive: zipfile.ZipFile, path: Path, archive_name: str, entries: list[dict[str, Any]]) -> None:
         archive.write(path, archive_name)
@@ -92,36 +224,39 @@ class TransferService:
     def _build_archive(self, archive_path: Path, archive_type: str) -> tuple[dict[str, Any], str]:
         stamp = datetime.now(UTC).isoformat()
         entries: list[dict[str, Any]] = []
-        with tempfile.TemporaryDirectory(dir=self.paths.staging) as temp_name:
+        tables = BACKUP_TABLES if archive_type == "backup" else EXPORT_TABLES
+        with self._backup_lock, self.artifacts.operation(), tempfile.TemporaryDirectory(dir=self.paths.staging) as temp_name:
             temp = Path(temp_name)
+            # SQLite snapshot and logical records must observe the same database
+            # point-in-time. PostgreSQL rows use a repeatable-read adapter snapshot.
+            if self.repository.backend == "sqlite" and archive_type == "backup":
+                snapshot = temp / "knowledge.db"
+                self._snapshot_database(snapshot)
+                snapshot_repository = SqliteRepository(snapshot)
+                snapshot_repository.initialize()
+                self._sanitize_snapshot_external_cards(snapshot)
+                rows = snapshot_repository.rows_for_backup()
+            else:
+                rows = self.repository.rows_for_backup() if archive_type == "backup" else self.repository.rows_for_export()
+            records_payload = {
+                "schema_version": ARCHIVE_SCHEMA_VERSION,
+                "records": self._ordered_rows(rows, tables),
+            }
             with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
-                # A SQLite snapshot is an operational complete-backup artifact.
-                # Portable exports are limited to portable logical records and
-                # artifacts, so they cannot carry local backup state.
                 if self.repository.backend == "sqlite" and archive_type == "backup":
-                    snapshot = temp / "knowledge.db"
-                    self._snapshot_database(snapshot)
                     self._add_file(archive, snapshot, "state/knowledge.db", entries)
                 records = temp / "records.json"
-                records.write_text(
-                    json.dumps(
-                        {
-                            "schema_version": ARCHIVE_SCHEMA_VERSION,
-                            "records": self.repository.rows_for_backup() if archive_type == "backup" else self.repository.rows_for_export(),
-                        },
-                        ensure_ascii=False,
-                        separators=(",", ":"),
-                    ),
-                    encoding="utf-8",
-                )
+                records.write_text(json.dumps(records_payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
                 self._add_file(archive, records, "records.json", entries)
-                for artifact in sorted(self.paths.artifacts.rglob("*")):
-                    if artifact.is_file():
-                        relative = artifact.relative_to(self.paths.artifacts).as_posix()
-                        self._add_file(archive, artifact, f"artifacts/{relative}", entries)
+                for archive_name, relative in self._artifact_members(records_payload["records"]):
+                    artifact = self.paths.artifacts / relative.as_posix()[:2] / relative.as_posix()
+                    if not artifact.is_file():
+                        raise ValueError("artifact 文件缺失")
+                    self._add_file(archive, artifact, archive_name, entries)
                 manifest = {
                     "schema_version": ARCHIVE_SCHEMA_VERSION,
                     "archive_type": archive_type,
+                    "database_backend": self.repository.backend,
                     "created_at": stamp,
                     "entries": sorted(entries, key=lambda item: item["path"]),
                     "exclusions": ["models", "staging", "log_bodies", "credentials", "cookies", "original_paths", "private_rights_notes"],
@@ -239,20 +374,73 @@ class TransferService:
                 if "manifest.json" not in names:
                     return {"valid": False, "errors": ["缺少 manifest"]}
                 manifest = json.loads(archive.read("manifest.json"))
-                if manifest.get("schema_version") != ARCHIVE_SCHEMA_VERSION:
+                if not isinstance(manifest, dict):
+                    raise ValueError("manifest 无效")
+                schema_version = manifest.get("schema_version")
+                archive_type = manifest.get("archive_type")
+                if schema_version not in SUPPORTED_ARCHIVE_SCHEMA_VERSIONS:
                     errors.append("不支持的 manifest schema")
-                for entry in manifest.get("entries", []):
-                    path = entry.get("path")
-                    if not isinstance(path, str) or path not in names:
+                if archive_type not in {"backup", "export"}:
+                    errors.append("不支持的归档类型")
+                if schema_version == ARCHIVE_SCHEMA_VERSION and manifest.get("database_backend") not in {"sqlite", "postgresql"}:
+                    errors.append("归档数据库类型无效")
+                entries = self._entry_map(manifest)
+                declared_names = set(entries)
+                if archive_type == "backup" and schema_version == ARCHIVE_SCHEMA_VERSION:
+                    if manifest["database_backend"] == "sqlite" and "state/knowledge.db" not in declared_names:
+                        errors.append("SQLite 备份缺少状态快照")
+                    if manifest["database_backend"] == "postgresql" and "state/knowledge.db" in declared_names:
+                        errors.append("PostgreSQL 备份不得包含 SQLite 状态")
+                if names != declared_names | {"manifest.json"}:
+                    errors.append("归档成员未由 manifest 完整声明")
+                if "records.json" not in declared_names:
+                    errors.append("归档缺少逻辑记录")
+                if archive_type == "export" and "state/knowledge.db" in declared_names:
+                    errors.append("便携导出不得包含本地 SQLite 状态")
+                for path, entry in entries.items():
+                    if path not in names:
                         errors.append("manifest 条目缺失")
                         continue
-                    actual = hashlib.sha256(archive.read(path)).hexdigest()
-                    if actual != entry.get("sha256"):
+                    actual_hash, actual_size = self._sha256_member(archive, path)
+                    if actual_hash != entry["sha256"]:
                         errors.append("条目哈希不匹配")
-                if manifest.get("archive_type") in {"backup", "export"} and "records.json" not in names:
-                    errors.append("归档缺少逻辑记录")
-        except (zipfile.BadZipFile, json.JSONDecodeError, OSError, ValueError):
+                    if actual_size != entry["byte_size"]:
+                        errors.append("条目字节数不匹配")
+                    if path.startswith("artifacts/"):
+                        parts = path.split("/")
+                        if len(parts) != 3 or parts[1] != parts[2][:2] or not re.fullmatch(r"[0-9a-f]{64}", parts[2]) or actual_hash != parts[2]:
+                            errors.append("artifact 归档路径或哈希无效")
+                if not errors:
+                    records_payload = self._records_payload(archive)
+                    records = self._backup_records(records_payload) if archive_type == "backup" else self._export_records(records_payload)
+                    if archive_type == "backup" and "state/knowledge.db" in declared_names:
+                        self._validate_sqlite_snapshot_records(archive, records, records_payload["schema_version"])
+                    expected_artifacts = {name for name, _ in self._artifact_members(records)}
+                    actual_artifacts = {path for path in declared_names if path.startswith("artifacts/")}
+                    allowed_names = {"records.json", *expected_artifacts}
+                    if archive_type == "backup":
+                        allowed_names.add("state/knowledge.db")
+                    if declared_names - allowed_names:
+                        errors.append("归档包含不允许的成员")
+                    if actual_artifacts != expected_artifacts:
+                        errors.append("逻辑记录与 artifact 成员不一致")
+        except (zipfile.BadZipFile, json.JSONDecodeError, UnicodeDecodeError, OSError, KeyError, TypeError):
             errors.append("归档无法验证")
+        except ValueError as exc:
+            # Structural and cryptographic checks have already succeeded before
+            # logical records are decoded, so preserve controlled record diagnostics.
+            if not errors and str(exc) in {
+                "逻辑记录无效",
+                "逻辑记录不完整",
+                "备份目录记录无效",
+                "视频记录无效",
+                "artifact 记录无效",
+                "SQLite 状态快照无效",
+                "SQLite 状态快照与逻辑记录不一致",
+            }:
+                errors.append(str(exc))
+            else:
+                errors.append("归档无法验证")
         return {"valid": not errors, "errors": sorted(set(errors))}
 
     def verify_artifacts(self, full: bool, sample_size: int) -> dict[str, Any]:
@@ -288,25 +476,240 @@ class TransferService:
 
     @staticmethod
     def _logical_records(records_payload: Any, expected_tables: tuple[str, ...]) -> dict[str, list[dict[str, Any]]]:
-        if not isinstance(records_payload, dict) or records_payload.get("schema_version") != ARCHIVE_SCHEMA_VERSION:
+        if not isinstance(records_payload, dict):
+            raise ValueError("逻辑记录无效")
+        schema_version = records_payload.get("schema_version")
+        if schema_version not in SUPPORTED_ARCHIVE_SCHEMA_VERSIONS:
             raise ValueError("逻辑记录无效")
         records = records_payload.get("records")
-        if not isinstance(records, dict) or set(records) != set(expected_tables):
+        expected = set(expected_tables)
+        legacy_video_tables = {"video_analyses", "video_frames"}
+        legacy_expected = expected - legacy_video_tables
+        if not isinstance(records, dict) or (
+            set(records) != expected and not (schema_version in {1, 2, 3, 4} and set(records) == legacy_expected)
+        ):
             raise ValueError("逻辑记录不完整")
+        normalized: dict[str, list[dict[str, Any]]] = {}
         for table in expected_tables:
+            if schema_version in {1, 2, 3, 4} and table in legacy_video_tables and table not in records:
+                normalized[table] = []
+                continue
             rows = records[table]
-            if not isinstance(rows, list) or any(
-                not isinstance(row, dict)
-                or tuple(row) != BACKUP_TABLE_COLUMNS[table]
-                for row in rows
-            ):
+            expected_columns = BACKUP_TABLE_COLUMNS[table]
+            legacy_evidence_columns = tuple(
+                column for column in expected_columns if column != "locator_hash"
+            )
+            legacy_columns = tuple(column for column in expected_columns if column != "source_date")
+            legacy_appended_source_date_columns = legacy_columns + ("source_date",)
+            legacy_job_columns = tuple(
+                column
+                for column in expected_columns
+                if column not in {"retry_count", "lease_token", "lease_expires_at"}
+            )
+            legacy_attempt_columns = tuple(
+                column for column in expected_columns if column != "lease_token"
+            )
+            if not isinstance(rows, list):
                 raise ValueError("逻辑记录无效")
-        return records
+            normalized_rows: list[dict[str, Any]] = []
+            for row in rows:
+                if not isinstance(row, dict):
+                    raise ValueError("逻辑记录无效")
+                columns = tuple(row)
+                if columns == expected_columns:
+                    normalized_rows.append({column: row[column] for column in expected_columns})
+                elif schema_version in {1, 2, 3} and table == "evidence" and columns == legacy_evidence_columns:
+                    try:
+                        locator = json.loads(row["locator_json"])
+                    except (TypeError, json.JSONDecodeError) as exc:
+                        raise ValueError("逻辑记录无效") from exc
+                    if not isinstance(locator, dict):
+                        raise ValueError("逻辑记录无效")
+                    locator_json = json.dumps(locator, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                    normalized_rows.append({
+                        **{column: row[column] for column in legacy_evidence_columns},
+                        "locator_json": locator_json,
+                        "locator_hash": hashlib.sha256(locator_json.encode("utf-8")).hexdigest(),
+                    })
+                elif schema_version == 1 and table == "sources" and columns in {legacy_columns, legacy_appended_source_date_columns}:
+                    normalized_rows.append({
+                        column: row[column] if column in row else None
+                        for column in expected_columns
+                    })
+                elif schema_version in {1, 2} and table == "jobs" and columns == legacy_job_columns:
+                    normalized_rows.append({
+                        column: (
+                            max(int(row.get("attempt_count", 0)) - 1, 0)
+                            if column == "retry_count"
+                            else row[column] if column in row else None
+                        )
+                        for column in expected_columns
+                    })
+                elif schema_version in {1, 2} and table == "job_attempts" and columns == legacy_attempt_columns:
+                    normalized_rows.append({
+                        column: row[column] if column in row else None
+                        for column in expected_columns
+                    })
+                else:
+                    raise ValueError("逻辑记录无效")
+            normalized[table] = normalized_rows
+        return normalized
+
+    @staticmethod
+    def _validate_video_records(records: dict[str, list[dict[str, Any]]]) -> None:
+        artifacts = {row["sha256"] for row in records["artifacts"] if isinstance(row.get("sha256"), str)}
+        versions = {row["id"]: row for row in records["content_versions"]}
+        analyses: dict[str, dict[str, Any]] = {}
+        analysis_identities: set[tuple[str, str, str]] = set()
+        for analysis in records["video_analyses"]:
+            analysis_id = analysis.get("id")
+            version_id = analysis.get("content_version_id")
+            analyzer_name = analysis.get("analyzer_name")
+            config_hash = analysis.get("config_hash")
+            if (
+                not isinstance(analysis_id, str)
+                or not isinstance(version_id, str)
+                or not isinstance(analyzer_name, str)
+                or not analyzer_name
+                or not isinstance(config_hash, str)
+                or not config_hash
+                or analysis_id in analyses
+            ):
+                raise ValueError("视频记录无效")
+            version = versions.get(version_id)
+            if version is None or version.get("media_type") not in {"video/mp4", "video/webm"}:
+                raise ValueError("视频记录无效")
+            identity = (version_id, analyzer_name, config_hash)
+            if identity in analysis_identities:
+                raise ValueError("视频记录无效")
+            try:
+                metadata = json.loads(analysis["metadata_json"])
+            except (KeyError, TypeError, json.JSONDecodeError) as exc:
+                raise ValueError("视频记录无效") from exc
+            if (
+                not isinstance(metadata, dict)
+                or not isinstance(metadata.get("container_name"), str)
+                or not metadata["container_name"]
+                or not isinstance(metadata.get("duration_ms"), int)
+                or metadata["duration_ms"] <= 0
+            ):
+                raise ValueError("视频记录无效")
+            for dimension in ("width", "height"):
+                value = metadata.get(dimension)
+                if value is not None and (not isinstance(value, int) or value <= 0):
+                    raise ValueError("视频记录无效")
+            analyses[analysis_id] = analysis
+            analysis_identities.add(identity)
+
+        frame_ids: set[str] = set()
+        frame_identities: set[tuple[str, int]] = set()
+        for frame in records["video_frames"]:
+            frame_id = frame.get("id")
+            analysis_id = frame.get("video_analysis_id")
+            sha256 = frame.get("artifact_sha256")
+            ordinal = frame.get("ordinal")
+            time_ms = frame.get("time_ms")
+            if (
+                not isinstance(frame_id, str)
+                or frame_id in frame_ids
+                or not isinstance(analysis_id, str)
+                or analysis_id not in analyses
+                or not isinstance(sha256, str)
+                or sha256 not in artifacts
+                or not isinstance(ordinal, int)
+                or ordinal < 0
+                or not isinstance(time_ms, int)
+                or time_ms < 0
+            ):
+                raise ValueError("视频记录无效")
+            identity = (analysis_id, ordinal)
+            if identity in frame_identities:
+                raise ValueError("视频记录无效")
+            for dimension in ("width", "height"):
+                value = frame.get(dimension)
+                if value is not None and (not isinstance(value, int) or value <= 0):
+                    raise ValueError("视频记录无效")
+            frame_ids.add(frame_id)
+            frame_identities.add(identity)
+
+    @staticmethod
+    def _validate_derived_evidence_chain(records: dict[str, list[dict[str, Any]]]) -> None:
+        versions = {row["id"]: row for row in records["content_versions"]}
+        representations = {row["id"]: row for row in records["representations"]}
+        evidence = {row["id"]: row for row in records["evidence"]}
+        chunks_by_representation: dict[str, list[dict[str, Any]]] = {}
+        for chunk in records["search_chunks"]:
+            chunks_by_representation.setdefault(chunk["representation_id"], []).append(chunk)
+        evidence_by_representation: dict[str, list[dict[str, Any]]] = {}
+        for item in records["evidence"]:
+            representation = representations.get(item["representation_id"])
+            version = versions.get(item["content_version_id"])
+            if representation is None or version is None:
+                raise ValueError("派生证据链无效")
+            if (
+                representation["content_version_id"] != item["content_version_id"]
+                or version["artifact_sha256"] != item["artifact_sha256"]
+                or representation["config_hash"] != item["parser_config_hash"]
+            ):
+                raise ValueError("派生证据链无效")
+            try:
+                locator = json.loads(item["locator_json"])
+            except (TypeError, json.JSONDecodeError) as exc:
+                raise ValueError("派生证据链无效") from exc
+            if not isinstance(locator, dict):
+                raise ValueError("派生证据链无效")
+            locator_json = json.dumps(locator, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            if (
+                item["locator_json"] != locator_json
+                or item["locator_hash"] != hashlib.sha256(locator_json.encode("utf-8")).hexdigest()
+                or item["excerpt_hash"] != hashlib.sha256(item["excerpt"].encode("utf-8")).hexdigest()
+            ):
+                raise ValueError("派生证据链无效")
+            evidence_by_representation.setdefault(item["representation_id"], []).append(item)
+        citation_counts: dict[str, int] = {}
+        for citation in records["citations"]:
+            evidence_id = citation["evidence_id"]
+            if evidence_id not in evidence:
+                raise ValueError("派生证据链无效")
+            citation_counts[evidence_id] = citation_counts.get(evidence_id, 0) + 1
+        if any(count > 1 for count in citation_counts.values()):
+            raise ValueError("派生证据链无效")
+
+        def extraction_is_complete(representation: dict[str, Any], version: dict[str, Any]) -> bool:
+            chunks = sorted(chunks_by_representation.get(representation["id"], []), key=lambda item: item["ordinal"])
+            text = representation["text_content"]
+            expected_chunks = [text[offset:offset + 1200] for offset in range(0, len(text), 1200)] or [""]
+            representation_evidence = evidence_by_representation.get(representation["id"], [])
+            return (
+                len(chunks) == len(expected_chunks)
+                and [item["ordinal"] for item in chunks] == list(range(len(expected_chunks)))
+                and [item["text_content"] for item in chunks] == expected_chunks
+                and not any(
+                    item["source_id"] != version["source_id"]
+                    or item["content_version_id"] != version["id"]
+                    or item["text_hash"] != hashlib.sha256(item["text_content"].encode("utf-8")).hexdigest()
+                    for item in chunks
+                )
+                and bool(representation_evidence)
+                and all(bool(item["is_validated"]) and citation_counts.get(item["id"]) == 1 for item in representation_evidence)
+            )
+
+        for version_id, version in versions.items():
+            if version["completeness"] != "complete":
+                continue
+            if not any(
+                representation["kind"] == "extraction" and extraction_is_complete(representation, version)
+                for representation in representations.values()
+                if representation["content_version_id"] == version_id
+            ):
+                raise ValueError("派生证据链无效")
 
     @classmethod
     def _backup_records(cls, records_payload: Any) -> dict[str, list[dict[str, Any]]]:
         records = cls._logical_records(records_payload, BACKUP_TABLES)
         cls._validate_backup_catalog(records["backups"])
+        cls._validate_video_records(records)
+        cls._validate_derived_evidence_chain(records)
         return records
 
     @staticmethod
@@ -353,11 +756,25 @@ class TransferService:
 
     @classmethod
     def _export_records(cls, records_payload: Any) -> dict[str, list[dict[str, Any]]]:
-        return cls._logical_records(records_payload, EXPORT_TABLES)
+        records = cls._logical_records(records_payload, EXPORT_TABLES)
+        cls._validate_video_records(records)
+        cls._validate_derived_evidence_chain(records)
+        return records
 
     def _restore_archive(self, archive_path: Path, target_root: str, target_database_url: str | None = None) -> dict[str, Any]:
         verification = self.verify_archive(archive_path)
         if not verification["valid"]:
+            errors = verification["errors"]
+            if len(errors) == 1 and errors[0] in {
+                "逻辑记录无效",
+                "逻辑记录不完整",
+                "备份目录记录无效",
+                "视频记录无效",
+                "artifact 记录无效",
+                "SQLite 状态快照无效",
+                "SQLite 状态快照与逻辑记录不一致",
+            }:
+                raise ValueError(errors[0])
             raise ValueError("归档验证失败")
         with zipfile.ZipFile(archive_path) as archive:
             manifest = json.loads(archive.read("manifest.json"))
@@ -377,6 +794,8 @@ class TransferService:
                     target_database_url,
                     Path(__file__).resolve().parents[2] / "migrations" / "postgresql",
                 )
+                target_repository.assert_empty_restore_target()
+                target_repository.migrate_to_head()
                 target_repository.initialize()
                 if target_repository.has_user_records():
                     raise ValueError("PostgreSQL 还原目标必须为空")
@@ -422,7 +841,7 @@ class TransferService:
         verification = self.verify_archive(path)
         if not verification["valid"]:
             raise ValueError("导入归档验证失败")
-        with zipfile.ZipFile(path) as archive:
+        with self._backup_lock, zipfile.ZipFile(path) as archive:
             manifest = json.loads(archive.read("manifest.json"))
             if manifest.get("archive_type") != "export":
                 raise ValueError("仅支持 reimport 导出归档")
@@ -430,11 +849,12 @@ class TransferService:
             records = self._export_records(records_payload)
             tables = EXPORT_TABLES
             primary_keys = {
-                "artifacts": ("sha256",), "sources": ("id",), "source_metadata_revisions": ("id",), "content_versions": ("id",), "source_relations": ("id",),
+                "artifacts": ("sha256",), "sources": ("id",), "source_metadata_revisions": ("id",), "content_versions": ("id",),
+                "video_analyses": ("id",), "video_frames": ("id",), "source_relations": ("id",),
                 "representations": ("id",), "search_chunks": ("id",), "evidence": ("id",), "citations": ("id",), "knowledge": ("id",),
                 "knowledge_evidence": ("knowledge_id", "evidence_id"), "external_cards": ("id",), "topics": ("id",), "topic_sources": ("topic_id", "source_id"),
             }
-            unique_keys = {"external_cards": ("card_type", "url"), "topics": ("name",), "source_metadata_revisions": ("source_id", "ordinal"), "content_versions": ("source_id", "ordinal"), "search_chunks": ("representation_id", "ordinal"), "source_relations": ("source_id", "related_source_id", "relation_type")}
+            unique_keys = {"external_cards": ("card_type", "url"), "topics": ("name",), "source_metadata_revisions": ("source_id", "ordinal"), "content_versions": ("source_id", "ordinal"), "video_analyses": ("content_version_id", "analyzer_name", "config_hash"), "video_frames": ("video_analysis_id", "ordinal"), "search_chunks": ("representation_id", "ordinal"), "source_relations": ("source_id", "related_source_id", "relation_type")}
             current = self.repository.rows_for_export()
             conflicts: list[str] = []
             pending: dict[str, list[dict[str, Any]]] = {}
@@ -470,7 +890,7 @@ class TransferService:
                         pending_by_key[key] = row
             if conflicts:
                 raise ReimportConflict({"conflicts": sorted(set(conflicts)), "reason": "逻辑链或唯一约束冲突，已拒绝且未写入"})
-            artifact_entries = {entry["path"]: entry for entry in manifest.get("entries", [])}
+            artifact_entries = self._entry_map(manifest)
             created_artifacts: list[str] = []
             try:
                 with self.artifacts.operation():
@@ -485,6 +905,9 @@ class TransferService:
                         destination.parent.mkdir(parents=True, exist_ok=True)
                         stage = self.artifacts.staging_path()
                         try:
+                            actual_hash, actual_size = self._sha256_member(archive, name)
+                            if actual_hash != sha256 or actual_size != artifact_entries[name]["byte_size"]:
+                                raise ValueError("导入 artifact 哈希或大小不匹配")
                             with archive.open(name) as source, stage.open("xb") as output:
                                 shutil.copyfileobj(source, output)
                             if self._sha256_path(stage) != sha256:
