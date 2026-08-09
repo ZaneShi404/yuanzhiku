@@ -4,6 +4,14 @@ frontend/node_modules/
 tests/runtime/*
 !tests/runtime/.gitkeep
 
+# Private local audit snapshots and agent session state
+/.zcode/
+/archives/*
+!/archives/README.md
+
+# Generated frontend output
+/frontend/dist/
+
 # Local application data and transient files
 data/
 *.pyc
