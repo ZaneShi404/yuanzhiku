@@ -212,25 +212,19 @@ class LoopbackFilterProxy:
         return True
 
     def _reject_resolved_ip(self, ip: str) -> bool:
-        """Production fail-closed: refuse loopback/private/reserved addresses.
+        """Production fail-closed: refuse everything that is not global unicast.
 
         Covers 127.0.0.0/8、10.0.0.0/8、172.16.0.0/12、192.168.0.0/16、
-        169.254.0.0/16、::1、fe80::/10 and the remaining reserved/multicast
-        ranges. Test code may subclass to exempt this check (decision 9);
-        production code has no such branch.
+        169.254.0.0/16、::1、fe80::/10、100.64.0.0/10（CGNAT 共享段——Python
+        3.13 下 is_private/is_reserved 对该段全为 False）、文档段、广播段及
+        其余保留/多播地址。Test code may subclass to exempt this check
+        (decision 9); production code has no such branch.
         """
         try:
             address = ipaddress.ip_address(ip)
         except ValueError:
             return True
-        return (
-            address.is_loopback
-            or address.is_private
-            or address.is_link_local
-            or address.is_reserved
-            or address.is_multicast
-            or address.is_unspecified
-        )
+        return not address.is_global
 
     def _open_validated_connection(self, host: str, port: int) -> socket.socket | None:
         """Resolve once, connect with the validated IPs, then re-check the peer."""
@@ -406,6 +400,18 @@ class YtDlpDownloader(MediaDownloaderPort):
         except ImportError:
             return "unavailable"
 
+    @staticmethod
+    def _extract_title(output: bytes) -> str:
+        """Clean the --print captured platform title for durable storage.
+
+        去除控制字符与换行，并截断至 title 字段上限（models.py 的
+        DownloadLinkRequest/PasteImportRequest 一致为 max_length=500）；
+        空或捕获失败退化为空串，由落库侧回退"未命名视频"。
+        """
+        text = output.decode("utf-8", "replace")
+        cleaned = "".join(character for character in text if character.isprintable() or character == " ")
+        return cleaned.strip()[:500].strip()
+
     def _cookie_file_available(self) -> bool:
         if self.cookie_file_path is None:
             return False
@@ -528,26 +534,33 @@ class YtDlpDownloader(MediaDownloaderPort):
             "--remux-video", "mp4",
             "-S", "res:1080",
             "-o", str(workspace / "video.%(ext)s"),
+            "--print", "%(title)s",
         ]
         if use_cookie:
             assert cookie_path is not None
             command.extend(["--cookies", str(cookie_path)])
         command.append(url)
         # FFmpeg 仅作本地合并/remux；不指定任何以 ffmpeg 为下载器的选项。
-        # stderr 只用于输出字节计数（无进展断路器），绝不落入日志/数据库正文。
+        # stderr 只用于输出字节计数（无进展断路器），绝不落入日志/数据库正文；
+        # stdout 只捕获 --print 的平台标题（512KB 上限纪律），同样不落盘不落日志。
         stderr_file = tempfile.TemporaryFile()
+        stdout_file = tempfile.TemporaryFile()
         try:
-            process = subprocess.Popen(
-                command,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=stderr_file,
-                shell=False,
-                env=self._subprocess_environment(),
-            )
-        except FileNotFoundError as exc:
+            try:
+                process = subprocess.Popen(
+                    command,
+                    stdin=subprocess.DEVNULL,
+                    stdout=stdout_file,
+                    stderr=stderr_file,
+                    shell=False,
+                    env=self._subprocess_environment(),
+                )
+            except FileNotFoundError as exc:
+                raise DownloadUnavailable("yt_dlp_missing") from exc
+        except Exception:
             stderr_file.close()
-            raise DownloadUnavailable("yt_dlp_missing") from exc
+            stdout_file.close()
+            raise
         started = time.monotonic()
         deadline = limits.deadline_monotonic or (started + limits.timeout_seconds)
         window = max(1.0, float(self.no_progress_seconds))
@@ -582,7 +595,8 @@ class YtDlpDownloader(MediaDownloaderPort):
                 current = time.monotonic()
                 if current - last_check >= window:
                     stderr_file.seek(0, os.SEEK_END)
-                    output_bytes = stderr_file.tell()
+                    stdout_file.seek(0, os.SEEK_END)
+                    output_bytes = stderr_file.tell() + stdout_file.tell()
                     current_size = LocalFfmpegMediaAnalyzer._workspace_size(workspace)
                     if current_size > last_size or output_bytes > last_output:
                         idle_windows = 0
@@ -597,9 +611,20 @@ class YtDlpDownloader(MediaDownloaderPort):
         finally:
             if process.poll() is None:
                 self._terminate_process_tree(process)
-            stderr_file.close()
+            title_output = b""
+            try:
+                if process.returncode == 0:
+                    stdout_file.seek(0, os.SEEK_END)
+                    if stdout_file.tell() > 512 * 1024:
+                        raise DownloadInputInvalid("output_limit")
+                    stdout_file.seek(0)
+                    title_output = stdout_file.read()
+            finally:
+                stderr_file.close()
+                stdout_file.close()
         if process.returncode != 0:
             raise DownloadInputInvalid("failed")
+        title = self._extract_title(title_output)
         outputs = [
             item for item in workspace.iterdir()
             if item.is_file() and item.suffix.lower() in {".mp4", ".webm"} and not item.name.startswith(".")
@@ -612,4 +637,5 @@ class YtDlpDownloader(MediaDownloaderPort):
             filename=product.name,
             media_type=media_type,
             byte_size=product.stat().st_size,
+            title=title,
         )

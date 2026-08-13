@@ -170,14 +170,9 @@ def _host_is_reserved(host: str) -> bool:
         address = ipaddress.ip_address(host)
     except ValueError:
         return False
-    return (
-        address.is_loopback
-        or address.is_private
-        or address.is_link_local
-        or address.is_reserved
-        or address.is_multicast
-        or address.is_unspecified
-    )
+    # 非公网单播一律拒绝：覆盖回环/私网/链路本地/保留段，以及 100.64.0.0/10
+    # （CGNAT 共享段——Python 3.13 下 is_private/is_reserved 对该段全为 False）。
+    return not address.is_global
 
 
 def validate_download_url(url: str, platform: str) -> None:

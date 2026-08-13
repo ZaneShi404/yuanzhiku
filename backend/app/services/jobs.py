@@ -515,6 +515,9 @@ class JobService:
                     cancelled=lambda: self.repository.job_cancel_requested(job["id"]),
                     heartbeat=lambda: self._heartbeat(job),
                 )
+            except MediaProcessingCancelled:
+                # probe 阶段的协作取消统一落"链接下载已取消"，不复用视频分析文案。
+                raise DownloadProcessingCancelled() from None
             except MediaInputInvalid as exc:
                 raise DownloadInputInvalid("product_invalid") from exc
             if metadata.height is not None and metadata.height > 1080:
@@ -523,6 +526,8 @@ class JobService:
             self.artifacts.check_capacity(result.byte_size)
             capability = self.downloader.capability()
             url_sanitized = sanitize_download_url(url)
+            # 标题优先级：用户显式提交 > 下载器捕获的平台标题 > "未命名视频"（落库侧回退）。
+            title = str(payload.get("title") or "").strip() or str(getattr(result, "title", "") or "")
             self._update_video_progress(job, 96, "正在写入不可变 artifact")
             with candidate.open("rb") as stream:
                 ingested = self.imports.downloaded_video(
@@ -534,7 +539,7 @@ class JobService:
                     format_profile=getattr(self.downloader, "format_profile", "res:1080+mp4-remux"),
                     cookie_used=use_cookie,
                     config_hash=self.downloader.config_hash(platform, getattr(self.downloader, "format_profile", "res:1080+mp4-remux")),
-                    title=str(payload.get("title") or ""),
+                    title=title,
                     author=payload.get("author") if isinstance(payload.get("author"), str) else None,
                     language=str(payload.get("language") or "zh"),
                     notes=payload.get("notes") if isinstance(payload.get("notes"), str) else None,

@@ -79,6 +79,7 @@ class DownloadedVideo:
     filename: str  # 不含路径，仅文件名
     media_type: str  # "video/mp4" | "video/webm"
     byte_size: int
+    title: str = ""  # 清洗截断后的平台标题；空表示未捕获（落库侧回退"未命名视频"）
 
 
 class MediaDownloaderPort(Protocol):
