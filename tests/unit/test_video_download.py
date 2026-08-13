@@ -40,6 +40,7 @@ from app.ports.media import (
     DownloadProcessingCancelled,
     DownloadUnavailable,
     MediaInputInvalid,
+    MediaProcessingCancelled,
 )
 
 RUN_ROOT = Path(os.environ.get("YUANZHIKU_TEST_RUNTIME", Path(__file__).resolve().parents[1] / "runtime")) / "video-download"
@@ -50,9 +51,10 @@ GENERIC_FAILURE_MESSAGE = "链接失效、平台拒绝或下载产物无效，�
 class FakeMediaAnalyzer:
     """Unit analyzer fake：probe 高度可配置，供下载产物校验与 video_analyze 链使用。"""
 
-    def __init__(self, height: int = 720, probe_error: str | None = None) -> None:
+    def __init__(self, height: int = 720, probe_error: str | None = None, probe_cancel: bool = False) -> None:
         self.height = height
         self.probe_error = probe_error
+        self.probe_cancel = probe_cancel
 
     def capability(self) -> dict[str, object]:
         return {"enabled": True, "adapter": "unit", "network": False}
@@ -62,6 +64,9 @@ class FakeMediaAnalyzer:
 
     def probe(self, artifact_path: Path, limits: MediaProcessingLimits, cancelled, heartbeat) -> VideoMetadata:
         assert artifact_path.is_file()
+        if self.probe_cancel:
+            # 模拟产物校验阶段收到协作取消
+            raise MediaProcessingCancelled()
         assert not cancelled()
         heartbeat()
         if self.probe_error is not None:
@@ -95,11 +100,13 @@ class FakeDownloader:
         cookie_file_path: Path | None = None,
         outcome: str = "ok",
         product: bytes = b"downloaded-mp4-bytes",
+        title: str = "",
     ) -> None:
         self.enabled = enabled
         self.cookie_file_path = cookie_file_path
         self.outcome = outcome
         self.product = product
+        self.title = title
         self.calls: list[dict] = []
 
     def capability(self) -> dict[str, object]:
@@ -125,6 +132,7 @@ class FakeDownloader:
         record = {"url": url, "platform": platform, "use_cookie": use_cookie, "workspace": Path(workspace)}
         workspace.mkdir(parents=True, exist_ok=True)
         if cookie_path is not None:
+            record["cookie_path"] = Path(cookie_path)
             record["cookie_content"] = cookie_path.read_bytes() if cookie_path.is_file() else None
         self.calls.append(record)
         if self.outcome == "unavailable":
@@ -135,7 +143,7 @@ class FakeDownloader:
             raise DownloadProcessingCancelled()
         product = workspace / "video.mp4"
         product.write_bytes(self.product)
-        return DownloadedVideo("video.mp4", "video/mp4", len(self.product))
+        return DownloadedVideo("video.mp4", "video/mp4", len(self.product), title=self.title)
 
 
 @pytest.fixture()
@@ -184,6 +192,8 @@ def _claim_and_run(services) -> dict:
     "https://10.0.0.8/video/123",
     "https://192.168.1.2/video/123",
     "https://169.254.10.10/video/123",
+    "https://100.64.0.1/video/123",
+    "https://192.0.2.1/video/123",
     "https://[::1]/video/123",
 ])
 def test_download_url_whitelist_rejections(client_and_services, url: str) -> None:
@@ -314,6 +324,41 @@ def test_use_cookie_false_never_reads_cookie_file(client_and_services) -> None:
     assert call["use_cookie"] is False
     assert call.get("cookie_content") is None  # 全程未注入 Cookie 拷贝
     assert (services.paths.download / "cookies.txt").read_bytes() == original
+
+
+@pytest.mark.parametrize("outcome", ["input_invalid", "cancelled"], ids=["failed", "cancelled"])
+def test_cookie_copy_removed_on_failure_and_cancel(client_and_services, outcome: str) -> None:
+    client, services, downloader = client_and_services
+    original = b"# Netscape HTTP Cookie File\nsession-cookie"
+    client.post("/api/v1/settings/download-cookie", files={"file": ("cookies.txt", original, "text/plain")})
+    downloader.outcome = outcome
+    assert client.post(
+        "/api/v1/videos/link",
+        json={"url": "https://www.bilibili.com/video/BV1test", "platform": "bilibili", "rights": "owned", "use_cookie": True},
+    ).status_code == 201
+    completed = _claim_and_run(services)
+    assert completed["state"] == ("failed" if outcome == "input_invalid" else "cancelled")
+    call = downloader.calls[0]
+    assert call["use_cookie"] is True
+    assert call["cookie_content"] == original
+    # 拷贝确实位于作业 staging 内，且作业结束（失败/取消）即删
+    assert Path(call["cookie_path"]).parent == call["workspace"]
+    assert not call["workspace"].exists()
+    assert (services.paths.download / "cookies.txt").read_bytes() == original  # 原文件未被修改
+    assert services.repository.list_sources() == []
+
+
+def test_cookie_upload_content_length_preflight_rejects_before_parsing(client_and_services) -> None:
+    client, services, _ = client_and_services
+    # Content-Length 超过 1MB+表单开销边界：解析 multipart 前立即 413
+    response = client.post(
+        "/api/v1/settings/download-cookie",
+        headers={"content-length": str(1024 * 1024 + 128 * 1024)},
+        files={"file": ("cookies.txt", b"small-body", "text/plain")},
+    )
+    assert response.status_code == 413
+    assert response.json()["detail"]["code"] == "cookie_file_too_large"
+    assert not (services.paths.download / "cookies.txt").exists()
 
 
 # --- 用例 3：断路器（适配器级，真实监控循环 + 假 yt_dlp 模块） ---
@@ -471,6 +516,17 @@ def test_download_cancel_leaves_no_staging_or_source(client_and_services) -> Non
     assert not workspace.exists()
 
 
+def test_probe_phase_cancel_uses_download_cancel_message(client_and_services) -> None:
+    client, services, _ = client_and_services
+    services.videos.analyzer = FakeMediaAnalyzer(probe_cancel=True)
+    assert _submit_link(client, "https://www.bilibili.com/video/BV1test").status_code == 201
+    cancelled_job = _claim_and_run(services)
+    assert cancelled_job["kind"] == "video_download"
+    assert cancelled_job["state"] == "cancelled"
+    assert cancelled_job["message"] == "链接下载已取消"
+    assert services.repository.list_sources() == []
+
+
 def test_download_job_blocked_when_tools_missing(client_and_services) -> None:
     client, services, downloader = client_and_services
     downloader.enabled = False
@@ -572,6 +628,43 @@ def test_download_success_creates_source_provenance_and_analyze_job(client_and_s
         ).fetchall()
     assert columns == {"id", "event_type", "entity_id", "result", "created_at"}
     assert any(row["entity_id"] == source["id"] and row["result"] == "succeeded" for row in audit_rows)
+
+
+def test_download_title_backfills_from_downloader_when_not_submitted(client_and_services) -> None:
+    client, services, downloader = client_and_services
+    downloader.title = "平台标题"
+    assert _submit_link(client, "https://www.bilibili.com/video/BV1test", title="").status_code == 201
+    completed = _claim_and_run(services)
+    assert completed["state"] == "succeeded"
+    source = services.repository.list_sources()[0]
+    assert source["title"] == "平台标题"
+
+
+def test_download_title_degenerates_to_unnamed_when_capture_empty(client_and_services) -> None:
+    client, services, _ = client_and_services
+    assert _submit_link(client, "https://www.bilibili.com/video/BV1test", title="").status_code == 201
+    completed = _claim_and_run(services)
+    assert completed["state"] == "succeeded"
+    assert services.repository.list_sources()[0]["title"] == "未命名视频"
+
+
+def test_download_title_explicit_submission_wins_over_captured(client_and_services) -> None:
+    client, services, downloader = client_and_services
+    downloader.title = "平台标题"
+    assert _submit_link(client, "https://www.bilibili.com/video/BV1test", title="用户标题").status_code == 201
+    completed = _claim_and_run(services)
+    assert completed["state"] == "succeeded"
+    assert services.repository.list_sources()[0]["title"] == "用户标题"
+
+
+def test_extract_title_cleans_and_truncates() -> None:
+    extract = YtDlpDownloader._extract_title
+    assert extract("合成平台标题\n".encode("utf-8")) == "合成平台标题"
+    assert extract(b"line1\r\nline2\t\x00tail") == "line1line2tail"
+    assert extract(b"   ") == ""
+    assert extract(b"") == ""
+    long_title = "长标题" * 300
+    assert len(extract(long_title.encode("utf-8"))) == 500
 
 
 def test_backup_snapshot_and_export_carry_sanitized_provenance(client_and_services) -> None:
@@ -686,7 +779,11 @@ def test_proxy_rejects_unregistered_connect_without_outbound_bytes() -> None:
 
 def test_proxy_rejects_reserved_resolutions_in_production_mode() -> None:
     proxy = LoopbackFilterProxy(("bilibili.com",))
-    for reserved in ("127.0.0.1", "10.1.2.3", "172.16.5.5", "192.168.1.9", "169.254.1.1", "::1", "fe80::1"):
+    for reserved in (
+        "127.0.0.1", "10.1.2.3", "172.16.5.5", "192.168.1.9", "169.254.1.1",
+        "100.64.0.1", "100.127.255.255", "192.0.2.1", "169.254.169.254",
+        "::1", "fe80::1",
+    ):
         assert proxy._reject_resolved_ip(reserved) is True
     for public in ("1.1.1.1", "8.8.8.8", "2606:4700:4700::1111"):
         assert proxy._reject_resolved_ip(public) is False
@@ -794,6 +891,20 @@ class _FixtureHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(self.fixture)))
             self.end_headers()
             self.wfile.write(self.fixture)
+        elif self.path == "/page.html":
+            # 合成页面：og:title 供平台标题回填，og:video 指向同源 fixture
+            host = self.headers.get("Host", f"127.0.0.1:{self.server.server_address[1]}")
+            page = (
+                "<!doctype html><html><head>"
+                '<meta property="og:title" content="合成平台标题">'
+                f'<meta property="og:video" content="http://{host}/fixture.mp4">'
+                "</head><body></body></html>"
+            ).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(page)))
+            self.end_headers()
+            self.wfile.write(page)
         elif self.path.startswith("/redirect"):
             self.send_response(302)
             self.send_header("Location", "http://evil.example/video.mp4")
@@ -960,6 +1071,38 @@ def test_synthetic_redirect_to_unregistered_domain_fails_closed(
     proxy = proxies[0]
     assert "evil.example" in proxy.denied_hosts()
     assert set(proxy.connected_hosts()) <= {"localhost"}
+
+
+def test_synthetic_download_captures_platform_title(
+    runtime_root: Path, fixture_server, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    server, _ = fixture_server
+    _, services, _ = _chain_app(runtime_root / "title", monkeypatch)
+    downloader = services.jobs.downloader
+    workspace = tmp_path / "staging"
+    workspace.mkdir()
+    # 合成页面 og:title → 真实 yt-dlp --print 捕获并清洗回填
+    page_result = downloader.download(
+        url=f"http://localhost:{server.server_address[1]}/page.html",
+        platform="bilibili", workspace=workspace,
+        limits=MediaProcessingLimits(60.0, 1024 ** 3, 1024 ** 3),
+        use_cookie=False, cookie_path=None,
+        cancelled=lambda: False, heartbeat=lambda: None,
+        progress=lambda value, message: None,
+    )
+    assert page_result.title == "合成平台标题"
+    # 无页面元数据的直链：标题退化为文件名，捕获不失败
+    shutil.rmtree(workspace)
+    workspace.mkdir()
+    direct_result = downloader.download(
+        url=f"http://localhost:{server.server_address[1]}/fixture.mp4",
+        platform="bilibili", workspace=workspace,
+        limits=MediaProcessingLimits(60.0, 1024 ** 3, 1024 ** 3),
+        use_cookie=False, cookie_path=None,
+        cancelled=lambda: False, heartbeat=lambda: None,
+        progress=lambda value, message: None,
+    )
+    assert direct_result.title in {"fixture", "fixture.mp4"}
 
 
 def test_sanitize_download_url_strips_userinfo_query_and_fragment() -> None:

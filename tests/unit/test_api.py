@@ -218,18 +218,33 @@ def test_download_link_endpoints_in_openapi_and_capabilities(client: TestClient)
     assert set(downloader) == {"enabled", "adapter", "version", "supported_platforms", "cookie_file_available", "network"}
     assert downloader["adapter"] == "yt-dlp"
     assert downloader["supported_platforms"] == ["bilibili", "douyin"]
-    # 本机未安装 FFmpeg/ffprobe：如实报告 disabled（不伪装可用）
-    assert downloader["enabled"] is False
+    # enabled 与探测结果一致（不硬编码测试机无 FFmpeg）：如实报告，不伪装可用
+    import shutil
+
+    ffmpeg_bin = os.environ.get("YUANZHIKU_FFMPEG_BIN", "ffmpeg")
+    ffprobe_bin = os.environ.get("YUANZHIKU_FFPROBE_BIN", "ffprobe")
+    tools_available = bool(shutil.which(ffmpeg_bin) and shutil.which(ffprobe_bin))
+    assert downloader["enabled"] is tools_available
     assert downloader["cookie_file_available"] is False
 
 
 def test_download_link_error_codes_stable(client: TestClient) -> None:
+    import shutil
+
+    ffmpeg_bin = os.environ.get("YUANZHIKU_FFMPEG_BIN", "ffmpeg")
+    ffprobe_bin = os.environ.get("YUANZHIKU_FFPROBE_BIN", "ffprobe")
+    tools_available = bool(shutil.which(ffmpeg_bin) and shutil.which(ffprobe_bin))
     unavailable = client.post(
         "/api/v1/videos/link",
         json={"url": "https://www.bilibili.com/video/BV1", "platform": "bilibili", "rights": "owned"},
     )
-    assert unavailable.status_code == 503
-    assert unavailable.json()["detail"]["code"] == "downloader_unavailable"
+    if tools_available:
+        # 工具齐备时端点可用；downloader_unavailable 语义由作业级工具缺失用例覆盖
+        assert unavailable.status_code == 201
+        assert unavailable.json()["kind"] == "video_download"
+    else:
+        assert unavailable.status_code == 503
+        assert unavailable.json()["detail"]["code"] == "downloader_unavailable"
     invalid = client.post(
         "/api/v1/videos/link",
         json={"url": "http://www.bilibili.com/video/BV1", "platform": "bilibili", "rights": "owned"},
