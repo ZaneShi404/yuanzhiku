@@ -14,6 +14,7 @@ import os
 import shutil
 import socket
 import sqlite3
+import ssl
 import tempfile
 import threading
 import time
@@ -823,6 +824,174 @@ class _LoopbackExemptProxy(LoopbackFilterProxy):
         except ValueError:
             return True
         return False
+
+
+# 自签 localhost 证书/私钥（测试专用，CN/SAN=localhost，有效期至 2126 年）。
+# 标准库无法在运行时生成证书、cryptography 未安装且禁止新增依赖，故以内嵌
+# 常量随测试文件携带；仅写入 tests/runtime/<run-id> 临时文件（load_cert_chain
+# 需要路径），不入数据库、不入备份/导出。
+_TLS_CERT_PEM = """-----BEGIN CERTIFICATE-----
+MIIDITCCAgmgAwIBAgIUbqBXFksghvvRfD7/OTdNbcG2I3swDQYJKoZIhvcNAQEL
+BQAwFDESMBAGA1UEAwwJbG9jYWxob3N0MCAXDTI2MDgxMzA1NTIwMloYDzIxMjYw
+NzIwMDU1MjAyWjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwggEiMA0GCSqGSIb3DQEB
+AQUAA4IBDwAwggEKAoIBAQDqoSiCsZAP/md+CgO+vmPTYWQiRqD9SRfgMUfrrrkq
+MveK8lZ8XfQxkx1JrwgDEgK3ng0rTtyZ5YAwe/mpPF7IDF1Y5SQOSCk2KRaDIsUK
+T8dWA4mamrIdq7d5nPr+esoEDehIJWh1DYSxjqCYwCycW4QlgiTC9fILgi8gGR+7
+WFFXp/g/gnGxVjitz+JYpCYfd2Clx1+r5t31PXeNYsiJctOknRRc0BXu8USzGC9y
+rqavGR72o5nXr3sgIYW8tw1Hlg44vJWVoujaBZe++9r2vWCOIB6x9gjLba7XDB73
+v/9Xnf7Z3/0qMBu+wxv2uu5L74tyDxI+PMqn25S5cDGrAgMBAAGjaTBnMB0GA1Ud
+DgQWBBTVlr+s4ySywm/AxT3ky9/hWzqFYjAfBgNVHSMEGDAWgBTVlr+s4ySywm/A
+xT3ky9/hWzqFYjAPBgNVHRMBAf8EBTADAQH/MBQGA1UdEQQNMAuCCWxvY2FsaG9z
+dDANBgkqhkiG9w0BAQsFAAOCAQEAneTdHKgATZtSuqQGUXzzCILKXEWn6PyoNxKQ
+JpbRCnrEG15sWFMk6MIl+FX2hs2pP4PnzbqCIo/FjnFx2xBX/PZ4zsmMcQx1PBMl
+1QX2ORhe7iCm8xdzvMJhF1g+VGUZJh/Ta/zc5wx8i+MbQKgcAoXcYP1Hq9JP0Ax5
+DsFdrNCY95ax4JdXeRsQXHl6EB3kp1hqlaWtomipdB0d3gJtWLQSymVZlPUOSNzM
+jLL/bdEVztx2KUeQVczvIxn0YAf31h7lWZicwk8gkwPd6oVqbrUZqTxOv8tEARwv
+hAmI4NQdH6rf7ocBNo4Cp2/Ywjn7BTF9hHiJVu1HJPgdkTzpxQ==
+-----END CERTIFICATE-----
+"""
+
+_TLS_KEY_PEM = """-----BEGIN PRIVATE KEY-----
+MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDqoSiCsZAP/md+
+CgO+vmPTYWQiRqD9SRfgMUfrrrkqMveK8lZ8XfQxkx1JrwgDEgK3ng0rTtyZ5YAw
+e/mpPF7IDF1Y5SQOSCk2KRaDIsUKT8dWA4mamrIdq7d5nPr+esoEDehIJWh1DYSx
+jqCYwCycW4QlgiTC9fILgi8gGR+7WFFXp/g/gnGxVjitz+JYpCYfd2Clx1+r5t31
+PXeNYsiJctOknRRc0BXu8USzGC9yrqavGR72o5nXr3sgIYW8tw1Hlg44vJWVouja
+BZe++9r2vWCOIB6x9gjLba7XDB73v/9Xnf7Z3/0qMBu+wxv2uu5L74tyDxI+PMqn
+25S5cDGrAgMBAAECggEAZJYyh9UXrcOjGqWwdVWp9jUKeKdO3Uc4tSRrcN63AyBW
+f3rlGOwuhBJNvAkNpkNSZuWbP7XPXSrGigKcRbFb8OdcHYAetQC6qj1zKUT+tCz/
+iCB8HYu0UIQNZFWoRPDfKl3L9yISZhwlhvleYB4DAgU54dqpZ+uImOZ2zYv3zph8
+CWNaZ+qhmNdw5kOan8lE9sxlavoloqLd9VYNQSjqZduPyUehvzKx2M+AXL9Qk8pi
+KPSx5M0YSFjo5QGTo58GMZJgKcLgMc6vaPMXiVL2DQ3DKHUeO6MOi6R2+71mNiFt
+yw3ggxTnsJuz1wnwmRYBY5cAb8VAmLS85pNUaq1iAQKBgQD80Qn+YJKyY+/XqSUu
+7XAO8G7pvIKdMLaM5opAowSwiTXwwzzliaFQnEYFx+n6FXFMgf6ApGhqPb3DtTeL
+CGCvkoibivdXZioMR3UE6n0GyrAnIoKLH5DmyGtFzSHkVek42j2Qwv27g0LcRRBi
+H06AdtpecchSU9oMxsVhf0l9hQKBgQDtlX4pALaDNPioxArpVCJC6zrw3ea4435z
+01QjddQTM4AKyBZQlcQxGYIyRPzPuSFz8yoeYWbywlDnQR+yDkNTDzdFz9tPyGll
+r/2d8UPv3wq+d1lJpssXFvRkFIRz5NSy1zhhGw/vYOsqml/ZmGJGPKj3SkikPB97
+vDNnJSRBbwKBgF9dNsjWgt95pRITgqwl8lwgQ6Y1bot+wY16tPHWzEEPMOKlssXe
+2ZO/rwYlN9QW3IsAihDac2yH55n4NIBkY5w2yQLrM4urRPcmyTRWg1zZfgL1GIsE
+GDOFrDlDPKKV6YiBgjGl6/IcfE78Wka5CnKY4pw3jVnIuXqSTAgP7JfFAoGBANts
+5kgYUHh9w+qapTk6aypC9vze9Ohts6xl0Z+ug1/4gJl0kqd6quhuFsE21gdDhJIC
+UzQb4Wjz7qSmkQ9x/NwJgZMIlhTpk+5GzIXC/mvcI6AlumE7mvaITM7h5DLldUx3
+WarVw7HiYU/HpB7jjmAwRh2ejdihbrJo71CkDQghAoGAdIF91SiMT4ogAdvEPcjO
+6GVjZjnIPSgw8qGSDEdIoEa8hpD9Wbcy5ErJNf/o7cNcNBS+DCu0e/Q0UCNFApaY
+NJI/yNDxINkXe6a77EAE8NyGby9O+3pO6rx3AWmER4dsrHCVZ34iQUb+03qs2ejk
+S598pnN9M4y9C9d/+gBjguQ=
+-----END PRIVATE KEY-----
+"""
+
+
+def test_proxy_connect_drains_headers_before_tls_tunnel(runtime_root: Path) -> None:
+    """回归：CONNECT 剩余请求头必须排空，否则残留字节污染 TLS 隧道。
+
+    旧行为：``CONNECT host:443 HTTP/1.1`` 之后的 ``Host:`` 等请求头与空行
+    被 ``_bidirectional_relay`` 当作 TLS 数据转发给服务器——真实 TLS 服务器
+    回明文 ``400 Bad Request``，客户端握手报 ``WRONG_VERSION_NUMBER``。
+    本用例以真实 CONNECT + TLS 握手 + HTTP GET 覆盖该路径（决策 9 注入）。
+    """
+    tls_dir = runtime_root / "tls"
+    tls_dir.mkdir()
+    cert_path = tls_dir / "cert.pem"
+    key_path = tls_dir / "key.pem"
+    cert_path.write_text(_TLS_CERT_PEM, encoding="ascii")
+    key_path.write_text(_TLS_KEY_PEM, encoding="ascii")
+
+    results: dict[str, object] = {}
+    server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    server_context.load_cert_chain(str(cert_path), str(key_path))
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(4)
+    server_port = listener.getsockname()[1]
+
+    def serve() -> None:
+        try:
+            connection, _ = listener.accept()
+        except OSError:
+            return
+        try:
+            with server_context.wrap_socket(connection, server_side=True) as tls:
+                first = tls.recv(16)
+                results["first_bytes"] = first
+                request = first
+                while b"\r\n\r\n" not in request and len(request) < 64 * 1024:
+                    chunk = tls.recv(4096)
+                    if not chunk:
+                        break
+                    request += chunk
+                results["request"] = request
+                tls.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\npong")
+        except Exception as exc:  # noqa: BLE001
+            results["error"] = repr(exc)
+        finally:
+            listener.close()
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+
+    proxy = _LoopbackExemptProxy(("localhost",))  # 测试注入注册域 + 保留段豁免（决策 9）
+    proxy_port = proxy.start()
+    try:
+        client = socket.create_connection(("127.0.0.1", proxy_port), timeout=10)
+        # 真实 CONNECT：请求行 + Host 头 + User-Agent + 空行（旧行为会把头转发进隧道）
+        client.sendall(
+            f"CONNECT localhost:{server_port} HTTP/1.1\r\n"
+            f"Host: localhost:{server_port}\r\n"
+            "User-Agent: yuanzhiku-test\r\n\r\n".encode("latin-1")
+        )
+        established = b""
+        while b"\r\n\r\n" not in established:
+            chunk = client.recv(4096)
+            if not chunk:
+                break
+            established += chunk
+        assert established.startswith(b"HTTP/1.1 200")
+        client_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        client_context.check_hostname = False
+        client_context.verify_mode = ssl.CERT_NONE
+        with client_context.wrap_socket(client, server_hostname="localhost") as tls:
+            tls.sendall(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            body = b""
+            while True:
+                chunk = tls.recv(4096)
+                if not chunk:
+                    break
+                body += chunk
+        assert b"200 OK" in body and b"pong" in body
+    finally:
+        proxy.close()
+    thread.join(timeout=10)
+    assert not thread.is_alive()
+    assert "error" not in results, results.get("error")
+    # 旧行为不复现：TLS 解密后服务器收到的首字节是 HTTP 请求（"GET "），
+    # 而不是被污染的请求头明文（"Host:"/"User-Agent:"）
+    assert results.get("first_bytes", b"").startswith(b"GET ")
+    assert b"GET / HTTP/1.1" in results["request"]
+    assert proxy.connected_hosts() == {"localhost": 1}
+    assert proxy.denied_hosts() == {}
+
+
+def test_proxy_connect_drain_headers_stops_at_blank_line() -> None:
+    left, right = socket.socketpair()
+    try:
+        left.sendall(b"Host: b23.tv:443\r\nUser-Agent: x\r\n\r\nPAYLOAD")
+        assert LoopbackFilterProxy._drain_headers(right) is True
+        right.settimeout(5)
+        assert right.recv(7) == b"PAYLOAD"  # 只排空到空行为止，其后字节（ClientHello）保留
+    finally:
+        left.close()
+        right.close()
+
+
+def test_proxy_connect_drain_headers_fails_on_truncation() -> None:
+    left, right = socket.socketpair()
+    try:
+        left.sendall(b"Host: b23.tv:443\r\nUser-Agent: truncated")
+        left.close()
+        assert LoopbackFilterProxy._drain_headers(right) is False
+    finally:
+        right.close()
 
 
 def test_proxy_relays_registered_connect_via_validated_peer() -> None:

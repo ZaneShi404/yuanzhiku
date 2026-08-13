@@ -282,6 +282,27 @@ class LoopbackFilterProxy:
             return None
         return remote
 
+    @staticmethod
+    def _drain_headers(client: socket.socket) -> bool:
+        """Consume the remaining CONNECT request headers up to the blank line.
+
+        CONNECT 请求行之后还有请求头（如 ``Host: b23.tv:443``）与空行：必须
+        在隧道建立前排空，否则残留字节会被 ``_bidirectional_relay`` 当作
+        TLS ClientHello 的一部分转发给目标服务器（真实 TLS 服务器回明文
+        ``400 Bad Request``，客户端握手报 ``WRONG_VERSION_NUMBER``）。
+        返回 False 表示连接提前关闭或头部块超限，调用方必须断开。
+        """
+        total = 0
+        while True:
+            line = LoopbackFilterProxy._read_line(client)
+            if line is None:
+                return False
+            if line == "":
+                return True
+            total += len(line) + 2
+            if total > LoopbackFilterProxy.MAX_HEADER_BYTES:
+                return False
+
     def _handle_connection(self, client: socket.socket) -> None:
         try:
             request_line = self._read_line(client)
@@ -295,6 +316,8 @@ class LoopbackFilterProxy:
                 host, port = self._split_authority(parts[1])
                 if host is None or not self._validate_host(host):
                     return  # 未登记域：立即断开，无任何字节出站
+                if not self._drain_headers(client):
+                    return  # 头部未完整排空（EOF/超限）：断开
                 self._relay_connect(client, host, port)
                 return
             self._forward_plain_request(client, method, parts[1])
