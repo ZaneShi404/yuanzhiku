@@ -191,7 +191,8 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     const reason = typeof detail.reason === 'string' ? detail.reason : undefined
     throw new ApiError(response.status, code, message, conflicts, reason)
   }
-  return response.json() as Promise<T>
+  const text = await response.text()
+  return (text ? JSON.parse(text) : undefined) as T
 }
 
 async function uploadFile(path: string, body: FormData, onProgress: (value: number) => void): Promise<unknown> {
@@ -235,7 +236,7 @@ function stateLabel(value: string) {
   return map[value] || value
 }
 function sourceType(value: string) {
-  return value === 'paste' ? '粘贴文本' : value === 'file' ? '本地文件' : value === 'douyin' ? '抖音参考' : '外部卡'
+  return value === 'paste' ? '粘贴文本' : value === 'file' ? '本地文件' : value === 'douyin' ? '抖音参考' : value === 'video_link' ? '链接视频' : '外部卡'
 }
 function labelFor(items: readonly (readonly [string, string])[], value?: string | null) {
   return items.find(item => item[0] === value)?.[1] || value || '-'
@@ -432,7 +433,7 @@ export function App() {
           onMessage={setMessage}
         />}
         {page === 'import' && <ImportPage onDone={() => { void refresh(); navigate('library') }} onMessage={setMessage} />}
-        {page === 'video' && <VideoWorkspace onDone={() => { void refresh(); navigate('library') }} onMessage={setMessage} />}
+        {page === 'video' && <VideoWorkspace onDone={() => { void refresh(); navigate('library') }} onDoneLink={() => { void refresh(); navigate('jobs') }} onMessage={setMessage} />}
         {page === 'search' && <SearchPage onSelectSource={openSource} onSelectKnowledge={openKnowledge} onSelectCard={openCard} onMessage={setMessage} />}
         {page === 'knowledge' && <KnowledgePage knowledge={knowledge} focusedId={focusedKnowledgeId} onRefresh={loadKnowledge} onMessage={setMessage} />}
         {page === 'jobs' && <JobsPage jobs={jobs} onRefresh={refresh} onMessage={setMessage} />}
@@ -915,7 +916,9 @@ function VideoDetailPanel({
   </section>
 }
 
-function VideoWorkspace({ onDone, onMessage }: { onDone: () => void; onMessage: (message: string) => void }) {
+type DownloaderCapability = { enabled: boolean; version?: string; cookie_file_available: boolean }
+
+function VideoWorkspace({ onDone, onDoneLink, onMessage }: { onDone: () => void; onDoneLink: () => void; onMessage: (message: string) => void }) {
   const [mode, setMode] = useState<'local' | 'link'>('local')
   const [title, setTitle] = useState('')
   const [file, setFile] = useState<File | null>(null)
@@ -928,6 +931,17 @@ function VideoWorkspace({ onDone, onMessage }: { onDone: () => void; onMessage: 
   const [selectedCategories, setSelectedCategories] = useState<string[]>([])
   const [busy, setBusy] = useState(false)
   const [uploadProgress, setUploadProgress] = useState<number | null>(null)
+  const [linkPlatform, setLinkPlatform] = useState('bilibili')
+  const [linkUrl, setLinkUrl] = useState('')
+  const [useCookie, setUseCookie] = useState(false)
+  const [downloader, setDownloader] = useState<DownloaderCapability | null>(null)
+  useEffect(() => {
+    let active = true
+    void request<{ downloader: DownloaderCapability }>('/capabilities')
+      .then(output => { if (active) setDownloader(output.downloader) })
+      .catch(() => undefined)
+    return () => { active = false }
+  }, [])
   const submit = async (event: React.FormEvent) => {
     event.preventDefault()
     if (!right) {
@@ -961,6 +975,33 @@ function VideoWorkspace({ onDone, onMessage }: { onDone: () => void; onMessage: 
       setUploadProgress(null)
     }
   }
+  const submitLink = async (event: React.FormEvent) => {
+    event.preventDefault()
+    if (!right) {
+      onMessage('下载前必须确认视频的权利来源')
+      return
+    }
+    if (!linkUrl.trim()) {
+      onMessage('请输入哔哩哔哩或抖音的 HTTPS 视频链接')
+      return
+    }
+    setBusy(true)
+    try {
+      await request('/videos/link', { method: 'POST', body: JSON.stringify({
+        url: linkUrl.trim(), platform: linkPlatform, rights: right, use_cookie: useCookie,
+        title, author: author || null, language, notes: notes || null,
+        source_date: sourceDate || null, categories: selectedCategories, tags: parseTags(tags),
+      }) })
+      onMessage('已提交链接下载作业，请到作业页查看进度')
+      onDoneLink()
+    } catch (error) {
+      onMessage(error instanceof Error ? error.message : '链接下载提交失败')
+    } finally {
+      setBusy(false)
+    }
+  }
+  const downloadEnabled = downloader?.enabled === true
+  const cookieAvailable = downloader?.cookie_file_available === true
   return <div className="page narrow video-workspace"><PageHeader title="视频"/>
     <div className="segmented" aria-label="视频来源"><button type="button" className={mode === 'local' ? 'selected' : ''} onClick={() => setMode('local')}>本地视频</button><button type="button" className={mode === 'link' ? 'selected' : ''} onClick={() => setMode('link')}>链接获取</button></div>
     {mode === 'local' ? <form className="form-stack" onSubmit={submit}>
@@ -973,7 +1014,18 @@ function VideoWorkspace({ onDone, onMessage }: { onDone: () => void; onMessage: 
       <label>自由标签<input value={tags} onChange={event => setTags(event.target.value)} placeholder="用逗号分隔" /></label>
       {uploadProgress !== null && <div className="upload-progress" aria-live="polite"><span style={{ width: `${uploadProgress}%` }}/><small>{uploadProgress}%</small></div>}
       <button className="button primary" disabled={busy}>{busy ? '正在写入本地存储' : '确认权利并导入'}</button>
-    </form> : <section className="link-reservation"><h2>链接获取</h2><p>授权视频平台接入尚未配置。</p><div><span>抖音</span><span>哔哩哔哩</span></div><small>当前不会提交链接、访问网页、下载媒体或创建网络作业。</small></section>}
+    </form> : <form className="form-stack" onSubmit={submitLink}>
+      <div className="notice">联网告知：提交即向所选平台服务器发起下载请求；仅单视频、≤1080p，绝不绕过会员、付费墙或 DRM。不会预览、嗅探或解析展示。</div>
+      <div className="form-row"><label>平台<select value={linkPlatform} onChange={event => setLinkPlatform(event.target.value)}><option value="bilibili">哔哩哔哩</option><option value="douyin">抖音</option></select></label><label>语言<input required value={language} onChange={event => setLanguage(event.target.value)}/></label></div>
+      <label>视频链接<input required type="url" value={linkUrl} onChange={event => setLinkUrl(event.target.value)} placeholder="https://www.bilibili.com/video/... 或 https://v.douyin.com/..." /></label>
+      <div className="form-row"><label>权利确认<select required value={right} onChange={event => setRight(event.target.value)}><option value="" disabled>请选择</option>{rights.map(item => <option key={item[0]} value={item[0]}>{item[1]}</option>)}</select></label><label>标题<input value={title} onChange={event => setTitle(event.target.value)} placeholder="可留空，默认未命名视频" /></label></div>
+      <label className="check-row"><input type="checkbox" checked={useCookie} disabled={!cookieAvailable} onChange={event => setUseCookie(event.target.checked)}/>使用已导入 cookies.txt{cookieAvailable ? '' : '（尚未导入，请在设置页导入后使用）'}</label>
+      <div className="form-row"><label>作者<input value={author} onChange={event => setAuthor(event.target.value)}/></label><label>来源日期<input type="date" value={sourceDate} onChange={event => setSourceDate(event.target.value)}/></label></div>
+      <label>备注<textarea value={notes} onChange={event => setNotes(event.target.value)} /></label>
+      <fieldset><legend>固定分类（可多选）</legend><div className="check-grid">{categories.map(item => <label key={item[0]}><input type="checkbox" checked={selectedCategories.includes(item[0])} onChange={() => setSelectedCategories(current => current.includes(item[0]) ? current.filter(value => value !== item[0]) : [...current, item[0]])}/>{item[1]}</label>)}</div></fieldset>
+      <label>自由标签<input value={tags} onChange={event => setTags(event.target.value)} placeholder="用逗号分隔" /></label>
+      <button className="button primary" disabled={busy || !downloadEnabled}>{busy ? '正在提交下载作业' : downloadEnabled ? '确认权利并提交下载' : '链接下载工具不可用（需 yt-dlp 与 FFmpeg/ffprobe）'}</button>
+    </form>}
   </div>
 }
 
@@ -1077,7 +1129,7 @@ function SearchPage({
     <div className="search-options"><label>排序<select value={sort} onChange={event => setSort(event.target.value)}><option value="relevance">相关度</option><option value="updated">导入/更新时间</option><option value="title">标题</option></select></label><div className="advanced"><button type="button" className="text-button" onClick={() => setAdvancedOpen(value => !value)}><ChevronDown size={16} className={advancedOpen ? 'turned' : ''}/>高级范围</button></div></div>
     {advancedOpen && <div className="advanced-filters">
       <div className="filter-checks"><label><input type="checkbox" checked={includeHistorical} onChange={event => setIncludeHistorical(event.target.checked)}/>包含历史版本</label><label><input type="checkbox" checked={includeIncomplete} onChange={event => setIncludeIncomplete(event.target.checked)}/>包含不完整版本</label></div>
-      <div className="filter-grid"><label>来源类型<select value={filters.source_type} onChange={event => setFilters(current => ({ ...current, source_type: event.target.value }))}><option value="">全部</option><option value="file">本地文件</option><option value="paste">粘贴文本</option><option value="external">外部卡</option><option value="douyin">抖音参考</option></select></label><label>固定分类<select value={filters.category} onChange={event => setFilters(current => ({ ...current, category: event.target.value }))}><option value="">全部</option>{categories.map(item => <option key={item[0]} value={item[0]}>{item[1]}</option>)}</select></label><label>标签<input value={filters.tag} onChange={event => setFilters(current => ({ ...current, tag: event.target.value }))}/></label><label>作者<input value={filters.author} onChange={event => setFilters(current => ({ ...current, author: event.target.value }))}/></label><label>语言<input value={filters.language} onChange={event => setFilters(current => ({ ...current, language: event.target.value }))}/></label><label>处理状态<select value={filters.processing_state} onChange={event => setFilters(current => ({ ...current, processing_state: event.target.value }))}><option value="">全部</option><option value="queued">排队</option><option value="running">处理中</option><option value="succeeded">已完成</option><option value="failed">失败</option><option value="blocked">已阻止</option></select></label><label>来源日期起<input type="date" value={filters.source_date_from} onChange={event => setFilters(current => ({ ...current, source_date_from: event.target.value }))}/></label><label>来源日期止<input type="date" value={filters.source_date_to} onChange={event => setFilters(current => ({ ...current, source_date_to: event.target.value }))}/></label><label>导入日期起<input type="date" value={filters.imported_at_from} onChange={event => setFilters(current => ({ ...current, imported_at_from: event.target.value }))}/></label><label>导入日期止<input type="date" value={filters.imported_at_to} onChange={event => setFilters(current => ({ ...current, imported_at_to: event.target.value }))}/></label></div>
+      <div className="filter-grid"><label>来源类型<select value={filters.source_type} onChange={event => setFilters(current => ({ ...current, source_type: event.target.value }))}><option value="">全部</option><option value="file">本地文件</option><option value="paste">粘贴文本</option><option value="external">外部卡</option><option value="douyin">抖音参考</option><option value="video_link">链接视频</option></select></label><label>固定分类<select value={filters.category} onChange={event => setFilters(current => ({ ...current, category: event.target.value }))}><option value="">全部</option>{categories.map(item => <option key={item[0]} value={item[0]}>{item[1]}</option>)}</select></label><label>标签<input value={filters.tag} onChange={event => setFilters(current => ({ ...current, tag: event.target.value }))}/></label><label>作者<input value={filters.author} onChange={event => setFilters(current => ({ ...current, author: event.target.value }))}/></label><label>语言<input value={filters.language} onChange={event => setFilters(current => ({ ...current, language: event.target.value }))}/></label><label>处理状态<select value={filters.processing_state} onChange={event => setFilters(current => ({ ...current, processing_state: event.target.value }))}><option value="">全部</option><option value="queued">排队</option><option value="running">处理中</option><option value="succeeded">已完成</option><option value="failed">失败</option><option value="blocked">已阻止</option></select></label><label>来源日期起<input type="date" value={filters.source_date_from} onChange={event => setFilters(current => ({ ...current, source_date_from: event.target.value }))}/></label><label>来源日期止<input type="date" value={filters.source_date_to} onChange={event => setFilters(current => ({ ...current, source_date_to: event.target.value }))}/></label><label>导入日期起<input type="date" value={filters.imported_at_from} onChange={event => setFilters(current => ({ ...current, imported_at_from: event.target.value }))}/></label><label>导入日期止<input type="date" value={filters.imported_at_to} onChange={event => setFilters(current => ({ ...current, imported_at_to: event.target.value }))}/></label></div>
     </div>}
     <p className="hint">仅进行中文短语、关键词和子串匹配，不提供语义检索。</p>
     {results.length ? <div className="result-list">{results.map(item => <button type="button" key={`${item.kind}-${item.id}`} className="result" onClick={() => open(item)}><span className="result-kind">{item.kind === 'source' ? '来源' : item.kind === 'knowledge' ? '知识' : '外部卡'}</span><b>{item.title}</b><small>匹配 {item.relevance} 次 · {formatDate(item.updated_at)}</small></button>)}</div> : <Empty icon={<Search size={36}/>} text="输入条件后开始本地检索" />}
@@ -1121,6 +1173,7 @@ function jobLabel(kind: string) {
     video_analyze: '本地视频分析',
     video_transcribe: '视频语音转写',
     video_summarize: '视频内容摘要',
+    video_download: '链接下载',
   }
   return labels[kind] || kind
 }
@@ -1235,14 +1288,36 @@ function SettingsPage({ onMessage }: { onMessage: (message: string) => void }) {
   const save = async (event: React.FormEvent) => {
     event.preventDefault()
     try {
-      const result = await request<Record<string, string>>('/settings', { method: 'PUT', body: JSON.stringify({ parser_timeout_seconds: Number(settings.parser_timeout_seconds), parser_no_progress_seconds: Number(settings.parser_no_progress_seconds), parser_memory_limit_mb: Number(settings.parser_memory_limit_mb), parser_disk_limit_mb: Number(settings.parser_disk_limit_mb), video_timeout_seconds: Number(settings.video_timeout_seconds), video_memory_limit_mb: Number(settings.video_memory_limit_mb), video_disk_limit_mb: Number(settings.video_disk_limit_mb), video_max_frames: Number(settings.video_max_frames), job_lease_seconds: Number(settings.job_lease_seconds), max_retry_attempts: Number(settings.max_retry_attempts) }) })
+      const result = await request<Record<string, string>>('/settings', { method: 'PUT', body: JSON.stringify({ parser_timeout_seconds: Number(settings.parser_timeout_seconds), parser_no_progress_seconds: Number(settings.parser_no_progress_seconds), parser_memory_limit_mb: Number(settings.parser_memory_limit_mb), parser_disk_limit_mb: Number(settings.parser_disk_limit_mb), video_timeout_seconds: Number(settings.video_timeout_seconds), video_memory_limit_mb: Number(settings.video_memory_limit_mb), video_disk_limit_mb: Number(settings.video_disk_limit_mb), video_max_frames: Number(settings.video_max_frames), job_lease_seconds: Number(settings.job_lease_seconds), max_retry_attempts: Number(settings.max_retry_attempts), download_timeout_seconds: Number(settings.download_timeout_seconds), download_no_progress_seconds: Number(settings.download_no_progress_seconds), download_disk_limit_mb: Number(settings.download_disk_limit_mb) }) })
       setSettings(result)
       onMessage('设置已保存到本地 state')
     } catch (error) {
       onMessage(error instanceof Error ? error.message : '保存设置失败')
     }
   }
-  return <div className="page narrow"><PageHeader title="设置"/><form className="form-stack" onSubmit={save}><label>解析总超时（秒）<input type="number" min="60" max="86400" value={settings.parser_timeout_seconds || ''} onChange={event => setSettings(current => ({ ...current, parser_timeout_seconds: event.target.value }))}/></label><label>无进度断路器（秒）<input type="number" min="60" max="86400" value={settings.parser_no_progress_seconds || ''} onChange={event => setSettings(current => ({ ...current, parser_no_progress_seconds: event.target.value }))}/></label><label>解析内存上限（MB）<input type="number" min="64" max="32768" value={settings.parser_memory_limit_mb || ''} onChange={event => setSettings(current => ({ ...current, parser_memory_limit_mb: event.target.value }))}/></label><label>解析磁盘上限（MB）<input type="number" min="64" max="32768" value={settings.parser_disk_limit_mb || ''} onChange={event => setSettings(current => ({ ...current, parser_disk_limit_mb: event.target.value }))}/></label><fieldset><legend>本地视频分析</legend><div className="settings-grid"><label>视频总超时（秒）<input type="number" min="60" max="86400" value={settings.video_timeout_seconds || ''} onChange={event => setSettings(current => ({ ...current, video_timeout_seconds: event.target.value }))}/></label><label>视频内存上限（MB）<input type="number" min="64" max="32768" value={settings.video_memory_limit_mb || ''} onChange={event => setSettings(current => ({ ...current, video_memory_limit_mb: event.target.value }))}/></label><label>视频磁盘上限（MB）<input type="number" min="64" max="32768" value={settings.video_disk_limit_mb || ''} onChange={event => setSettings(current => ({ ...current, video_disk_limit_mb: event.target.value }))}/></label><label>最大关键帧数<input type="number" min="1" max="32" value={settings.video_max_frames || ''} onChange={event => setSettings(current => ({ ...current, video_max_frames: event.target.value }))}/></label></div></fieldset><label>作业租约（秒）<input type="number" min="60" max="86400" value={settings.job_lease_seconds || ''} onChange={event => setSettings(current => ({ ...current, job_lease_seconds: event.target.value }))}/></label><label>最大重试次数<input type="number" min="0" max="10" value={settings.max_retry_attempts || ''} onChange={event => setSettings(current => ({ ...current, max_retry_attempts: event.target.value }))}/></label><button className="button primary">保存设置</button></form><section className="policy-list"><h2>本地运行策略</h2><div><Check size={16}/>仅绑定 127.0.0.1</div><div><Check size={16}/>无遥测、无本地 HTTPS、无加密层</div><div><Check size={16}/>解析仅本地回退，禁止静默云服务</div><div><Check size={16}/>视频仅分析本地 MP4/WebM，链接获取尚未接入</div><div><Check size={16}/>操作日志不记录正文、路径或令牌</div></section></div>
+  const importCookie = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const picked = event.target.files?.[0]
+    if (!picked) return
+    try {
+      const body = new FormData()
+      body.set('file', picked)
+      await uploadFile('/settings/download-cookie', body, () => undefined)
+      onMessage('已导入 cookies.txt，可在视频页链接下载时选择使用')
+    } catch (error) {
+      onMessage(error instanceof Error ? error.message : 'cookies.txt 导入失败')
+    } finally {
+      event.target.value = ''
+    }
+  }
+  const removeCookie = async () => {
+    try {
+      await request('/settings/download-cookie', { method: 'DELETE' })
+      onMessage('已删除导入的 cookies.txt')
+    } catch (error) {
+      onMessage(error instanceof Error ? error.message : '删除失败')
+    }
+  }
+  return <div className="page narrow"><PageHeader title="设置"/><form className="form-stack" onSubmit={save}><label>解析总超时（秒）<input type="number" min="60" max="86400" value={settings.parser_timeout_seconds || ''} onChange={event => setSettings(current => ({ ...current, parser_timeout_seconds: event.target.value }))}/></label><label>无进度断路器（秒）<input type="number" min="60" max="86400" value={settings.parser_no_progress_seconds || ''} onChange={event => setSettings(current => ({ ...current, parser_no_progress_seconds: event.target.value }))}/></label><label>解析内存上限（MB）<input type="number" min="64" max="32768" value={settings.parser_memory_limit_mb || ''} onChange={event => setSettings(current => ({ ...current, parser_memory_limit_mb: event.target.value }))}/></label><label>解析磁盘上限（MB）<input type="number" min="64" max="32768" value={settings.parser_disk_limit_mb || ''} onChange={event => setSettings(current => ({ ...current, parser_disk_limit_mb: event.target.value }))}/></label><fieldset><legend>本地视频分析</legend><div className="settings-grid"><label>视频总超时（秒）<input type="number" min="60" max="86400" value={settings.video_timeout_seconds || ''} onChange={event => setSettings(current => ({ ...current, video_timeout_seconds: event.target.value }))}/></label><label>视频内存上限（MB）<input type="number" min="64" max="32768" value={settings.video_memory_limit_mb || ''} onChange={event => setSettings(current => ({ ...current, video_memory_limit_mb: event.target.value }))}/></label><label>视频磁盘上限（MB）<input type="number" min="64" max="32768" value={settings.video_disk_limit_mb || ''} onChange={event => setSettings(current => ({ ...current, video_disk_limit_mb: event.target.value }))}/></label><label>最大关键帧数<input type="number" min="1" max="32" value={settings.video_max_frames || ''} onChange={event => setSettings(current => ({ ...current, video_max_frames: event.target.value }))}/></label></div></fieldset><fieldset><legend>链接下载</legend><div className="settings-grid"><label>下载总超时（秒）<input type="number" min="60" max="86400" value={settings.download_timeout_seconds || ''} onChange={event => setSettings(current => ({ ...current, download_timeout_seconds: event.target.value }))}/></label><label>下载无进展观察窗口（秒）<input type="number" min="10" max="86400" value={settings.download_no_progress_seconds || ''} onChange={event => setSettings(current => ({ ...current, download_no_progress_seconds: event.target.value }))}/></label><label>下载 staging 磁盘上限（MB）<input type="number" min="64" max="32768" value={settings.download_disk_limit_mb || ''} onChange={event => setSettings(current => ({ ...current, download_disk_limit_mb: event.target.value }))}/></label></div></fieldset><label>作业租约（秒）<input type="number" min="60" max="86400" value={settings.job_lease_seconds || ''} onChange={event => setSettings(current => ({ ...current, job_lease_seconds: event.target.value }))}/></label><label>最大重试次数<input type="number" min="0" max="10" value={settings.max_retry_attempts || ''} onChange={event => setSettings(current => ({ ...current, max_retry_attempts: event.target.value }))}/></label><button className="button primary">保存设置</button></form><section className="form-stack download-cookie"><h2>下载 Cookie（cookies.txt 单通道）</h2><div className="form-row"><label className="file-pick">导入 cookies.txt（Netscape 格式，≤1MB）<input className="visually-hidden" type="file" accept=".txt" onChange={event => void importCookie(event)} /><span><Upload size={20}/>选择 cookies.txt</span></label><button type="button" className="button secondary" onClick={() => void removeCookie()}><Trash2 size={16}/>删除已导入 Cookie</button></div><p className="hint">重复导入覆盖旧文件；Cookie 内容绝不进入数据库、日志、备份或导出；下载结束后作业内拷贝即删除。</p></section><section className="policy-list"><h2>本地运行策略</h2><div><Check size={16}/>仅绑定 127.0.0.1</div><div><Check size={16}/>无遥测、无本地 HTTPS、无加密层</div><div><Check size={16}/>解析仅本地回退，禁止静默云服务</div><div><Check size={16}/>视频分析仅限本地 MP4/WebM</div><div><Check size={16}/>链接下载仅白名单平台、单视频、≤1080p，出站经回环过滤代理</div><div><Check size={16}/>下载 Cookie 仅 cookies.txt 单通道，绝不进入备份、导出或日志</div><div><Check size={16}/>操作日志不记录正文、路径或令牌</div></section></div>
 }
 
 function Empty({ icon, text }: { icon: React.ReactNode; text: string }) { return <div className="empty">{icon}<span>{text}</span></div> }
