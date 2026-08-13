@@ -246,6 +246,24 @@ def create_app(root: str | Path | None = None, *, acquire_lock: bool = True) -> 
         return await call_next(request)
 
     @app.middleware("http")
+    async def cookie_upload_length_preflight(request, call_next):
+        # cookies.txt 1MB 上限前移（REQ-047a）：解析 multipart 前按 Content-Length
+        # 预检（1MB 文件 + 表单开销边界），超大请求立即 413 不落临时盘；
+        # 端点内解析后的二次校验保留兜底。
+        if request.method == "POST" and request.url.path == "/api/v1/settings/download-cookie":
+            content_length = request.headers.get("content-length")
+            try:
+                expected_bytes = int(content_length) if content_length is not None else None
+            except ValueError:
+                expected_bytes = None
+            if expected_bytes is not None and expected_bytes > 1024 * 1024 + 64 * 1024:
+                return JSONResponse(
+                    status_code=413,
+                    content={"detail": {"code": "cookie_file_too_large", "message": "cookies.txt 超过 1MB 限制"}},
+                )
+        return await call_next(request)
+
+    @app.middleware("http")
     async def minimal_request_audit(request, call_next):
         response = await call_next(request)
         # Only a stable route template and status are recorded; never body, query, content or paths.
