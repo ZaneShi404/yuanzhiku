@@ -13,7 +13,7 @@ from typing import Annotated, Any
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.requests import Request
@@ -21,11 +21,13 @@ from starlette.requests import Request
 from app.adapters.sqlite import SqliteRepository
 from app.adapters.storage import ArtifactStore, StorageLimitError
 from app.adapters.parsers import LocalDocumentParser
+from app.adapters.downloader import DOWNLOAD_PLATFORMS, YtDlpDownloader
 from app.adapters.media import LocalFfmpegMediaAnalyzer, UnconfiguredMediaAi
 from app.core.config import DataPaths, InstanceLock, data_paths, database_backend, database_url
 from app.core.operations import OperationalLog
 from app.ports.repository import RepositoryPort
 from app.domain.models import (
+    DownloadLinkRequest,
     DouyinCardCreate,
     ExportCreate,
     ExternalCardCreate,
@@ -40,6 +42,8 @@ from app.domain.models import (
     SourceMetadataUpdate,
     TopicCreate,
     VerifyRequest,
+    sanitize_download_url,
+    validate_download_url,
 )
 from app.services.documents import DocumentService
 from app.services.external_cards import ExternalCardService
@@ -73,9 +77,11 @@ class ApplicationServices:
         self.parser = LocalDocumentParser(paths.models, Path(__file__).resolve().parents[1] / "models.lock.json")
         self.media_analyzer = LocalFfmpegMediaAnalyzer()
         self.media_ai = UnconfiguredMediaAi()
+        self.downloader = YtDlpDownloader(cookie_file_path=paths.download / "cookies.txt")
         self.documents = DocumentService(self.repository)
         self.videos = VideoService(self.repository, self.artifacts, self.documents, self.media_analyzer)
         self.transfers = TransferService(paths, self.repository, self.artifacts)
+        self.imports = ImportService(self.repository, self.artifacts)
         self.jobs = JobService(
             self.repository,
             self.artifacts,
@@ -84,8 +90,9 @@ class ApplicationServices:
             parser=self.parser,
             integrity_runner=lambda sample_size: self.transfers.verify_artifacts(False, sample_size),
             videos=self.videos,
+            imports=self.imports,
+            downloader=self.downloader,
         )
-        self.imports = ImportService(self.repository, self.artifacts)
         self.external_cards = ExternalCardService(self.repository)
         self.lifecycle = LifecycleService(self.repository, self.artifacts)
         self.search = SearchService(self.repository)
@@ -212,7 +219,7 @@ def create_app(root: str | Path | None = None, *, acquire_lock: bool = True) -> 
         CORSMiddleware,
         allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
         allow_credentials=False,
-        allow_methods=["GET", "POST", "PUT"],
+        allow_methods=["GET", "POST", "PUT", "DELETE"],
         allow_headers=["Content-Type"],
     )
 
@@ -263,6 +270,7 @@ def create_app(root: str | Path | None = None, *, acquire_lock: bool = True) -> 
             "search": {"mode": "phrase_keyword_substring", "semantic": False},
             "external_cards": {"fetch": False, "douyin_literal_only": True},
             "media": {"local": svc.media_analyzer.capability(), "ai": svc.media_ai.capability()},
+            "downloader": svc.downloader.capability(),
             "network": {"bind": "127.0.0.1", "https": False, "telemetry": False},
         }
 
@@ -273,6 +281,36 @@ def create_app(root: str | Path | None = None, *, acquire_lock: bool = True) -> 
     @app.put(f"{api}/settings", tags=["settings"])
     def put_settings(request: SettingsUpdate, svc: ApplicationServices = Depends(get_services)) -> dict[str, Any]:
         return svc.repository.update_settings(request.model_dump(exclude_none=True))
+
+    @app.post(f"{api}/settings/download-cookie", status_code=204, tags=["settings"])
+    async def upload_download_cookie(
+        file: Annotated[UploadFile, File(...)],
+        svc: ApplicationServices = Depends(get_services),
+    ) -> Response:
+        # 单通道 cookies.txt（REQ-047a）：1MB 上限，重复导入覆盖旧文件。
+        content = await file.read(1024 * 1024 + 1)
+        await file.close()
+        if len(content) > 1024 * 1024:
+            raise HTTPException(
+                status_code=413,
+                detail={"code": "cookie_file_too_large", "message": "cookies.txt 超过 1MB 限制"},
+            )
+        svc.paths.download.mkdir(parents=True, exist_ok=True)
+        destination = svc.paths.download / "cookies.txt"
+        staging = svc.paths.download / "cookies.txt.part"
+        try:
+            with staging.open("wb") as target:
+                target.write(content)
+            os.replace(staging, destination)
+        finally:
+            staging.unlink(missing_ok=True)
+        return Response(status_code=204)
+
+    @app.delete(f"{api}/settings/download-cookie", status_code=204, tags=["settings"])
+    def delete_download_cookie(svc: ApplicationServices = Depends(get_services)) -> Response:
+        # 幂等删除：不存在也返回 204。
+        (svc.paths.download / "cookies.txt").unlink(missing_ok=True)
+        return Response(status_code=204)
 
     @app.post(f"{api}/imports/paste", status_code=201, tags=["imports"])
     def import_paste(request: PasteImportRequest, svc: ApplicationServices = Depends(get_services)) -> dict[str, Any]:
@@ -343,6 +381,49 @@ def create_app(root: str | Path | None = None, *, acquire_lock: bool = True) -> 
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         finally:
             await file.close()
+
+    @app.post(f"{api}/videos/link", status_code=201, tags=["videos"])
+    def create_video_link(request: DownloadLinkRequest, svc: ApplicationServices = Depends(get_services)) -> dict[str, Any]:
+        if request.platform not in DOWNLOAD_PLATFORMS:
+            raise HTTPException(status_code=422, detail={"code": "unsupported_platform", "message": "不支持的视频平台"})
+        try:
+            validate_download_url(request.url, request.platform)
+        except ValueError as exc:
+            # 拒绝消息不含 URL 内容（REQ-047.1）。
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "invalid_url", "message": "链接无效：仅支持哔哩哔哩或抖音的 HTTPS 链接，且不含登录凭据"},
+            ) from exc
+        capability = svc.downloader.capability()
+        if not capability.get("enabled"):
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "downloader_unavailable", "message": "链接下载工具不可用：需要 yt-dlp 与 FFmpeg/ffprobe"},
+            )
+        if request.use_cookie and not capability.get("cookie_file_available"):
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "cookie_file_unavailable", "message": "尚未导入 cookies.txt，无法使用 Cookie 下载"},
+            )
+        # payload_json 只存脱敏链接（scheme://host/path），绝不存原文 URL 参数。
+        job = svc.repository.create_job(
+            "video_download", None, None, None, None,
+            {
+                "url": sanitize_download_url(request.url),
+                "platform": request.platform,
+                "use_cookie": request.use_cookie,
+                "rights": request.rights.value,
+                "title": request.title,
+                "author": request.author,
+                "language": request.language,
+                "notes": request.notes,
+                "source_date": request.source_date.isoformat() if request.source_date else None,
+                "categories": request.categories,
+                "tags": request.tags,
+            },
+            priority=100,
+        )
+        return job
 
     @app.get(f"{api}/videos/{{source_id}}", tags=["videos"])
     def video_detail(

@@ -10,16 +10,28 @@ import queue
 import shutil
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Callable
 
 from app.domain.media import MediaProcessingLimits
+from app.domain.models import sanitize_download_url
 from app.domain.parsing import ParsedDocument
 from app.ports.parser import DocumentParserPort
-from app.ports.media import MediaAiUnavailable, MediaInputInvalid, MediaProcessingCancelled, MediaToolUnavailable
+from app.ports.media import (
+    DownloadInputInvalid,
+    DownloadProcessingCancelled,
+    DownloadUnavailable,
+    MediaAiUnavailable,
+    MediaDownloaderPort,
+    MediaInputInvalid,
+    MediaProcessingCancelled,
+    MediaToolUnavailable,
+)
 from app.ports.repository import RepositoryPort
 from app.ports.storage import ArtifactStoragePort
 from app.services.documents import DocumentService
+from app.services.imports import ImportService
 from app.services.videos import VideoService
 
 
@@ -114,11 +126,15 @@ class JobService:
         parser: DocumentParserPort | None = None,
         integrity_runner: Callable[[int], dict] | None = None,
         videos: VideoService | None = None,
+        imports: ImportService | None = None,
+        downloader: MediaDownloaderPort | None = None,
     ) -> None:
         self.repository = repository
         self.artifacts = artifacts
         self.documents = documents
         self.videos = videos
+        self.imports = imports
+        self.downloader = downloader
         if parser is None:
             from app.adapters.parsers import LocalDocumentParser
 
@@ -143,6 +159,8 @@ class JobService:
                 self._parse(job)
             elif job["kind"] == "video_analyze":
                 self._video_analyze(job)
+            elif job["kind"] == "video_download":
+                self._video_download(job)
             elif job["kind"] in {"video_transcribe", "video_summarize"}:
                 self._finish(job, "blocked", "未配置媒体 AI 服务", progress=100)
             elif job["kind"] == "backup":
@@ -210,6 +228,23 @@ class JobService:
         except MediaAiUnavailable:
             try:
                 self._finish(job, "blocked", "未配置媒体 AI 服务", progress=100)
+            except JobLeaseLost:
+                pass
+        except DownloadProcessingCancelled:
+            try:
+                self._finish(job, "cancelled", "链接下载已取消")
+            except JobLeaseLost:
+                pass
+        except DownloadUnavailable:
+            try:
+                # 工具缺失或回环代理启动失败（fail-closed）：可安装工具后从作业页重试。
+                self._finish(job, "blocked", "链接下载工具不可用：需要 yt-dlp 与 FFmpeg/ffprobe", progress=100)
+            except JobLeaseLost:
+                pass
+        except DownloadInputInvalid:
+            try:
+                # 反爬/链接失效/平台拒绝/超限/产物无效：通用脱敏消息，可有限重试。
+                self._finish(job, "failed", "链接失效、平台拒绝或下载产物无效，请重新复制分享链接或稍后重试")
             except JobLeaseLost:
                 pass
         except ParserCircuitBreaker as exc:
@@ -392,6 +427,130 @@ class JobService:
     def _update_video_progress(self, job: dict, progress: int, message: str) -> None:
         if not self.repository.update_job(job["id"], job["lease_token"], progress=progress, message=message):
             raise JobLeaseLost()
+
+    def _video_download(self, job: dict) -> None:
+        """Restricted link download flow (REQ-047): payload 校验 → 工具可用性 →
+        per-job staging + Cookie 拷贝 → 回环过滤代理 → download → probe（含高度
+        ≤1080）→ 容量预检 → artifact → 同事务 source/version/provenance 与
+        video_analyze 入队 → 审计；任何失败路径不残留半成品 source。
+        """
+        if self.downloader is None or self.videos is None or self.imports is None:
+            if self._finish(job, "blocked", "链接下载服务不可用", progress=100):
+                return
+            return
+        try:
+            payload = json.loads(job["payload_json"])
+        except (TypeError, ValueError):
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        url = payload.get("url")
+        platform = payload.get("platform")
+        rights = payload.get("rights")
+        use_cookie = bool(payload.get("use_cookie"))
+        if (
+            not isinstance(url, str) or not url
+            or not isinstance(platform, str) or platform not in {"bilibili", "douyin"}
+            or rights not in {"owned", "authorized", "permitted", "open_license", "other"}
+        ):
+            raise DownloadInputInvalid("invalid_payload")
+        if not self.downloader.capability().get("enabled"):
+            raise DownloadUnavailable()
+        settings = self.repository.get_settings()
+        try:
+            timeout_seconds = max(60.0, min(86_400.0, float(settings.get("download_timeout_seconds", "3600"))))
+            no_progress_seconds = max(10.0, min(86_400.0, float(settings.get("download_no_progress_seconds", "10"))))
+            disk_limit_mb = max(64, min(32_768, int(settings.get("download_disk_limit_mb", "2048"))))
+            memory_limit_mb = max(64, min(32_768, int(settings.get("video_memory_limit_mb", "2048"))))
+        except (TypeError, ValueError):
+            timeout_seconds = 3600.0
+            no_progress_seconds = 10.0
+            disk_limit_mb = 2048
+            memory_limit_mb = 2048
+        limits = MediaProcessingLimits(
+            timeout_seconds=timeout_seconds,
+            maximum_memory_bytes=memory_limit_mb * 1024 * 1024,
+            maximum_workspace_bytes=disk_limit_mb * 1024 * 1024,
+        )
+        workspace = self.artifacts.staging_path().with_suffix("")
+        workspace.mkdir(parents=True, exist_ok=False)
+        try:
+            cookie_copy: Path | None = None
+            if use_cookie:
+                # 作业内只读取导入的 cookies.txt 并拷贝进 staging；原文件不被修改。
+                cookie_source = self.artifacts.paths.download / "cookies.txt"
+                try:
+                    available = cookie_source.is_file() and cookie_source.stat().st_size <= 1024 * 1024
+                except OSError:
+                    available = False
+                if not available:
+                    raise DownloadInputInvalid("cookie")
+                cookie_copy = workspace / "cookies.txt"
+                shutil.copyfile(cookie_source, cookie_copy)
+            # 观察窗口间隔由设置注入（端口签名不含该参数；单 worker 无竞争）。
+            setattr(self.downloader, "no_progress_seconds", no_progress_seconds)
+            self._update_video_progress(job, 5, "正在启动链接下载")
+            result = self.downloader.download(
+                url=url,
+                platform=platform,
+                workspace=workspace,
+                limits=limits,
+                use_cookie=use_cookie,
+                cookie_path=cookie_copy,
+                cancelled=lambda: self.repository.job_cancel_requested(job["id"]),
+                heartbeat=lambda: self._heartbeat(job),
+                progress=lambda value, message: self._update_video_progress(job, value, message),
+            )
+            if self.repository.job_cancel_requested(job["id"]):
+                raise DownloadProcessingCancelled()
+            candidate = workspace / result.filename
+            if not candidate.is_file() or candidate.stat().st_size != result.byte_size:
+                raise DownloadInputInvalid("product_missing")
+            self._update_video_progress(job, 92, "正在校验下载产物")
+            probe_limits = replace(limits, deadline_monotonic=time.monotonic() + limits.timeout_seconds)
+            try:
+                metadata = self.videos.analyzer.probe(
+                    candidate,
+                    probe_limits,
+                    cancelled=lambda: self.repository.job_cancel_requested(job["id"]),
+                    heartbeat=lambda: self._heartbeat(job),
+                )
+            except MediaInputInvalid as exc:
+                raise DownloadInputInvalid("product_invalid") from exc
+            if metadata.height is not None and metadata.height > 1080:
+                # 高度 ≤1080 后置断言：格式选择 + probe 双保险（REQ-047.9）。
+                raise DownloadInputInvalid("height")
+            self.artifacts.check_capacity(result.byte_size)
+            capability = self.downloader.capability()
+            url_sanitized = sanitize_download_url(url)
+            self._update_video_progress(job, 96, "正在写入不可变 artifact")
+            with candidate.open("rb") as stream:
+                ingested = self.imports.downloaded_video(
+                    stream,
+                    result.byte_size,
+                    platform=platform,
+                    url_sanitized=url_sanitized,
+                    yt_dlp_version=str(capability.get("version") or "unknown"),
+                    format_profile=getattr(self.downloader, "format_profile", "res:1080+mp4-remux"),
+                    cookie_used=use_cookie,
+                    config_hash=self.downloader.config_hash(platform, getattr(self.downloader, "format_profile", "res:1080+mp4-remux")),
+                    title=str(payload.get("title") or ""),
+                    author=payload.get("author") if isinstance(payload.get("author"), str) else None,
+                    language=str(payload.get("language") or "zh"),
+                    notes=payload.get("notes") if isinstance(payload.get("notes"), str) else None,
+                    rights=rights,
+                    categories=[item for item in payload.get("categories", []) if isinstance(item, str)],
+                    tags=[item for item in payload.get("tags", []) if isinstance(item, str)],
+                    source_date=payload.get("source_date") if isinstance(payload.get("source_date"), str) else None,
+                    original_name=result.filename,
+                    media_type=result.media_type,
+                )
+            self.repository.audit("video_download", ingested["source"]["id"], "succeeded")
+            self._finish(job, "succeeded", "链接下载完成，已排入本地视频分析", progress=100)
+        finally:
+            # 作业结束（无论成败/取消）：回环代理由适配器随作业关闭；
+            # staging 与 Cookie 拷贝在这里统一清理。
+            shutil.rmtree(workspace, ignore_errors=True)
 
     def _parse(self, job: dict) -> None:
         if self.repository.job_cancel_requested(job["id"]):
