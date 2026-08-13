@@ -48,6 +48,14 @@ DOWNLOAD_REGISTRY: dict[str, tuple[str, ...]] = {
 
 DOWNLOAD_PLATFORMS = tuple(DOWNLOAD_REGISTRY)
 
+# 隧道段例外（决策 10，fake-IP 环境兼容）：代理工具 fake-IP/TUN 模式的常见
+# 隧道地址，公网不可路由、由本地 TUN 设备独占路由并映射到工具自身配置的
+# 真实目的地——攻击者无法借此把连接引向受害主机内部服务（经典 DNS 重绑定
+# 目标）；主机名注册域白名单仍是第一道且唯一的域名控制。前提：主机名已通过
+# _validate_host 注册域校验（本常量只在 _open_validated_connection 内参与
+# 判定，而该函数仅在校验通过后执行，调用关系不变）。其余保留段仍无条件拒绝。
+TUNNEL_RANGES = (ipaddress.ip_network("198.18.0.0/15"), ipaddress.ip_network("28.0.0.0/8"))
+
 
 def registered_domains(platform: str) -> tuple[str, ...]:
     """Return the registered outbound domains for a whitelisted platform."""
@@ -217,14 +225,22 @@ class LoopbackFilterProxy:
         Covers 127.0.0.0/8、10.0.0.0/8、172.16.0.0/12、192.168.0.0/16、
         169.254.0.0/16、::1、fe80::/10、100.64.0.0/10（CGNAT 共享段——Python
         3.13 下 is_private/is_reserved 对该段全为 False）、文档段、广播段及
-        其余保留/多播地址。Test code may subclass to exempt this check
-        (decision 9); production code has no such branch.
+        其余保留/多播地址。唯一例外是隧道段 TUNNEL_RANGES（决策 10）：仅当
+        主机名已通过 _validate_host 注册域校验后才可能到达本方法（本方法只被
+        _open_validated_connection 调用，而该函数仅在校验通过后执行），隧道段
+        放行不会构成主机名白名单绕过。Test code may subclass to exempt this
+        check (decision 9); production code has no such branch.
         """
         try:
             address = ipaddress.ip_address(ip)
         except ValueError:
             return True
-        return not address.is_global
+        if any(address in network for network in TUNNEL_RANGES):
+            # 隧道段例外（决策 10）：注册域主机名解析落入 fake-IP 隧道段时放行。
+            return False
+        # 多播段须显式拒绝：Python 3.13 下多播地址（如 224.0.0.1）is_global
+        # 为 True，仅凭 not is_global 会漏放行。
+        return not address.is_global or address.is_multicast
 
     def _open_validated_connection(self, host: str, port: int) -> socket.socket | None:
         """Resolve once, connect with the validated IPs, then re-check the peer."""

@@ -789,6 +789,31 @@ def test_proxy_rejects_reserved_resolutions_in_production_mode() -> None:
         assert proxy._reject_resolved_ip(public) is False
 
 
+def test_proxy_tunnel_range_exemption_requires_registered_hostname() -> None:
+    # T-VID-003 用例 10 修订（决策 10）：隧道段例外仅在注册域主机名校验通过后生效。
+    proxy = LoopbackFilterProxy(("bilibili.com",))
+    # (a) 注册域主机名解析到隧道段 → 放行
+    assert proxy._reject_resolved_ip("198.18.0.55") is False
+    assert proxy._reject_resolved_ip("198.18.255.254") is False
+    assert proxy._reject_resolved_ip("28.0.0.1") is False
+    assert proxy._reject_resolved_ip("28.255.255.255") is False
+    # (c) 其余保留段仍无条件拒绝
+    for reserved in (
+        "100.64.0.1", "100.127.255.255", "169.254.169.254", "169.254.10.10",
+        "192.0.2.1", "198.51.100.7", "203.0.113.9", "127.0.0.1", "::1",
+        "10.0.0.1", "172.16.0.1", "192.168.1.1", "224.0.0.1", "255.255.255.255",
+    ):
+        assert proxy._reject_resolved_ip(reserved) is True
+    # (b) 隧道段例外不会绕过主机名校验：未登记主机名与 IP 字面量在代理层直接拒绝
+    assert proxy._validate_host("evil.com") is False
+    assert proxy._validate_host("198.18.0.55") is False
+    assert proxy.denied_hosts() == {"evil.com": 1, "198.18.0.55": 1}
+    # (d) 测试注入豁免（决策 9）行为不受影响：生产代理仍拒回环，测试子类放行
+    exempt = _LoopbackExemptProxy(("localhost",))
+    assert proxy._reject_resolved_ip("127.0.0.1") is True
+    assert exempt._reject_resolved_ip("127.0.0.1") is False
+
+
 class _LoopbackExemptProxy(LoopbackFilterProxy):
     """测试注入模式（决策 9）：仅豁免回环/保留段解析拒绝，不影响注册域校验。"""
 
