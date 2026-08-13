@@ -16,7 +16,7 @@
 - `REQ-012`：相同哈希 artifact 只保存一次但可有不同 source；不同内容默认新 source；支持显式关系 new_version_of、revision_of、related_to、user_declared_same_work。
 - `REQ-013`：Docling 是首选解析器。其模型只可按预批准、锁定版本/来源/许可证/哈希且无需登录或附加条款的官方默认模型锁文件直接公开下载，缓存于 `data\models`；禁止静默云回退。
 - `REQ-014`：Docling 缺失/不可用时记录原因并本地回退 pypdf、python-docx 或原生 Markdown/TXT；扫描/无文本 PDF 保留并标记 awaiting_ocr；加密、损坏、不可解析 PDF/DOCX 在权利确认后保留，作业 blocked/failed，绝不询问、猜测或储存密码。
-- `REQ-015`：视频第一版仅支持本地 MP4/WebM（同样受 2GB、容量预检、权利声明、不可变 SHA-256 artifact、备份和永久清理规则约束）；不保存原始本地完整路径。视频通过本机显式安装的 FFmpeg/ffprobe 探测元数据并在独立 staging 中有限时间采样 JPEG 关键帧，禁止 shell、网络、URL 获取和静默云回退。
+- `REQ-015`：视频支持本地 MP4/WebM 导入（同样受 2GB、容量预检、权利声明、不可变 SHA-256 artifact、备份和永久清理规则约束）与受限链接获取（`REQ-047`）；不保存原始本地完整路径。链接获取仅接受白名单平台、仅由用户显式提交，下载经无 shell 受限子进程完成并进入同一 artifact/分析/证据链生命周期；本地导入与视频分析仍禁止 shell、网络、URL 获取和静默云回退。视频通过本机显式安装的 FFmpeg/ffprobe 探测元数据并在独立 staging 中有限时间采样 JPEG 关键帧。
 - `REQ-016`：视频分析使用可配置的总超时、内存、工作目录磁盘及最大关键帧数断路器；仅在原视频和所有接受的派生帧完成 hash 校验后成功。视频元数据以 `video_metadata` locator 写入可引用 extraction/evidence；未来转写仅可使用带毫秒起止范围的 `video_time_range` locator。
 - `REQ-017`：视频转写和内容摘要只定义可插拔端口与作业接口；默认 AI 未配置、无网络流量，作业明确 blocked，不伪造文本、摘要或 evidence。外部提供方只能经日后明确配置的适配器接入，凭据、原路径、媒体内容和原始响应不得进入数据库、API、导出或日志。
 
@@ -31,11 +31,27 @@
 
 ## 外部卡、作业和生命周期
 
-- `REQ-030`：外部卡仅接受用户输入的一般 URL 元数据，不抓取、解析、预览或请求，且不是事实证据。抖音仅接受用户输入、原样保存的 HTTPS `douyin.com` 或其子域 URL；浏览器仅打开原 URL 并提示中文人工定位。
-- `REQ-031`：抖音绝对禁止下载、抓取、内容/媒体/字幕/文本/图像提取、iframe、cookie/密码/认证、自动化、缓存、代理、逆向和伪造时间参数；任何 HTTP client/worker/parser 均不可接受抖音 URL。
+- `REQ-030`：外部卡仅接受用户输入的一般 URL 元数据，不抓取、解析、预览或请求，且不是事实证据。抖音仅接受用户输入、原样保存的 HTTPS `douyin.com` 或其子域 URL；浏览器仅打开原 URL 并提示中文人工定位。（v1.2 保持不变：外部卡仍仅字面保存 URL 元数据，不抓取、不解析、不请求，不是事实证据。）
+- `REQ-031`：抖音绝对禁止下载、抓取、内容提取、iframe、cookie/密码/认证、自动化、缓存、代理、逆向和伪造时间参数；任何 HTTP client/worker/parser 均不可接受抖音 URL。**唯一例外是 `REQ-047` 与 `REQ-047a` 定义的受限链接获取下载通道**——它只由用户显式提交、只服务白名单域、只在独立 staging 内工作；外部卡、文档解析器、检索、文档导入、媒体 AI 端口对该例外一无所知。**密码/登录凭据不在例外之列，任何情况下不使用、不保存。**
 - `REQ-032`：作业状态 queued、running、retry_wait、succeeded、failed、blocked、cancelled；持久化作业/attempt/audit；单 worker，手动导入/重试/恢复优先于 FIFO；有进度、心跳、最小日志、有限重试、协作取消/重跑，按 version/artifact/config 幂等。
 - `REQ-033`：可配置解析安全断路器，默认 24 小时，覆盖内存/磁盘/无进度；仅在输出、证据、索引验证后作业成功。
 - `REQ-033a`：视频 `video_analyze` 沿用持久化租约、心跳、取消、优先级和有限重试，依次探测、抽帧、持久化和校验；`video_transcribe`、`video_summarize` 在 AI 未配置时仅阻止该作业，不能降低已经完成的视频版本或来源状态。
+- `REQ-047`：受限链接获取（视频下载）通道：
+  1. 平台白名单 `bilibili`、`douyin`；URL 严格校验：HTTPS、主域或子域匹配白名单（bilibili 组显式含 `b23.tv` 入口短链）、无内嵌凭据、长度上限；未知或不支持的 URL 拒绝，拒绝消息不含 URL 内容。
+  2. 下载器为锁定版本的 yt-dlp（`REQ-046`，写入 `requirements.lock`），仅以无 shell 子进程运行（`shell=False`）、stdin 关闭、忽略用户级配置文件与缓存；**出站一律经作业内回环过滤代理**（仅监听 127.0.0.1、仅作业生命周期内存活），代理逐连接校验目标主机名必须命中平台注册域清单（7.2.1），未登记域、以及解析到回环/内网/保留段的地址直接拒绝；显式 `--proxy` 指向回环代理并清空子进程代理环境变量（等效禁用环境代理）；重定向链的每一个新连接都在代理处强制校验，无静默重定向跟随外平台。
+  3. 下载仅写入独立 per-job staging：总超时、内存、磁盘断路器沿用 `REQ-016` 纪律；无进展（静默期）断路器按 `REQ-033` 语义**新实现**（staging 目录总量滚动窗口无增长判定，见 7.2）；全部支持协作取消；下载产物经 ffprobe 校验为合法 MP4/WebM、时长合法、**高度 ≤1080**、≤2GB 且通过容量预检后，流式写入不可变 SHA-256 artifact。
+  4. 提交链接时权利声明（owned/authorized/permitted/open_license/other）必填，与本地导入一致（`REQ-011`）。
+  5. 下载出处记录（provenance）：平台、脱敏链接（`scheme://host/path`，去 userinfo/query/fragment）、yt-dlp 版本、所选格式、是否使用 Cookie 写入 `video_download_provenance` 表（进 `EXPORT_TABLES`/`BACKUP_TABLES`，随导出 manifest 与备份快照携带并受既有 hash 校验）；审计事件仅记 `event_type`/`entity_id`/`result`；下载作业 `payload_json` 只存脱敏链接；Cookie 内容、原始请求头、下载响应体绝不进入数据库、日志、API 响应、备份或导出（`REQ-042`）。
+  6. 新增作业 kind `video_download`：持久租约、心跳、取消、优先级与有限重试；成功后在作业内创建 source/content version/artifact 并自动入队 `video_analyze`；分析失败、取消或 blocked 不降低已完成下载（对齐 `REQ-033a` 精神）。任何失败路径不残留半成品 source；staging 与 Cookie 拷贝作业结束即清理。
+  7. 仅单视频；多P/合集/直播/需登录才可见的内容按失败处理，失败消息脱敏。
+  8. 下载作业在 yt-dlp 或 FFmpeg 缺失时明确 blocked；因反爬、链接失效、平台拒绝等外部原因失败时状态 failed 且可有限重试，绝不静默切换来源或平台。
+  9. 会员/付费墙/DRM 内容一律拒绝：不利用 Cookie 获取超出用户自身已购权益的内容；付费专享、DRM 加密流按失败处理（通用脱敏提示）；仅按平台公开免费档位（≤1080p）选择格式，高度/码率过滤无法区分会员画质时按失败处理。
+- `REQ-047a`：Cookie 生命周期（仅 cookies.txt 单通道）：
+  1. **cookies.txt 通道（唯一）**：用户可显式导入浏览器导出的 cookies.txt（Netscape 格式），大小上限 1MB，仅存于 `data/state/download/cookies.txt`；重复导入覆盖旧文件；支持一键删除（幂等）。
+  2. 提交下载时用户显式选择"使用已导入 Cookie"（`use_cookie: true`），仅用于该次下载；未导入 Cookie 文件却选择使用 → `422`，绝不静默回退到无 Cookie 下载。
+  3. Cookie 内容绝不进入数据库、日志正文、API 响应、备份（`REQ-040`）、导出 ZIP 与 reimport（`REQ-041`）、审计事件；备份/导出/再导入规则显式排除 `data/state/download` 路径。
+  4. 使用 Cookie 时把 Cookie 文件**拷贝**注入该作业 staging，作业结束（无论成败）立即删除拷贝；作业运行期间不触碰、不修改原文件。
+  5. 能力接口暴露 `cookie_file_available` 状态；不可用时前端禁用该开关并给出导入引导。
 - `REQ-034`：软删除无限期；显式永久删除才移除 source versions/derived/index/cache，仅在无 active source 引用时删除 artifact；永久删除后最小无内容审计保留 1 年。
 
 ## 备份、导出和部署
@@ -43,7 +59,7 @@
 - `REQ-040`：每日首次成功启动后排低优先级备份（非 Windows 任务）；保留最近 30 个成功日备份。备份含 DB、artifacts、derived/evidence、settings、manifest，排除模型缓存、staging、日志正文；快照一致并 SHA-256 验证。
 - `REQ-041`：还原只能到新数据根，绝不覆盖；导出完整可移植 ZIP + JSON manifest，含原 artifact、派生数据、逻辑记录和 sha manifests，排除密钥/凭据/私密权利备注/cookies/原路径/日志正文；UI 必须确认导出。再导入校验 schema/zip/manifest/hash/relations，不覆盖；同 ID 不同链拒绝并报告。
 - `REQ-042`：摄取/导出/还原均校验 hash，支持手工完整校验和空闲抽样；操作日志按日保留 30 天且不含内容/路径/令牌。视频分析记录、关键帧 artifact 及其引用也必须进入备份、导出、还原和再导入一致性校验。
-- `REQ-043`：所有端点位于 `/api/v1`：health/capabilities、settings、sources/relations/rights/metadata、imports/paste、videos/local、videos/{id}/stream/frames/transcribe/summarize、docs/representations/evidence/citations/knowledge、search、tags/topics、external/douyin cards、jobs、delete/restore/purge、backup/restore、export/reimport；类型稳定并有 OpenAPI。
-- `REQ-044`：UI 页面包括库、导入、视频、来源详情、检索、作业、设置、备份/还原/导出、外部卡；极简中文；视频仅播放本地 artifact 并显示本地元数据/关键帧，链接获取只可作为不可提交的预留状态；PDF 使用隔离只读预览并禁用嵌入链接，仅显式外开；文本安全渲染；目标 Edge/Chrome。
+- `REQ-043`：所有端点位于 `/api/v1`：health/capabilities、settings、sources/relations/rights/metadata、imports/paste、videos/local、videos/link、videos/{id}/stream/frames/transcribe/summarize、settings/download-cookie、docs/representations/evidence/citations/knowledge、search、tags/topics、external/douyin cards、jobs、delete/restore/purge、backup/restore、export/reimport；类型稳定并有 OpenAPI。`/capabilities` 增加 `downloader` 节。其余不变。
+- `REQ-044`：UI 页面包括库、导入、视频、来源详情、检索、作业、设置、备份/还原/导出、外部卡；极简中文；视频仅播放本地 artifact 并显示本地元数据/关键帧，视频页"链接获取"为可提交表单：平台选择（哔哩哔哩/抖音）、URL 输入、权利声明必选、Cookie 开关（使用已导入 cookies.txt，含可用状态提示）、联网告知（提交即向所选平台服务器发起下载请求）、提交后跳转作业页；不做预览、嗅探或解析展示；PDF 使用隔离只读预览并禁用嵌入链接，仅显式外开；文本安全渲染；目标 Edge/Chrome。
 - `REQ-045`：SQLite 默认于 `data/state`，为 PostgreSQL 提供 production adapter/migrations；Docker Compose 运行 web/api/worker/postgres/redis，端口仅 loopback；集成测试只能使用 `tests\runtime\compose-<run-id>`，不得使用日常 data。
 - `REQ-046`：依赖仅接受明确开源许可；锁定依赖/模型/镜像版本，不自动升级；建立合成、无版权 fixtures 和完整文档、决策、开发报告。

@@ -8,4 +8,6 @@
 
 本地视频分析要求 `ffmpeg` 和 `ffprobe` 可由服务进程找到，或通过 `YUANZHIKU_FFMPEG_BIN`、`YUANZHIKU_FFPROBE_BIN` 明确指定。`GET /api/v1/capabilities` 的 `media.local` 显示二进制可用性；工具缺失时视频导入仍成功保存原件，但分析作业为 `blocked`，安装工具后可从作业页重试。视频总超时、内存、staging 磁盘、最大关键帧在设置页和 `/settings` 配置。日常备份、导出、还原与再导入都包含并校验原视频及受引用的关键帧 artifact、视频分析和帧关系；永久删除来源时只清理无引用的原件和关键帧。
 
+链接下载（`video_download` 作业）在 yt-dlp 或 FFmpeg 缺失时明确 `blocked`（`/capabilities` 的 `downloader.enabled=false`，`POST /videos/link` 返回 `503`）；因反爬、链接失效、平台拒绝等外部原因失败时为 `failed` 且可有限重试（作业页重试按钮），绝不静默切换来源或平台。下载总超时、无进展观察窗口、staging 磁盘上限在设置页与 `/settings` 配置（`download_timeout_seconds`、`download_no_progress_seconds`、`download_disk_limit_mb`）。回环过滤代理仅监听 127.0.0.1 随机端口、仅存活于单个下载作业生命周期，作业结束（无论成败）即关闭，无长驻端口。`data/state/download` 只放用户显式导入的 `cookies.txt`（1MB 上限，重复导入覆盖旧文件）；删除该文件或调用 `DELETE /settings/download-cookie` 即彻底移除 Cookie。备份、导出与 reimport 显式排除 `data/state/download` 路径（manifest `exclusions` 含 `state/download`），Cookie 内容绝不进入备份快照、导出 ZIP 或再导入；作业内 Cookie 拷贝随 per-job staging 作业结束即清理。
+
 操作日志只记录事件类型、ID、结果和时间，按日保留 30 天，不写正文、路径、令牌或请求体（`REQ-003`, `REQ-042`）。任何运行、恢复或排障步骤都不得获取来源 URL、调用网页视频平台或以程序方式处理抖音；外部卡始终只保留用户输入的元数据。

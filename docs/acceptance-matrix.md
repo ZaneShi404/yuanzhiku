@@ -11,3 +11,4 @@
 | REQ-033a | `services/jobs.py`, `services/videos.py`, `tests/unit/test_video_media.py` | T-VID-001 | 视频作业状态、取消、重试与 AI 阻止不破坏已完成版本 |
 | REQ-040..042 | `services/transfers.py` | T-BACK-001, T-VID-002 | 快照一致性、restore 新根、视频帧引用和 artifact 清理 |
 | REQ-043..046 | `main.py`, `app/migrate.py`, `docker-compose.yml`, `Dockerfile`, docs | T-API-001, T-COMP-001, T-ARCH-001 | endpoint 覆盖、一次性数据库迁移、锁定前端构建与 loopback 容器验证；归档 v2 报告配对、legacy/snapshot 冻结登记、逐项版本候选链、声明式验收身份、来源/证据/需求/缺陷交叉验证、Windows ACL 封存及 v1 兼容性 |
+| REQ-015(修订), REQ-031(例外), REQ-047, REQ-047a | `ports/media.py`, `adapters/downloader.py`, `services/jobs.py`, `services/imports.py`, `domain/models.py`, `main.py`, `frontend/src/App.tsx` | T-VID-003, T-VID-004 | 白名单与 URL 校验、注册域清单与回环代理强制、重定向逐跳拒绝、无 shell 子进程、断路器（含无进展与内存）、单通道 Cookie 不进 DB/日志/备份/导出/reimport、provenance 承载与脱敏、失败无残留、成功自动入队 video_analyze、抖音例外仅限 REQ-047/047a 通道 |
