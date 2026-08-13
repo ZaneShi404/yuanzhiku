@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 
 from app.core.config import data_paths
 from app.domain.media import ExtractedVideoFrame, MediaProcessingLimits, VideoMetadata
+from app.adapters.media import LocalFfmpegMediaAnalyzer
 from app.main import create_app
 
 
@@ -264,3 +265,29 @@ def test_video_export_reimport_preserves_analysis_frames_and_artifacts(client_an
     assert len(imported["analysis"]["frames"]) == len(frame_hashes)
     assert recipient.artifacts.verify(original_hash)
     assert all(recipient.artifacts.verify(sha256) for sha256 in frame_hashes)
+
+
+def test_extract_frames_escapes_comma_in_scale_filter(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """ffmpeg filtergraph 中逗号是链分隔符：min(640,iw) 必须转义为 min(640\,iw)。"""
+    captured: list[list[str]] = []
+
+    def fake_run(cls, command, limits, cancelled, heartbeat, *, workspace=None, capture_stdout=False):
+        captured.append(list(command))
+        destination = Path(command[-1])
+        destination.write_bytes(b"fake-jpeg")
+        return b""
+
+    monkeypatch.setattr(LocalFfmpegMediaAnalyzer, "_run", classmethod(fake_run))
+    analyzer = LocalFfmpegMediaAnalyzer()
+    workspace = tmp_path / "frames"
+    workspace.mkdir()
+    metadata = VideoMetadata("mov,mp4,m4a,3gp,3g2,mj2", 10_000, 1280, 720, "h264", "aac")
+    analyzer.extract_frames(
+        tmp_path / "artifact.mp4", metadata, workspace, maximum_frames=2,
+        limits=MediaProcessingLimits(30.0, 1024 ** 3, 1024 ** 3),
+        cancelled=lambda: False, heartbeat=lambda: None,
+    )
+    assert captured
+    for command in captured:
+        assert "-vf" in command
+        assert command[command.index("-vf") + 1] == "scale=min(640\,iw):-2"

@@ -205,7 +205,8 @@ class LocalFfmpegMediaAnalyzer(MediaAnalyzerPort):
                     "-ss", f"{time_ms / 1000:.3f}",
                     "-i", str(artifact_path),
                     "-frames:v", "1",
-                    "-vf", "scale=min(640,iw):-2",
+                    # filtergraph 中逗号是链分隔符：min(640,iw) 的逗号必须转义。
+                    "-vf", "scale=min(640\\,iw):-2",
                     "-q:v", "3",
                     "-y",
                     str(destination),
