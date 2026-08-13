@@ -49,11 +49,14 @@ DOWNLOAD_REGISTRY: dict[str, tuple[str, ...]] = {
 DOWNLOAD_PLATFORMS = tuple(DOWNLOAD_REGISTRY)
 
 # 隧道段例外（决策 10，fake-IP 环境兼容）：代理工具 fake-IP/TUN 模式的常见
-# 隧道地址，公网不可路由、由本地 TUN 设备独占路由并映射到工具自身配置的
-# 真实目的地——攻击者无法借此把连接引向受害主机内部服务（经典 DNS 重绑定
-# 目标）；主机名注册域白名单仍是第一道且唯一的域名控制。前提：主机名已通过
-# _validate_host 注册域校验（本常量只在 _open_validated_connection 内参与
-# 判定，而该函数仅在校验通过后执行，调用关系不变）。其余保留段仍无条件拒绝。
+# 隧道地址。198.18.0.0/15 为 RFC 2544 基准段、公网不可路由，由本地 TUN 设备
+# 独占路由并映射到工具自身配置的真实目的地——攻击者无法借此把连接引向受害
+# 主机内部服务（经典 DNS 重绑定目标）；28.0.0.0/8 已是全局单播前缀，本就
+# 不会被 _reject_resolved_ip 拒绝，列入本常量仅作 fake-IP 工具常用段的文档
+# 记录（纯文档性，无放行语义）。主机名注册域白名单仍是第一道且唯一的域名控制。
+# 前提：主机名已通过 _validate_host 注册域校验（本常量只在
+# _open_validated_connection 内参与判定，而该函数仅在校验通过后执行，调用
+# 关系不变）。其余保留段仍无条件拒绝。
 TUNNEL_RANGES = (ipaddress.ip_network("198.18.0.0/15"), ipaddress.ip_network("28.0.0.0/8"))
 
 
