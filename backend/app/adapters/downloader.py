@@ -462,6 +462,22 @@ class YtDlpDownloader(MediaDownloaderPort):
         except OSError:
             return False
 
+    def _ffmpeg_available(self) -> bool:
+        """Whether the configured ffmpeg binary is resolvable right now."""
+        return shutil.which(self.ffmpeg) is not None
+
+    def _resolve_ffmpeg_dir(self) -> str | None:
+        """Directory of the discovered ffmpeg binary, or None when unresolvable.
+
+        与应用进程同源：YUANZHIKU_FFMPEG_BIN（或默认 "ffmpeg"）经
+        shutil.which 解析；yt-dlp 子进程只看 PATH，不感知该环境变量。
+        """
+        try:
+            binary = shutil.which(self.ffmpeg)
+        except (OSError, ValueError):
+            binary = None
+        return str(Path(binary).resolve().parent) if binary else None
+
     def capability(self) -> dict[str, object]:
         return {
             "enabled": self._yt_dlp_version() != "unavailable"
@@ -478,11 +494,21 @@ class YtDlpDownloader(MediaDownloaderPort):
         value = f"yt-dlp:1:{platform}:{format_profile}".encode("ascii")
         return hashlib.sha256(value).hexdigest()
 
-    @staticmethod
-    def _subprocess_environment() -> dict[str, str]:
-        """Child environment with every proxy variable cleared as a second lock."""
+    def _subprocess_environment(self) -> dict[str, str]:
+        """Child environment with proxy variables cleared and FFmpeg on PATH.
+
+        双保险：显式 ``--ffmpeg-location`` 之外，把解析到的 FFmpeg 目录前置
+        进子进程 PATH（大小写不敏感地替换既有 PATH 键），确保 yt-dlp 拉起的
+        ffmpeg 合并/remux 子进程可被发现。
+        """
         blocked = {"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"}
-        return {key: value for key, value in os.environ.items() if key.upper() not in blocked}
+        env = {key: value for key, value in os.environ.items() if key.upper() not in blocked}
+        ffmpeg_dir = self._resolve_ffmpeg_dir()
+        if ffmpeg_dir is not None:
+            path_key = next((key for key in env if key.upper() == "PATH"), "PATH")
+            existing = env.pop(path_key, "")
+            env[path_key] = ffmpeg_dir + (os.pathsep + existing if existing else "")
+        return env
 
     @staticmethod
     def _terminate_process_tree(process: subprocess.Popen) -> None:
@@ -537,6 +563,10 @@ class YtDlpDownloader(MediaDownloaderPort):
             raise DownloadInputInvalid("platform")
         if use_cookie and (cookie_path is None or not cookie_path.is_file()):
             raise DownloadInputInvalid("cookie")
+        if not self._ffmpeg_available():
+            # REQ-047.8：FFmpeg 不可解析时绝不静默降级——B站音视频分离流
+            # 无 ffmpeg 只能产出纯视频文件，必须 blocked（fail-closed）。
+            raise DownloadUnavailable("ffmpeg_missing")
         # 启动回环过滤代理；启动失败 fail-closed → blocked，绝不直连回退。
         proxy = self._proxy_factory(platform)
         try:
@@ -574,10 +604,18 @@ class YtDlpDownloader(MediaDownloaderPort):
             "--socket-timeout", "30",
             "--merge-output-format", "mp4",
             "--remux-video", "mp4",
+        ]
+        ffmpeg_dir = self._resolve_ffmpeg_dir()
+        if ffmpeg_dir is not None:
+            # 显式告知 yt-dlp FFmpeg 目录（其子进程只看 PATH，不感知
+            # YUANZHIKU_FFMPEG_BIN）；与 _subprocess_environment 的 PATH
+            # 前置互为双保险。FFmpeg 仅作本地合并/remux，绝不作为下载器。
+            command.extend(["--ffmpeg-location", ffmpeg_dir])
+        command.extend([
             "-S", "res:1080",
             "-o", str(workspace / "video.%(ext)s"),
             "--print", "%(title)s",
-        ]
+        ])
         if use_cookie:
             assert cookie_path is not None
             command.extend(["--cookies", str(cookie_path)])
@@ -667,13 +705,22 @@ class YtDlpDownloader(MediaDownloaderPort):
         if process.returncode != 0:
             raise DownloadInputInvalid("failed")
         title = self._extract_title(title_output)
-        outputs = [
+        # 合并/remux 产物校验（REQ-047.8）：-o 模板的最终产物必须是唯一的
+        # video.mp4/video.webm。yt-dlp 多流命名规律为 video.f<format_id>.<ext>
+        #（如 video.f30077.mp4 + video.f30280.m4a）：若这些中间残留仍在（或
+        # .part 残留），说明 FFmpeg 合并/remux 未发生——绝不静默接受纯视频
+        # 降级产物（"下载成功"假象）。
+        products = [
             item for item in workspace.iterdir()
-            if item.is_file() and item.suffix.lower() in {".mp4", ".webm"} and not item.name.startswith(".")
+            if item.is_file() and item.name in {"video.mp4", "video.webm"}
         ]
-        if len(outputs) != 1:
-            raise DownloadInputInvalid("no_output")
-        product = outputs[0]
+        residues = [
+            item for item in workspace.iterdir()
+            if item.is_file() and item.name.startswith("video.") and item.name not in {"video.mp4", "video.webm"}
+        ]
+        if len(products) != 1 or residues:
+            raise DownloadInputInvalid("unmerged_output")
+        product = products[0]
         media_type = "video/mp4" if product.suffix.lower() == ".mp4" else "video/webm"
         return DownloadedVideo(
             filename=product.name,

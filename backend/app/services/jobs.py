@@ -235,10 +235,14 @@ class JobService:
                 self._finish(job, "cancelled", "链接下载已取消")
             except JobLeaseLost:
                 pass
-        except DownloadUnavailable:
+        except DownloadUnavailable as exc:
             try:
                 # 工具缺失或回环代理启动失败（fail-closed）：可安装工具后从作业页重试。
-                self._finish(job, "blocked", "链接下载工具不可用：需要 yt-dlp 与 FFmpeg/ffprobe", progress=100)
+                if str(exc) == "ffmpeg_missing":
+                    message = "未找到本地 FFmpeg 或 ffprobe"
+                else:
+                    message = "链接下载工具不可用：需要 yt-dlp 与 FFmpeg/ffprobe"
+                self._finish(job, "blocked", message, progress=100)
             except JobLeaseLost:
                 pass
         except DownloadInputInvalid:

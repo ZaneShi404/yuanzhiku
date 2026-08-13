@@ -138,6 +138,8 @@ class FakeDownloader:
         self.calls.append(record)
         if self.outcome == "unavailable":
             raise DownloadUnavailable("unit")
+        if self.outcome == "ffmpeg_missing":
+            raise DownloadUnavailable("ffmpeg_missing")
         if self.outcome == "input_invalid":
             raise DownloadInputInvalid("unit")
         if self.outcome == "cancelled":
@@ -365,6 +367,7 @@ def test_cookie_upload_content_length_preflight_rejects_before_parsing(client_an
 # --- 用例 3：断路器（适配器级，真实监控循环 + 假 yt_dlp 模块） ---
 
 _FAKE_YTDLP_MAIN = """
+import json
 import os
 import subprocess
 import sys
@@ -382,9 +385,32 @@ elif mode == "write_big_then_sleep":
     with open(os.path.join(workspace, "big.bin"), "wb") as handle:
         handle.write(b"\\x00" * (4 * 1024 * 1024))
     time.sleep(300)
+elif mode == "capture_args":
+    with open(os.path.join(workspace, "argv.json"), "w") as handle:
+        json.dump(sys.argv, handle)
+    with open(os.path.join(workspace, "video.mp4"), "wb") as handle:
+        handle.write(b"fake-mp4")
+elif mode == "write_unmerged":
+    with open(os.path.join(workspace, "video.f30077.mp4"), "wb") as handle:
+        handle.write(b"video-stream")
+    with open(os.path.join(workspace, "video.f30280.m4a"), "wb") as handle:
+        handle.write(b"audio-stream")
+elif mode == "write_partial_merge":
+    with open(os.path.join(workspace, "video.mp4"), "wb") as handle:
+        handle.write(b"video-only")
+    with open(os.path.join(workspace, "video.f30280.m4a"), "wb") as handle:
+        handle.write(b"audio-stream")
 else:
     time.sleep(300)
 """
+
+
+def _fake_ffmpeg_binary(tmp_path: Path) -> Path:
+    """Windows 上 shutil.which 只需文件存在；供测试注入可解析的 ffmpeg。"""
+    binary = tmp_path / "bin" / "ffmpeg.exe"
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    binary.write_bytes(b"")
+    return binary
 
 
 @pytest.fixture()
@@ -407,7 +433,10 @@ def _run_fake_download(
     monkey_workspace = workspace
     os.environ["FAKE_YTDLP_MODE"] = mode
     os.environ["FAKE_YTDLP_WORKSPACE"] = str(monkey_workspace)
-    downloader = YtDlpDownloader(proxy_factory=lambda platform: LoopbackFilterProxy(("test.invalid",)))
+    downloader = YtDlpDownloader(
+        ffmpeg=str(_fake_ffmpeg_binary(tmp_path)),
+        proxy_factory=lambda platform: LoopbackFilterProxy(("test.invalid",)),
+    )
     downloader.no_progress_seconds = no_progress_seconds
     try:
         return downloader.download(
@@ -424,6 +453,76 @@ def _run_fake_download(
     finally:
         os.environ.pop("FAKE_YTDLP_MODE", None)
         os.environ.pop("FAKE_YTDLP_WORKSPACE", None)
+
+
+def test_downloader_adds_ffmpeg_location_when_resolvable(
+    fake_ytdlp_environment, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "staging"
+    workspace.mkdir()
+    fake_bin = _fake_ffmpeg_binary(tmp_path)
+    monkeypatch.setenv("FAKE_YTDLP_MODE", "capture_args")
+    monkeypatch.setenv("FAKE_YTDLP_WORKSPACE", str(workspace))
+    downloader = YtDlpDownloader(
+        ffmpeg=str(fake_bin),
+        proxy_factory=lambda platform: LoopbackFilterProxy(("test.invalid",)),
+    )
+    result = downloader.download(
+        url="https://test.invalid/video", platform="bilibili", workspace=workspace,
+        limits=MediaProcessingLimits(30.0, 1024 ** 3, 1024 ** 3),
+        use_cookie=False, cookie_path=None,
+        cancelled=lambda: False, heartbeat=lambda: None,
+        progress=lambda value, message: None,
+    )
+    assert result.filename == "video.mp4"
+    argv = json.loads((workspace / "argv.json").read_text(encoding="utf-8"))
+    assert "--ffmpeg-location" in argv
+    assert argv[argv.index("--ffmpeg-location") + 1] == str(fake_bin.parent)
+    # 双保险：子进程环境 PATH 前置 FFmpeg 目录（大小写不敏感查找键）
+    env = downloader._subprocess_environment()
+    path_key = next(key for key in env if key.upper() == "PATH")
+    assert env[path_key].startswith(str(fake_bin.parent) + os.pathsep)
+
+
+def test_downloader_blocks_when_ffmpeg_unresolvable(tmp_path: Path) -> None:
+    workspace = tmp_path / "staging"
+    workspace.mkdir()
+    downloader = YtDlpDownloader(
+        ffmpeg="definitely-missing-ffmpeg-binary-xyz",
+        proxy_factory=lambda platform: LoopbackFilterProxy(("test.invalid",)),
+    )
+    with pytest.raises(DownloadUnavailable) as excinfo:
+        downloader.download(
+            url="https://test.invalid/video", platform="bilibili", workspace=workspace,
+            limits=MediaProcessingLimits(30.0, 1024 ** 3, 1024 ** 3),
+            use_cookie=False, cookie_path=None,
+            cancelled=lambda: False, heartbeat=lambda: None,
+            progress=lambda value, message: None,
+        )
+    assert excinfo.value.args[0] == "ffmpeg_missing"
+
+
+@pytest.mark.parametrize("mode", ["write_unmerged", "write_partial_merge"], ids=["no_merged", "residue_left"])
+def test_downloader_rejects_unmerged_residues(
+    fake_ytdlp_environment, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str,
+) -> None:
+    workspace = tmp_path / "staging"
+    workspace.mkdir()
+    monkeypatch.setenv("FAKE_YTDLP_MODE", mode)
+    monkeypatch.setenv("FAKE_YTDLP_WORKSPACE", str(workspace))
+    downloader = YtDlpDownloader(
+        ffmpeg=str(_fake_ffmpeg_binary(tmp_path)),
+        proxy_factory=lambda platform: LoopbackFilterProxy(("test.invalid",)),
+    )
+    with pytest.raises(DownloadInputInvalid) as excinfo:
+        downloader.download(
+            url="https://test.invalid/video", platform="bilibili", workspace=workspace,
+            limits=MediaProcessingLimits(30.0, 1024 ** 3, 1024 ** 3),
+            use_cookie=False, cookie_path=None,
+            cancelled=lambda: False, heartbeat=lambda: None,
+            progress=lambda value, message: None,
+        )
+    assert excinfo.value.args[0] == "unmerged_output"
 
 
 @pytest.mark.parametrize(
@@ -458,7 +557,10 @@ def test_downloader_cancel_terminates_process_tree(
         checks.append(True)
         return len(checks) > 8
 
-    downloader = YtDlpDownloader(proxy_factory=lambda platform: LoopbackFilterProxy(("test.invalid",)))
+    downloader = YtDlpDownloader(
+        ffmpeg=str(_fake_ffmpeg_binary(tmp_path)),
+        proxy_factory=lambda platform: LoopbackFilterProxy(("test.invalid",)),
+    )
     with pytest.raises(DownloadProcessingCancelled):
         downloader.download(
             url="https://test.invalid/video", platform="bilibili", workspace=workspace,
@@ -543,6 +645,18 @@ def test_download_job_blocked_when_tools_missing(client_and_services) -> None:
     )
     completed = _claim_and_run(services)
     assert completed["id"] == job["id"] and completed["state"] == "blocked"
+
+
+def test_download_job_blocked_when_ffmpeg_missing(client_and_services) -> None:
+    # REQ-047.8：下载执行期 FFmpeg 不可解析 → blocked，绝不静默产出纯视频产物。
+    client, services, downloader = client_and_services
+    downloader.outcome = "ffmpeg_missing"
+    assert _submit_link(client, "https://www.bilibili.com/video/BV1test").status_code == 201
+    blocked = _claim_and_run(services)
+    assert blocked["kind"] == "video_download"
+    assert blocked["state"] == "blocked"
+    assert blocked["message"] == "未找到本地 FFmpeg 或 ffprobe"
+    assert services.repository.list_sources() == []
 
 
 # --- 用例 5：产物校验回滚 ---
@@ -1141,6 +1255,11 @@ class _ChainDownloader(YtDlpDownloader):
         capability = super().capability()
         capability["enabled"] = True
         return capability
+
+    def _ffmpeg_available(self) -> bool:
+        # 测试注入（决策 9 同源）：仅测试子类放行 ffmpeg 预检（合成单文件
+        # MP4 无需合并），生产代码无该分支，fail-closed 语义不变。
+        return True
 
 
 def _chain_app(runtime_root: Path, monkeypatch: pytest.MonkeyPatch):
