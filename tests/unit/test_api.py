@@ -206,3 +206,61 @@ def test_manual_representation_and_reimport(client: TestClient, runtime_root: Pa
     imported_again = client.post("/api/v1/reimports", json={"archive_path": exported["archive_path"]}).json()
     assert imported_again["imported"] is True
     assert imported_again["report"]["inserted_records"] == 0
+
+
+def test_download_link_endpoints_in_openapi_and_capabilities(client: TestClient) -> None:
+    schema = client.get("/openapi.json").json()
+    assert "/api/v1/videos/link" in schema["paths"]
+    assert "/api/v1/settings/download-cookie" in schema["paths"]
+    assert "delete" in schema["paths"]["/api/v1/settings/download-cookie"]
+    capabilities = client.get("/api/v1/capabilities").json()
+    downloader = capabilities["downloader"]
+    assert set(downloader) == {"enabled", "adapter", "version", "supported_platforms", "cookie_file_available", "network"}
+    assert downloader["adapter"] == "yt-dlp"
+    assert downloader["supported_platforms"] == ["bilibili", "douyin"]
+    # 本机未安装 FFmpeg/ffprobe：如实报告 disabled（不伪装可用）
+    assert downloader["enabled"] is False
+    assert downloader["cookie_file_available"] is False
+
+
+def test_download_link_error_codes_stable(client: TestClient) -> None:
+    unavailable = client.post(
+        "/api/v1/videos/link",
+        json={"url": "https://www.bilibili.com/video/BV1", "platform": "bilibili", "rights": "owned"},
+    )
+    assert unavailable.status_code == 503
+    assert unavailable.json()["detail"]["code"] == "downloader_unavailable"
+    invalid = client.post(
+        "/api/v1/videos/link",
+        json={"url": "http://www.bilibili.com/video/BV1", "platform": "bilibili", "rights": "owned"},
+    )
+    assert invalid.status_code == 422
+    assert invalid.json()["detail"]["code"] == "invalid_url"
+    assert "bilibili" not in invalid.json()["detail"]["message"]
+    unsupported = client.post(
+        "/api/v1/videos/link",
+        json={"url": "https://www.bilibili.com/video/BV1", "platform": "youtube", "rights": "owned"},
+    )
+    assert unsupported.status_code == 422
+    assert unsupported.json()["detail"]["code"] == "unsupported_platform"
+    missing_rights = client.post(
+        "/api/v1/videos/link",
+        json={"url": "https://www.bilibili.com/video/BV1", "platform": "bilibili"},
+    )
+    assert missing_rights.status_code == 422
+    assert missing_rights.json()["detail"]["code"] == "request_validation"
+
+
+def test_download_cookie_delete_cors_preflight_and_idempotent_delete(client: TestClient) -> None:
+    preflight = client.options(
+        "/api/v1/settings/download-cookie",
+        headers={
+            "Origin": "http://localhost:5173",
+            "Access-Control-Request-Method": "DELETE",
+            "Access-Control-Request-Headers": "Content-Type",
+        },
+    )
+    assert preflight.status_code == 200
+    assert "DELETE" in preflight.headers.get("access-control-allow-methods", "")
+    assert client.delete("/api/v1/settings/download-cookie").status_code == 204
+    assert client.delete("/api/v1/settings/download-cookie").status_code == 204

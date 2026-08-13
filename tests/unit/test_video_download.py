@@ -1,0 +1,969 @@
+"""T-VID-003（单元负面用例）与 T-VID-004（合成集成）链接下载测试。
+
+纪律：不触网真实平台；fixture 与运行时数据只放 tests/fixtures 与
+tests/runtime/<run-id>；FFmpeg/ffprobe 未安装时沿用 unit analyzer 假件模式；
+回环过滤代理的"保留段拒绝豁免"仅测试子类注入（决策 9），生产代码无该分支。
+"""
+
+from __future__ import annotations
+
+import hashlib
+import ipaddress
+import json
+import os
+import shutil
+import socket
+import sqlite3
+import tempfile
+import threading
+import time
+import uuid
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from zipfile import ZipFile
+
+import pytest
+from fastapi.testclient import TestClient
+
+from app.adapters.downloader import (
+    DOWNLOAD_REGISTRY,
+    LoopbackFilterProxy,
+    YtDlpDownloader,
+    host_matches_registered_domain,
+)
+from app.domain.media import ExtractedVideoFrame, MediaProcessingLimits, VideoMetadata
+from app.domain.models import sanitize_download_url
+from app.main import create_app
+from app.ports.media import (
+    DownloadedVideo,
+    DownloadInputInvalid,
+    DownloadProcessingCancelled,
+    DownloadUnavailable,
+    MediaInputInvalid,
+)
+
+RUN_ROOT = Path(os.environ.get("YUANZHIKU_TEST_RUNTIME", Path(__file__).resolve().parents[1] / "runtime")) / "video-download"
+
+GENERIC_FAILURE_MESSAGE = "链接失效、平台拒绝或下载产物无效，请重新复制分享链接或稍后重试"
+
+
+class FakeMediaAnalyzer:
+    """Unit analyzer fake：probe 高度可配置，供下载产物校验与 video_analyze 链使用。"""
+
+    def __init__(self, height: int = 720, probe_error: str | None = None) -> None:
+        self.height = height
+        self.probe_error = probe_error
+
+    def capability(self) -> dict[str, object]:
+        return {"enabled": True, "adapter": "unit", "network": False}
+
+    def config_hash(self, maximum_frames: int) -> str:
+        return hashlib.sha256(f"unit:{maximum_frames}".encode("ascii")).hexdigest()
+
+    def probe(self, artifact_path: Path, limits: MediaProcessingLimits, cancelled, heartbeat) -> VideoMetadata:
+        assert artifact_path.is_file()
+        assert not cancelled()
+        heartbeat()
+        if self.probe_error is not None:
+            raise MediaInputInvalid(self.probe_error)
+        return VideoMetadata("mov,mp4,m4a,3gp,3g2,mj2", 10_000, 1280, self.height, "h264", "aac")
+
+    def extract_frames(
+        self, artifact_path: Path, metadata: VideoMetadata, workspace: Path, maximum_frames: int,
+        limits: MediaProcessingLimits, cancelled, heartbeat,
+    ) -> tuple[ExtractedVideoFrame, ...]:
+        assert artifact_path.is_file()
+        frames: list[ExtractedVideoFrame] = []
+        for ordinal in range(min(maximum_frames, 2)):
+            assert not cancelled()
+            path = workspace / f"frame-{ordinal}.jpg"
+            path.write_bytes(b"synthetic-jpeg-frame-" + bytes([ordinal]))
+            heartbeat()
+            frames.append(ExtractedVideoFrame(ordinal, (ordinal + 1) * 3_000, path, 320, 180))
+        return tuple(frames)
+
+
+class FakeDownloader:
+    """受控假下载器：记录每次调用的参数与 staging 内 Cookie 拷贝内容。"""
+
+    format_profile = "unit:res:1080+mp4-remux"
+
+    def __init__(
+        self,
+        *,
+        enabled: bool = True,
+        cookie_file_path: Path | None = None,
+        outcome: str = "ok",
+        product: bytes = b"downloaded-mp4-bytes",
+    ) -> None:
+        self.enabled = enabled
+        self.cookie_file_path = cookie_file_path
+        self.outcome = outcome
+        self.product = product
+        self.calls: list[dict] = []
+
+    def capability(self) -> dict[str, object]:
+        available = False
+        if self.cookie_file_path is not None:
+            try:
+                available = self.cookie_file_path.is_file() and self.cookie_file_path.stat().st_size <= 1024 * 1024
+            except OSError:
+                available = False
+        return {
+            "enabled": self.enabled,
+            "adapter": "yt-dlp",
+            "version": "unit-1.0",
+            "supported_platforms": ["bilibili", "douyin"],
+            "cookie_file_available": available,
+            "network": True,
+        }
+
+    def config_hash(self, platform: str, format_profile: str) -> str:
+        return hashlib.sha256(f"unit:{platform}:{format_profile}".encode("ascii")).hexdigest()
+
+    def download(self, *, url, platform, workspace, limits, use_cookie, cookie_path, cancelled, heartbeat, progress):
+        record = {"url": url, "platform": platform, "use_cookie": use_cookie, "workspace": Path(workspace)}
+        workspace.mkdir(parents=True, exist_ok=True)
+        if cookie_path is not None:
+            record["cookie_content"] = cookie_path.read_bytes() if cookie_path.is_file() else None
+        self.calls.append(record)
+        if self.outcome == "unavailable":
+            raise DownloadUnavailable("unit")
+        if self.outcome == "input_invalid":
+            raise DownloadInputInvalid("unit")
+        if self.outcome == "cancelled":
+            raise DownloadProcessingCancelled()
+        product = workspace / "video.mp4"
+        product.write_bytes(self.product)
+        return DownloadedVideo("video.mp4", "video/mp4", len(self.product))
+
+
+@pytest.fixture()
+def runtime_root() -> Path:
+    RUN_ROOT.mkdir(parents=True, exist_ok=True)
+    root = RUN_ROOT / uuid.uuid4().hex
+    root.mkdir()
+    yield root
+    shutil.rmtree(root, ignore_errors=True)
+
+
+@pytest.fixture()
+def client_and_services(runtime_root: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("YUANZHIKU_EMBEDDED_WORKER", "false")
+    app = create_app(runtime_root, acquire_lock=False)
+    services = app.state.services
+    downloader = FakeDownloader(cookie_file_path=services.paths.download / "cookies.txt")
+    services.downloader = downloader
+    services.jobs.downloader = downloader
+    services.videos.analyzer = FakeMediaAnalyzer()
+    with TestClient(app) as client:
+        yield client, services, downloader
+
+
+def _submit_link(client: TestClient, url: str, **overrides):
+    body = {"url": url, "platform": "bilibili", "rights": "owned", **overrides}
+    return client.post("/api/v1/videos/link", json=body)
+
+
+def _claim_and_run(services) -> dict:
+    job = services.jobs.run_once()
+    assert job is not None
+    return job
+
+
+# --- 用例 1：URL 白名单（API 层） ---
+
+@pytest.mark.parametrize("url", [
+    "http://www.bilibili.com/video/BV1test",
+    "https://www.evil.com/video/BV1test",
+    "https://douyin.com.evil.com/video/123",
+    "https://evil-bilibili.com/video/123",
+    "https://user:password@www.douyin.com/video/123",
+    "https://www.bilibili.com/video/" + "a" * 4096,
+    "https://127.0.0.1/video/123",
+    "https://10.0.0.8/video/123",
+    "https://192.168.1.2/video/123",
+    "https://169.254.10.10/video/123",
+    "https://[::1]/video/123",
+])
+def test_download_url_whitelist_rejections(client_and_services, url: str) -> None:
+    client, _, _ = client_and_services
+    response = _submit_link(client, url)
+    assert response.status_code == 422, response.text
+    detail = response.json()["detail"]
+    assert detail["code"] == "invalid_url"
+    # 拒绝消息不含 URL 内容
+    assert "bilibili" not in detail["message"] and "douyin" not in detail["message"]
+    assert url not in detail["message"]
+
+
+def test_download_url_whitelist_accepts_registered_hosts_and_b23_tv(client_and_services) -> None:
+    client, _, _ = client_and_services
+    for url, platform in [
+        ("https://www.bilibili.com/video/BV1test", "bilibili"),
+        ("https://api.bilibili.com/x/player", "bilibili"),
+        ("https://b23.tv/abcdef", "bilibili"),
+        ("https://v.douyin.com/abcdef/", "douyin"),
+        ("https://www.douyin.com/video/123", "douyin"),
+    ]:
+        created = _submit_link(client, url, platform=platform)
+        assert created.status_code == 201, created.text
+        assert created.json()["kind"] == "video_download"
+
+
+def test_download_url_platform_mismatch_rejected(client_and_services) -> None:
+    client, _, _ = client_and_services
+    b23_as_douyin = _submit_link(client, "https://b23.tv/abcdef", platform="douyin")
+    assert b23_as_douyin.status_code == 422
+    assert b23_as_douyin.json()["detail"]["code"] == "invalid_url"
+    douyin_as_bilibili = _submit_link(client, "https://www.douyin.com/video/123", platform="bilibili")
+    assert douyin_as_bilibili.status_code == 422
+    assert douyin_as_bilibili.json()["detail"]["code"] == "invalid_url"
+    unsupported = _submit_link(client, "https://www.bilibili.com/video/1", platform="youtube")
+    assert unsupported.status_code == 422
+    assert unsupported.json()["detail"]["code"] == "unsupported_platform"
+
+
+def test_download_link_requires_rights_and_valid_categories(client_and_services) -> None:
+    client, _, _ = client_and_services
+    missing = client.post("/api/v1/videos/link", json={"url": "https://www.bilibili.com/video/BV1test", "platform": "bilibili"})
+    assert missing.status_code == 422
+    assert missing.json()["detail"]["code"] == "request_validation"
+    invalid_rights = _submit_link(client, "https://www.bilibili.com/video/BV1test", rights="stolen")
+    assert invalid_rights.status_code == 422
+    assert invalid_rights.json()["detail"]["code"] == "request_validation"
+    invalid_category = _submit_link(client, "https://www.bilibili.com/video/BV1test", categories=["not-a-category"])
+    assert invalid_category.status_code == 422
+    assert invalid_category.json()["detail"]["code"] == "request_validation"
+
+
+# --- 用例 2：Cookie 单通道治理 ---
+
+def test_cookie_upload_size_limit_overwrite_and_idempotent_delete(client_and_services) -> None:
+    client, services, _ = client_and_services
+    too_large = client.post(
+        "/api/v1/settings/download-cookie",
+        files={"file": ("cookies.txt", b"x" * (1024 * 1024 + 1), "text/plain")},
+    )
+    assert too_large.status_code == 413
+    assert too_large.json()["detail"]["code"] == "cookie_file_too_large"
+    assert not (services.paths.download / "cookies.txt").exists()
+
+    first = client.post(
+        "/api/v1/settings/download-cookie",
+        files={"file": ("cookies.txt", b"# Netscape HTTP Cookie File\ncontent-one", "text/plain")},
+    )
+    assert first.status_code == 204
+    cookie_file = services.paths.download / "cookies.txt"
+    assert cookie_file.read_bytes() == b"# Netscape HTTP Cookie File\ncontent-one"
+    capabilities = client.get("/api/v1/capabilities").json()
+    assert capabilities["downloader"]["cookie_file_available"] is True
+
+    second = client.post(
+        "/api/v1/settings/download-cookie",
+        files={"file": ("cookies.txt", b"content-two", "text/plain")},
+    )
+    assert second.status_code == 204
+    assert cookie_file.read_bytes() == b"content-two"
+
+    deleted = client.delete("/api/v1/settings/download-cookie")
+    assert deleted.status_code == 204
+    assert not cookie_file.exists()
+    deleted_again = client.delete("/api/v1/settings/download-cookie")
+    assert deleted_again.status_code == 204
+    assert client.get("/api/v1/capabilities").json()["downloader"]["cookie_file_available"] is False
+
+
+def test_use_cookie_without_imported_file_rejected_without_fallback(client_and_services) -> None:
+    client, services, _ = client_and_services
+    response = _submit_link(client, "https://www.bilibili.com/video/BV1test", use_cookie=True)
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "cookie_file_unavailable"
+    # 绝不静默回退：未创建任何无 Cookie 下载作业
+    kinds = [job["kind"] for job in services.repository.list_jobs()]
+    assert "video_download" not in kinds
+
+
+def test_cookie_copy_is_staging_scoped_and_original_untouched(client_and_services) -> None:
+    client, services, downloader = client_and_services
+    original = b"# Netscape HTTP Cookie File\nsession-cookie"
+    client.post("/api/v1/settings/download-cookie", files={"file": ("cookies.txt", original, "text/plain")})
+    assert client.post(
+        "/api/v1/videos/link",
+        json={"url": "https://www.bilibili.com/video/BV1test", "platform": "bilibili", "rights": "owned", "use_cookie": True},
+    ).status_code == 201
+    completed = _claim_and_run(services)
+    assert completed["state"] == "succeeded"
+    call = downloader.calls[0]
+    assert call["use_cookie"] is True
+    # 下载执行期间 staging 内存在 Cookie 拷贝且内容与原件一致
+    assert call["cookie_content"] == original
+    assert call["workspace"].name != "cookies.txt"
+    assert not call["workspace"].exists()  # 作业结束 staging 与 Cookie 拷贝即删
+    assert (services.paths.download / "cookies.txt").read_bytes() == original  # 原文件未被修改
+
+
+def test_use_cookie_false_never_reads_cookie_file(client_and_services) -> None:
+    client, services, downloader = client_and_services
+    original = b"# Netscape HTTP Cookie File\nsession-cookie"
+    client.post("/api/v1/settings/download-cookie", files={"file": ("cookies.txt", original, "text/plain")})
+    assert _submit_link(client, "https://www.bilibili.com/video/BV1test", use_cookie=False).status_code == 201
+    completed = _claim_and_run(services)
+    assert completed["state"] == "succeeded"
+    call = downloader.calls[0]
+    assert call["use_cookie"] is False
+    assert call.get("cookie_content") is None  # 全程未注入 Cookie 拷贝
+    assert (services.paths.download / "cookies.txt").read_bytes() == original
+
+
+# --- 用例 3：断路器（适配器级，真实监控循环 + 假 yt_dlp 模块） ---
+
+_FAKE_YTDLP_MAIN = """
+import os
+import subprocess
+import sys
+import time
+
+mode = os.environ.get("FAKE_YTDLP_MODE", "idle")
+workspace = os.environ.get("FAKE_YTDLP_WORKSPACE", ".")
+
+if mode == "spawn_child_sleep":
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"])
+    with open(os.path.join(workspace, "child.pid"), "w") as handle:
+        handle.write(str(child.pid))
+    time.sleep(300)
+elif mode == "write_big_then_sleep":
+    with open(os.path.join(workspace, "big.bin"), "wb") as handle:
+        handle.write(b"\\x00" * (4 * 1024 * 1024))
+    time.sleep(300)
+else:
+    time.sleep(300)
+"""
+
+
+@pytest.fixture()
+def fake_ytdlp_environment(runtime_root: Path, monkeypatch: pytest.MonkeyPatch):
+    package = runtime_root / "fake-ytdlp"
+    (package / "yt_dlp").mkdir(parents=True)
+    (package / "yt_dlp" / "__init__.py").write_text("", encoding="utf-8")
+    (package / "yt_dlp" / "__main__.py").write_text(_FAKE_YTDLP_MAIN, encoding="utf-8")
+    previous = os.environ.get("PYTHONPATH")
+    monkeypatch.setenv("PYTHONPATH", str(package) + os.pathsep + (previous or ""))
+    return package
+
+
+def _run_fake_download(
+    tmp_path: Path, mode: str, limits: MediaProcessingLimits, no_progress_seconds: float,
+    cancelled=lambda: False,
+):
+    workspace = tmp_path / "staging"
+    workspace.mkdir()
+    monkey_workspace = workspace
+    os.environ["FAKE_YTDLP_MODE"] = mode
+    os.environ["FAKE_YTDLP_WORKSPACE"] = str(monkey_workspace)
+    downloader = YtDlpDownloader(proxy_factory=lambda platform: LoopbackFilterProxy(("test.invalid",)))
+    downloader.no_progress_seconds = no_progress_seconds
+    try:
+        return downloader.download(
+            url="https://test.invalid/video",
+            platform="bilibili",
+            workspace=workspace,
+            limits=limits,
+            use_cookie=False,
+            cookie_path=None,
+            cancelled=cancelled,
+            heartbeat=lambda: None,
+            progress=lambda value, message: None,
+        )
+    finally:
+        os.environ.pop("FAKE_YTDLP_MODE", None)
+        os.environ.pop("FAKE_YTDLP_WORKSPACE", None)
+
+
+@pytest.mark.parametrize(
+    ("mode", "limits", "no_progress_seconds", "expected"),
+    [
+        ("idle", MediaProcessingLimits(0.5, 1024 ** 3, 1024 ** 3), 10.0, "timeout"),
+        ("write_big_then_sleep", MediaProcessingLimits(30.0, 1024 ** 3, 1024 * 1024), 10.0, "workspace_limit"),
+        ("idle", MediaProcessingLimits(30.0, 1, 1024 ** 3), 10.0, "memory_limit"),
+        ("idle", MediaProcessingLimits(30.0, 1024 ** 3, 1024 ** 3), 0.5, "no_progress"),
+    ],
+    ids=["timeout", "workspace_limit", "memory_limit", "no_progress"],
+)
+def test_downloader_circuit_breakers(
+    fake_ytdlp_environment, tmp_path: Path, mode: str, limits: MediaProcessingLimits,
+    no_progress_seconds: float, expected: str,
+) -> None:
+    with pytest.raises(DownloadInputInvalid) as excinfo:
+        _run_fake_download(tmp_path, mode, limits, no_progress_seconds)
+    assert excinfo.value.args[0] == expected
+
+
+def test_downloader_cancel_terminates_process_tree(
+    fake_ytdlp_environment, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "staging"
+    workspace.mkdir()
+    monkeypatch.setenv("FAKE_YTDLP_MODE", "spawn_child_sleep")
+    monkeypatch.setenv("FAKE_YTDLP_WORKSPACE", str(workspace))
+    checks: list[bool] = []
+
+    def cancelled() -> bool:
+        checks.append(True)
+        return len(checks) > 8
+
+    downloader = YtDlpDownloader(proxy_factory=lambda platform: LoopbackFilterProxy(("test.invalid",)))
+    with pytest.raises(DownloadProcessingCancelled):
+        downloader.download(
+            url="https://test.invalid/video", platform="bilibili", workspace=workspace,
+            limits=MediaProcessingLimits(30.0, 1024 ** 3, 1024 ** 3),
+            use_cookie=False, cookie_path=None, cancelled=cancelled,
+            heartbeat=lambda: None, progress=lambda value, message: None,
+        )
+    import psutil
+
+    child_pid = int((workspace / "child.pid").read_text())
+    for _ in range(20):
+        if not psutil.pid_exists(child_pid):
+            break
+        time.sleep(0.1)
+    assert not psutil.pid_exists(child_pid)
+
+
+# --- 用例 4：取消清理与失败语义 ---
+
+def test_download_job_failure_semantics_are_generic(client_and_services) -> None:
+    client, services, downloader = client_and_services
+    url = "https://www.bilibili.com/video/BV1test"
+
+    downloader.outcome = "unavailable"
+    _submit_link(client, url)
+    blocked = _claim_and_run(services)
+    assert blocked["kind"] == "video_download" and blocked["state"] == "blocked"
+    assert "yt-dlp" in blocked["message"]
+
+    downloader.outcome = "input_invalid"
+    _submit_link(client, url)
+    failed = _claim_and_run(services)
+    assert failed["kind"] == "video_download" and failed["state"] == "failed"
+    assert failed["message"] == GENERIC_FAILURE_MESSAGE
+    assert url not in failed["message"]
+
+    downloader.outcome = "cancelled"
+    _submit_link(client, url)
+    cancelled_job = _claim_and_run(services)
+    assert cancelled_job["kind"] == "video_download" and cancelled_job["state"] == "cancelled"
+    assert cancelled_job["message"] == "链接下载已取消"
+    # 任何失败路径都不残留半成品 source
+    assert services.repository.list_sources() == []
+
+
+def test_download_cancel_leaves_no_staging_or_source(client_and_services) -> None:
+    client, services, downloader = client_and_services
+    downloader.outcome = "cancelled"
+    assert _submit_link(client, "https://www.bilibili.com/video/BV1test").status_code == 201
+    cancelled_job = _claim_and_run(services)
+    assert cancelled_job["state"] == "cancelled"
+    assert services.repository.list_sources() == []
+    staging_entries = [item for item in (services.paths.staging).iterdir()] if services.paths.staging.exists() else []
+    assert staging_entries == []
+    workspace = downloader.calls[0]["workspace"]
+    assert not workspace.exists()
+
+
+def test_download_job_blocked_when_tools_missing(client_and_services) -> None:
+    client, services, downloader = client_and_services
+    downloader.enabled = False
+    response = _submit_link(client, "https://www.bilibili.com/video/BV1test")
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "downloader_unavailable"
+    capabilities = client.get("/api/v1/capabilities").json()
+    assert capabilities["downloader"]["enabled"] is False
+    job = services.repository.create_job(
+        "video_download", None, None, None, None,
+        {"url": "https://www.bilibili.com/video/BV1test", "platform": "bilibili", "rights": "owned", "use_cookie": False},
+        priority=100,
+    )
+    completed = _claim_and_run(services)
+    assert completed["id"] == job["id"] and completed["state"] == "blocked"
+
+
+# --- 用例 5：产物校验回滚 ---
+
+@pytest.mark.parametrize("scenario", ["invalid_probe", "height_too_high"])
+def test_product_validation_rejects_bad_products_without_artifact(
+    client_and_services, scenario: str,
+) -> None:
+    client, services, _ = client_and_services
+    if scenario == "invalid_probe":
+        services.videos.analyzer = FakeMediaAnalyzer(probe_error="invalid_metadata")
+    else:
+        services.videos.analyzer = FakeMediaAnalyzer(height=1081)
+    assert _submit_link(client, "https://www.bilibili.com/video/BV1test").status_code == 201
+    failed = _claim_and_run(services)
+    assert failed["state"] == "failed"
+    assert failed["message"] == GENERIC_FAILURE_MESSAGE
+    assert services.repository.list_sources() == []
+    artifact_root = services.paths.artifacts
+    assert not [path for path in artifact_root.rglob("*") if path.is_file()] if artifact_root.exists() else True
+
+
+def test_height_1080_boundary_is_accepted(client_and_services) -> None:
+    client, services, _ = client_and_services
+    services.videos.analyzer = FakeMediaAnalyzer(height=1080)
+    assert _submit_link(client, "https://www.bilibili.com/video/BV1test").status_code == 201
+    completed = _claim_and_run(services)
+    assert completed["state"] == "succeeded"
+
+
+# --- 用例 6：成功链路与出处记录/脱敏双重断言 ---
+
+def test_download_success_creates_source_provenance_and_analyze_job(client_and_services) -> None:
+    client, services, downloader = client_and_services
+    raw_url = "https://www.bilibili.com/video/BV1test?p=2&from=share#t=30"
+    submitted = _submit_link(client, raw_url, title="链接视频", author="作者", tags=["下载"])
+    assert submitted.status_code == 201, submitted.text
+    job_id = submitted.json()["id"]
+
+    job_row = services.repository.get_job(job_id)
+    payload = json.loads(job_row["payload_json"])
+    # payload 只存脱敏链接（无 query/fragment/userinfo），无原文 URL 参数
+    assert payload["url"] == "https://www.bilibili.com/video/BV1test"
+    assert "?p=2" not in job_row["payload_json"] and "from=share" not in job_row["payload_json"]
+
+    completed = _claim_and_run(services)
+    assert completed["id"] == job_id and completed["state"] == "succeeded"
+
+    sources = services.repository.list_sources()
+    assert len(sources) == 1
+    source = sources[0]
+    assert source["source_type"] == "video_link"
+    assert source["rights"] == "owned"
+    assert source["title"] == "链接视频"
+    assert source["processing_state"] == "queued"
+
+    versions = services.repository.versions_for_source(source["id"])
+    assert len(versions) == 1 and versions[0]["media_type"] == "video/mp4"
+    assert services.artifacts.verify(versions[0]["artifact_sha256"])
+
+    # video_download_provenance 行齐全且脱敏
+    with services.repository.connection() as connection:
+        row = connection.execute(
+            "SELECT * FROM video_download_provenance WHERE source_id=?", (source["id"],)
+        ).fetchone()
+    assert row is not None
+    assert row["platform"] == "bilibili"
+    assert row["url_sanitized"] == "https://www.bilibili.com/video/BV1test"
+    assert "?" not in row["url_sanitized"] and "#" not in row["url_sanitized"]
+    assert row["yt_dlp_version"] == "unit-1.0"
+    assert row["format_profile"] == FakeDownloader.format_profile
+    assert row["cookie_used"] == 0
+    assert row["config_hash"] == downloader.config_hash("bilibili", FakeDownloader.format_profile)
+
+    # 自动入队 video_analyze（与本地导入同路径）
+    queued = [job for job in services.repository.list_jobs() if job["kind"] == "video_analyze"]
+    assert len(queued) == 1 and queued[0]["source_id"] == source["id"] and queued[0]["state"] == "queued"
+
+    # 审计事件仅 event_type/entity_id/result 承载
+    with services.repository.connection() as connection:
+        columns = {item[1] for item in connection.execute("PRAGMA table_info(audit_events)")}
+        audit_rows = connection.execute(
+            "SELECT * FROM audit_events WHERE event_type='video_download'"
+        ).fetchall()
+    assert columns == {"id", "event_type", "entity_id", "result", "created_at"}
+    assert any(row["entity_id"] == source["id"] and row["result"] == "succeeded" for row in audit_rows)
+
+
+def test_backup_snapshot_and_export_carry_sanitized_provenance(client_and_services) -> None:
+    client, services, _ = client_and_services
+    raw_url = "https://www.bilibili.com/video/BV1backup?p=9"
+    _submit_link(client, raw_url)
+    _claim_and_run(services)
+    source_id = services.repository.list_sources()[0]["id"]
+
+    backup = services.transfers.create_backup()
+    assert backup["state"] == "succeeded"
+    with ZipFile(backup["archive_path"]) as archive, tempfile.TemporaryDirectory() as temporary:
+        snapshot = Path(temporary) / "knowledge.db"
+        with archive.open("state/knowledge.db") as source_stream, snapshot.open("wb") as target:
+            shutil.copyfileobj(source_stream, target)
+        connection = sqlite3.connect(snapshot)
+        try:
+            payload_json = connection.execute(
+                "SELECT payload_json FROM jobs WHERE kind='video_download'"
+            ).fetchone()[0]
+        finally:
+            connection.close()
+    assert "?p=9" not in payload_json
+    assert "https://www.bilibili.com/video/BV1backup" in payload_json
+
+    exported = services.transfers.create_export(True)
+    with ZipFile(exported["archive_path"]) as archive:
+        records = json.loads(archive.read("records.json"))["records"]
+    provenance_rows = records["video_download_provenance"]
+    assert [row["source_id"] for row in provenance_rows] == [source_id]
+    assert provenance_rows[0]["url_sanitized"] == "https://www.bilibili.com/video/BV1backup"
+
+
+def test_provenance_failure_rolls_back_and_retry_creates_single_source(client_and_services) -> None:
+    client, services, _ = client_and_services
+    assert _submit_link(client, "https://www.bilibili.com/video/BV1retry").status_code == 201
+    with services.repository.connection() as connection:
+        connection.execute("DROP TABLE video_download_provenance")
+    first = _claim_and_run(services)
+    # 事务失败 → 整体回滚 + 补偿删除 artifact；第一次尝试进入有限重试
+    assert first["state"] in {"retry_wait", "failed"}
+    assert services.repository.list_sources() == []
+    artifact_root = services.paths.artifacts
+    assert not [path for path in artifact_root.rglob("*") if path.is_file()] if artifact_root.exists() else True
+    with services.repository.connection() as connection:
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS video_download_provenance ("
+            "id TEXT PRIMARY KEY, source_id TEXT NOT NULL REFERENCES sources(id) UNIQUE, "
+            "platform TEXT NOT NULL, url_sanitized TEXT NOT NULL, yt_dlp_version TEXT NOT NULL, "
+            "format_profile TEXT NOT NULL, cookie_used INTEGER NOT NULL, config_hash TEXT NOT NULL, "
+            "created_at TEXT NOT NULL)"
+        )
+    if first["state"] == "retry_wait":
+        retried = _claim_and_run(services)
+    else:
+        services.repository.retry_job(first["id"])
+        retried = _claim_and_run(services)
+    assert retried["id"] == first["id"] and retried["state"] == "succeeded"
+    # 重试从头执行，绝不重复创建第二个 source/version/provenance
+    sources = services.repository.list_sources()
+    assert len(sources) == 1
+    assert len(services.repository.versions_for_source(sources[0]["id"])) == 1
+    with services.repository.connection() as connection:
+        count = connection.execute("SELECT COUNT(*) FROM video_download_provenance").fetchone()[0]
+    assert count == 1
+
+
+# --- 用例 9：多P/合集/直播/需登录/会员/DRM → failed 通用脱敏 ---
+
+def test_platform_rejections_are_failed_with_generic_message(client_and_services) -> None:
+    client, services, downloader = client_and_services
+    downloader.outcome = "input_invalid"
+    url = "https://www.douyin.com/video/123"
+    assert _submit_link(client, url, platform="douyin").status_code == 201
+    failed = _claim_and_run(services)
+    assert failed["state"] == "failed"
+    assert failed["message"] == GENERIC_FAILURE_MESSAGE
+    assert "DRM" not in failed["message"] and "会员" not in failed["message"]
+    assert url not in failed["message"]
+
+
+# --- 用例 10：外联控制（决策 7） ---
+
+def test_registered_domain_matching_by_label_boundary() -> None:
+    domains = DOWNLOAD_REGISTRY["bilibili"]
+    assert host_matches_registered_domain("bilibili.com", domains)
+    assert host_matches_registered_domain("api.bilibili.com", domains)
+    assert host_matches_registered_domain("b23.tv", domains)
+    assert not host_matches_registered_domain("bilibili.com.evil.com", domains)
+    assert not host_matches_registered_domain("evil-bilibili.com", domains)
+    assert not host_matches_registered_domain("127.0.0.1", domains)
+
+
+def test_proxy_rejects_unregistered_connect_without_outbound_bytes() -> None:
+    proxy = LoopbackFilterProxy(("bilibili.com",))
+    port = proxy.start()
+    try:
+        client = socket.create_connection(("127.0.0.1", port), timeout=5)
+        client.sendall(b"CONNECT evil.example:443 HTTP/1.1\r\nHost: evil.example:443\r\n\r\n")
+        try:
+            response = client.recv(4096)
+        except ConnectionResetError:
+            response = b""  # 立即断开：Windows 上表现为 RST
+        client.close()
+    finally:
+        proxy.close()
+    # 未登记域：立即断开，无 200 隧道应答、无任何字节出站
+    assert not response.startswith(b"HTTP/1.1 200")
+    assert proxy.denied_hosts() == {"evil.example": 1}
+    assert proxy.connected_hosts() == {}
+
+
+def test_proxy_rejects_reserved_resolutions_in_production_mode() -> None:
+    proxy = LoopbackFilterProxy(("bilibili.com",))
+    for reserved in ("127.0.0.1", "10.1.2.3", "172.16.5.5", "192.168.1.9", "169.254.1.1", "::1", "fe80::1"):
+        assert proxy._reject_resolved_ip(reserved) is True
+    for public in ("1.1.1.1", "8.8.8.8", "2606:4700:4700::1111"):
+        assert proxy._reject_resolved_ip(public) is False
+
+
+class _LoopbackExemptProxy(LoopbackFilterProxy):
+    """测试注入模式（决策 9）：仅豁免回环/保留段解析拒绝，不影响注册域校验。"""
+
+    def _reject_resolved_ip(self, ip: str) -> bool:
+        try:
+            ipaddress.ip_address(ip)
+        except ValueError:
+            return True
+        return False
+
+
+def test_proxy_relays_registered_connect_via_validated_peer() -> None:
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind(("127.0.0.1", 0))
+    server.listen(4)
+    server_port = server.getsockname()[1]
+
+    def serve() -> None:
+        while True:
+            try:
+                connection, _ = server.accept()
+            except OSError:
+                break
+            try:
+                connection.recv(4096)
+                connection.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\npong")
+            except OSError:
+                pass
+            finally:
+                connection.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+    proxy = _LoopbackExemptProxy(("localhost",))
+    port = proxy.start()
+    try:
+        client = socket.create_connection(("127.0.0.1", port), timeout=5)
+        client.sendall(
+            f"CONNECT localhost:{server_port} HTTP/1.1\r\nHost: localhost:{server_port}\r\n\r\n".encode("latin-1")
+        )
+        tunnel_ok = client.recv(4096)
+        assert tunnel_ok.startswith(b"HTTP/1.1 200")
+        client.sendall(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        body = b""
+        while b"pong" not in body and len(body) < 4096:
+            body += client.recv(4096)
+        assert b"pong" in body
+        client.close()
+    finally:
+        proxy.close()
+        server.close()
+    assert set(proxy.connected_hosts()) == {"localhost"}
+    assert proxy.denied_hosts() == {}
+
+
+# --- 用例 11：settings 边界 ---
+
+def test_download_settings_bounds_and_defaults(client_and_services) -> None:
+    client, services, _ = client_and_services
+    defaults = client.get("/api/v1/settings").json()
+    assert defaults["download_timeout_seconds"] == "3600"
+    assert defaults["download_no_progress_seconds"] == "10"
+    assert defaults["download_disk_limit_mb"] == "2048"
+    for payload in (
+        {"download_timeout_seconds": 59}, {"download_timeout_seconds": 86401},
+        {"download_no_progress_seconds": 9}, {"download_no_progress_seconds": 86401},
+        {"download_disk_limit_mb": 63}, {"download_disk_limit_mb": 32769},
+    ):
+        assert client.put("/api/v1/settings", json=payload).status_code == 422
+    accepted = client.put("/api/v1/settings", json={
+        "download_timeout_seconds": 86400,
+        "download_no_progress_seconds": 10,
+        "download_disk_limit_mb": 32768,
+    })
+    assert accepted.status_code == 200, accepted.text
+    saved = client.get("/api/v1/settings").json()
+    assert saved["download_timeout_seconds"] == "86400"
+    assert saved["download_no_progress_seconds"] == "10"
+    assert saved["download_disk_limit_mb"] == "32768"
+    assert services.paths.download.is_dir()
+
+
+# --- T-VID-004：合成集成（真实 yt-dlp 指向 localhost，全程不触网真实平台） ---
+
+def _synthetic_mp4() -> bytes:
+    # 合成无版权 MP4：ftyp + free + mdat 载荷。分析由 unit analyzer 假件完成，
+    # 内容不依赖真实编解码器。
+    ftyp = b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom"
+    free = b"\x00\x00\x00\x08free"
+    mdat = b"\x00\x00\x00\x14mdat" + b"\xab" * 2048
+    return ftyp + free + mdat
+
+
+class _FixtureHandler(BaseHTTPRequestHandler):
+    fixture = b""
+
+    def do_GET(self) -> None:  # noqa: N802
+        if self.path == "/fixture.mp4":
+            self.send_response(200)
+            self.send_header("Content-Type", "video/mp4")
+            self.send_header("Content-Length", str(len(self.fixture)))
+            self.end_headers()
+            self.wfile.write(self.fixture)
+        elif self.path.startswith("/redirect"):
+            self.send_response(302)
+            self.send_header("Location", "http://evil.example/video.mp4")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+        else:
+            self.send_response(404)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+    def do_HEAD(self) -> None:  # noqa: N802
+        self.send_response(200)
+        self.send_header("Content-Type", "video/mp4")
+        self.send_header("Content-Length", str(len(self.fixture)))
+        self.end_headers()
+
+    def log_message(self, *args) -> None:
+        pass
+
+
+@pytest.fixture()
+def fixture_server(runtime_root: Path):
+    _FixtureHandler.fixture = _synthetic_mp4()
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _FixtureHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield server, _FixtureHandler.fixture
+    server.shutdown()
+    server.server_close()
+
+
+class _ChainDownloader(YtDlpDownloader):
+    """真实 yt-dlp 子进程 + 测试注入代理；capability 在测试内恒 true。
+
+    本机未安装 ffmpeg：合成服务器只提供单文件 MP4，无需合并/remux，
+    故下载本身不需要 ffmpeg；probe/抽帧由 unit analyzer 假件完成。
+    """
+
+    def capability(self) -> dict[str, object]:
+        capability = super().capability()
+        capability["enabled"] = True
+        return capability
+
+
+def _chain_app(runtime_root: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("YUANZHIKU_EMBEDDED_WORKER", "false")
+    # 环境代理指向死端口：成功下载即证明流量只经回环代理（显式 --proxy + 清空环境变量）
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:1")
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:1")
+    monkeypatch.setenv("ALL_PROXY", "http://127.0.0.1:1")
+    app = create_app(runtime_root, acquire_lock=False)
+    services = app.state.services
+    proxies: list[LoopbackFilterProxy] = []
+
+    def factory(platform: str) -> LoopbackFilterProxy:
+        proxy = _LoopbackExemptProxy(("localhost",))  # 测试注入注册域清单（仅 fixture 域）
+        proxies.append(proxy)
+        return proxy
+
+    downloader = _ChainDownloader(
+        proxy_factory=factory,
+        cookie_file_path=services.paths.download / "cookies.txt",
+    )
+    services.downloader = downloader
+    services.jobs.downloader = downloader
+    services.videos.analyzer = FakeMediaAnalyzer()
+    return app, services, proxies
+
+
+def test_synthetic_download_full_chain(
+    runtime_root: Path, fixture_server, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server, fixture = fixture_server
+    app, services, proxies = _chain_app(runtime_root / "origin", monkeypatch)
+    with TestClient(app) as client:
+        url = f"http://localhost:{server.server_address[1]}/fixture.mp4"
+        job = services.repository.create_job(
+            "video_download", None, None, None, None,
+            {
+                "url": url, "platform": "bilibili", "use_cookie": False, "rights": "owned",
+                "title": "合成下载视频", "author": None, "language": "zh", "notes": None,
+                "source_date": None, "categories": [], "tags": [],
+            },
+            priority=100,
+        )
+        completed = _claim_and_run(services)
+        assert completed["id"] == job["id"] and completed["state"] == "succeeded", completed
+        assert completed["message"] == "链接下载完成，已排入本地视频分析"
+
+        # 回环代理记录断言：全部出站 ⊆ 测试注册表，且无任何外联
+        assert len(proxies) == 1
+        assert set(proxies[0].connected_hosts()) <= {"localhost"}
+        assert proxies[0].connected_hosts() != {}
+        assert proxies[0].denied_hosts() == {}
+
+        sources = services.repository.list_sources()
+        assert len(sources) == 1
+        source = sources[0]
+        assert source["source_type"] == "video_link"
+        version = services.repository.versions_for_source(source["id"])[0]
+        assert services.artifacts.verify(version["artifact_sha256"])
+        assert services.artifacts.artifact_path(version["artifact_sha256"]).read_bytes() == fixture
+
+        with services.repository.connection() as connection:
+            provenance = connection.execute(
+                "SELECT * FROM video_download_provenance WHERE source_id=?", (source["id"],)
+            ).fetchone()
+        assert provenance is not None and provenance["platform"] == "bilibili"
+        assert provenance["yt_dlp_version"] == YtDlpDownloader._yt_dlp_version()
+        assert provenance["format_profile"] == YtDlpDownloader.format_profile
+
+        # video_analyze 自动入队并成功（unit analyzer 假件）
+        analyzed = _claim_and_run(services)
+        assert analyzed["kind"] == "video_analyze" and analyzed["state"] == "succeeded"
+
+        # 播放：Range 206
+        stream = client.get(
+            f"/api/v1/videos/{source['id']}/stream", headers={"Range": "bytes=0-7"},
+        )
+        assert stream.status_code == 206, stream.text
+        assert stream.content == fixture[:8]
+        detail = client.get(f"/api/v1/videos/{source['id']}")
+        assert detail.status_code == 200 and detail.json()["analysis"] is not None
+
+        # 备份与导出：provenance 随归档携带
+        backup = services.transfers.create_backup()
+        assert backup["state"] == "succeeded"
+        exported = services.transfers.create_export(True)
+        with ZipFile(exported["archive_path"]) as archive:
+            records = json.loads(archive.read("records.json"))["records"]
+        assert [row["source_id"] for row in records["video_download_provenance"]] == [source["id"]]
+
+        # 再导入到独立接收方
+        recipient = create_app(runtime_root / "recipient", acquire_lock=False).state.services
+        reimported = recipient.transfers.reimport(exported["archive_path"])
+        assert reimported["imported"] is True
+        assert recipient.videos.detail(source["id"]) is not None
+
+        # 清理：软删 + purge 移除无引用 artifact
+        assert client.post(f"/api/v1/sources/{source['id']}/delete").status_code == 200
+        purged = client.post(f"/api/v1/sources/{source['id']}/purge")
+        assert purged.status_code == 200, purged.text
+        assert not services.artifacts.artifact_path(version["artifact_sha256"]).exists()
+
+
+def test_synthetic_redirect_to_unregistered_domain_fails_closed(
+    runtime_root: Path, fixture_server, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    server, _ = fixture_server
+    _, services, proxies = _chain_app(runtime_root / "redirect", monkeypatch)
+    # 合成服务器返回 302 → 非白名单域：下载必须拒绝且无该域出站请求
+    url = f"http://localhost:{server.server_address[1]}/redirect"
+    downloader = services.jobs.downloader
+    workspace = tmp_path / "staging"
+    workspace.mkdir()
+    with pytest.raises(DownloadInputInvalid):
+        downloader.download(
+            url=url, platform="bilibili", workspace=workspace,
+            limits=MediaProcessingLimits(60.0, 1024 ** 3, 1024 ** 3),
+            use_cookie=False, cookie_path=None,
+            cancelled=lambda: False, heartbeat=lambda: None,
+            progress=lambda value, message: None,
+        )
+    proxy = proxies[0]
+    assert "evil.example" in proxy.denied_hosts()
+    assert set(proxy.connected_hosts()) <= {"localhost"}
+
+
+def test_sanitize_download_url_strips_userinfo_query_and_fragment() -> None:
+    assert sanitize_download_url("https://u:p@www.bilibili.com/video/BV1?p=2#t=1") == "https://www.bilibili.com/video/BV1"
+    assert sanitize_download_url("https://www.douyin.com/video/123") == "https://www.douyin.com/video/123"
+    long_path = "https://www.bilibili.com/" + "x" * 5000
+    assert len(sanitize_download_url(long_path)) == 4096
