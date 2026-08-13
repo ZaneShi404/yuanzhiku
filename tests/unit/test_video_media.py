@@ -4,6 +4,8 @@ import hashlib
 import json
 import os
 import shutil
+import subprocess
+import sys
 import uuid
 from pathlib import Path
 from zipfile import ZipFile
@@ -291,3 +293,23 @@ def test_extract_frames_escapes_comma_in_scale_filter(monkeypatch: pytest.Monkey
     for command in captured:
         assert "-vf" in command
         assert command[command.index("-vf") + 1] == "scale=min(640\,iw):-2"
+
+
+def _recently_exited_pid() -> int:
+    """Return a PID that just exited (psutil.Process 将抛 NoSuchProcess)。
+
+    连续短命子进程收尾取最后一个 PID，把 Windows 下 PID 复用概率压到最小。
+    """
+    pid = 0
+    for _ in range(4):
+        process = subprocess.Popen([sys.executable, "-c", "pass"])
+        process.wait()
+        pid = process.pid
+    return pid
+
+
+def test_process_memory_bytes_tolerates_exited_process() -> None:
+    """竞态回归：psutil.NoSuchProcess 继承 Exception 而非 OSError，监测必须
+    尽力而为返回 None，绝不炸 video_analyze 抽帧作业。"""
+    result = LocalFfmpegMediaAnalyzer._process_memory_bytes(_recently_exited_pid())
+    assert result is None or isinstance(result, int)

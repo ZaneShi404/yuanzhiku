@@ -53,7 +53,10 @@ class LocalFfmpegMediaAnalyzer(MediaAnalyzerPort):
             return process.memory_info().rss + sum(
                 child.memory_info().rss for child in process.children(recursive=True)
             )
-        except (ImportError, OSError):
+        except Exception:
+            # 尽力而为监测：子进程在 poll 与 psutil.Process() 之间恰好退出时抛
+            # psutil.NoSuchProcess——它继承 Exception 而非 OSError（0.1s 轮询
+            # 极易命中该 TOCTOU 窗口），任何失败都不应炸作业。
             return None
 
     @staticmethod

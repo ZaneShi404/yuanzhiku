@@ -232,3 +232,24 @@ def test_periodic_runner_heartbeats_until_its_terminal_fence(runtime_root: Path,
     assert result is not None and result["state"] == "succeeded"
     assert heartbeat_count >= 1
     assert services.repository.get_settings()["last_backup_date"] == "2030-01-02"
+
+
+def _recently_exited_pid() -> int:
+    import subprocess
+    import sys
+
+    pid = 0
+    for _ in range(4):
+        process = subprocess.Popen([sys.executable, "-c", "pass"])
+        process.wait()
+        pid = process.pid
+    return pid
+
+
+def test_resident_memory_bytes_tolerates_exited_process() -> None:
+    """竞态回归：psutil.NoSuchProcess 继承 Exception 而非 OSError，父侧监测
+    必须落入 ctypes 回退返回 None，绝不炸解析作业。"""
+    from app.services.jobs import _resident_memory_bytes
+
+    result = _resident_memory_bytes(_recently_exited_pid())
+    assert result is None or isinstance(result, int)

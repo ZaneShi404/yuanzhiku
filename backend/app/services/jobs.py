@@ -65,7 +65,10 @@ def _resident_memory_bytes(process_id: int) -> int | None:
 
         process = psutil.Process(process_id)
         return process.memory_info().rss + sum(child.memory_info().rss for child in process.children(recursive=True))
-    except (ImportError, OSError):
+    except Exception:
+        # psutil.NoSuchProcess（子进程恰好退出的 TOCTOU 竞态）继承 Exception
+        # 而非 OSError；视为不可测得，落入下方 ctypes 回退（已退出 PID 的
+        # OpenProcess 返回空句柄 → None，行为安全）。
         pass
     if os.name == "nt":
         try:
