@@ -254,6 +254,9 @@ class PostgresRepository(SqliteRepository):
             "video_max_frames": "12",
             "job_lease_seconds": "300",
             "max_retry_attempts": "2",
+            "download_timeout_seconds": "3600",
+            "download_no_progress_seconds": "10",
+            "download_disk_limit_mb": "2048",
             "last_backup_date": "",
             "last_integrity_sample_date": "",
         }
@@ -306,6 +309,7 @@ class PostgresRepository(SqliteRepository):
             "artifacts", "sources", "source_metadata_revisions", "content_versions", "video_analyses", "video_frames", "source_relations",
             "representations", "search_chunks", "evidence", "citations", "knowledge", "knowledge_evidence",
             "jobs", "job_attempts", "audit_events", "external_cards", "topics", "topic_sources", "backups",
+            "video_download_provenance",
         )
         with self.connection() as connection:
             return any(connection.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone() is not None for table in tables)

@@ -28,8 +28,8 @@ from app.adapters.storage import ArtifactStore
 from app.core.config import DataPaths, database_backend
 from app.ports.repository import RepositoryPort
 
-ARCHIVE_SCHEMA_VERSION = 5
-SUPPORTED_ARCHIVE_SCHEMA_VERSIONS = frozenset({1, 2, 3, 4, ARCHIVE_SCHEMA_VERSION})
+ARCHIVE_SCHEMA_VERSION = 6
+SUPPORTED_ARCHIVE_SCHEMA_VERSIONS = frozenset({1, 2, 3, 4, 5, ARCHIVE_SCHEMA_VERSION})
 BACKUP_CATALOG_STATES = frozenset({"succeeded", "pruning", "discarding"})
 SAFE_ARCHIVE_BASENAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,250}\.zip\Z")
 WINDOWS_RESERVED_BASENAMES = frozenset(
@@ -153,10 +153,18 @@ class TransferService:
         try:
             connection = sqlite3.connect(f"{snapshot.resolve().as_uri()}?mode=ro", uri=True)
             connection.row_factory = sqlite3.Row
-            rows = {
-                table: [dict(row) for row in connection.execute(f"SELECT * FROM {table}").fetchall()]
-                for table in BACKUP_TABLES
+            existing_tables = {
+                row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
             }
+            rows: dict[str, list[dict[str, Any]]] = {}
+            for table in BACKUP_TABLES:
+                if table in existing_tables:
+                    rows[table] = [dict(row) for row in connection.execute(f"SELECT * FROM {table}").fetchall()]
+                elif table == "video_download_provenance" and schema_version <= 5:
+                    # v1.0/v1.1 快照没有出处记录表：与逻辑记录一样补空表。
+                    rows[table] = []
+                else:
+                    raise ValueError("SQLite 状态快照无效")
         except (OSError, sqlite3.DatabaseError) as exc:
             raise ValueError("SQLite 状态快照无效") from exc
         finally:
@@ -259,7 +267,7 @@ class TransferService:
                     "database_backend": self.repository.backend,
                     "created_at": stamp,
                     "entries": sorted(entries, key=lambda item: item["path"]),
-                    "exclusions": ["models", "staging", "log_bodies", "credentials", "cookies", "original_paths", "private_rights_notes"],
+                    "exclusions": ["models", "staging", "log_bodies", "credentials", "cookies", "original_paths", "private_rights_notes", "state/download"],
                 }
                 manifest_path = temp / "manifest.json"
                 manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -484,13 +492,22 @@ class TransferService:
         records = records_payload.get("records")
         expected = set(expected_tables)
         legacy_video_tables = {"video_analyses", "video_frames"}
-        legacy_expected = expected - legacy_video_tables
+        legacy_expected = expected - legacy_video_tables - {"video_download_provenance"}
+        # v1.0..v1.1 归档（schema 1-4 无视频记录，schema 5 无出处记录）保持可还原。
+        pre_provenance_expected = expected - {"video_download_provenance"}
         if not isinstance(records, dict) or (
-            set(records) != expected and not (schema_version in {1, 2, 3, 4} and set(records) == legacy_expected)
+            set(records) != expected
+            and not (
+                (schema_version in {1, 2, 3, 4} and set(records) == legacy_expected)
+                or (schema_version == 5 and set(records) == pre_provenance_expected)
+            )
         ):
             raise ValueError("逻辑记录不完整")
         normalized: dict[str, list[dict[str, Any]]] = {}
         for table in expected_tables:
+            if schema_version in {1, 2, 3, 4, 5} and table == "video_download_provenance" and table not in records:
+                normalized[table] = []
+                continue
             if schema_version in {1, 2, 3, 4} and table in legacy_video_tables and table not in records:
                 normalized[table] = []
                 continue
@@ -853,8 +870,9 @@ class TransferService:
                 "video_analyses": ("id",), "video_frames": ("id",), "source_relations": ("id",),
                 "representations": ("id",), "search_chunks": ("id",), "evidence": ("id",), "citations": ("id",), "knowledge": ("id",),
                 "knowledge_evidence": ("knowledge_id", "evidence_id"), "external_cards": ("id",), "topics": ("id",), "topic_sources": ("topic_id", "source_id"),
+                "video_download_provenance": ("id",),
             }
-            unique_keys = {"external_cards": ("card_type", "url"), "topics": ("name",), "source_metadata_revisions": ("source_id", "ordinal"), "content_versions": ("source_id", "ordinal"), "video_analyses": ("content_version_id", "analyzer_name", "config_hash"), "video_frames": ("video_analysis_id", "ordinal"), "search_chunks": ("representation_id", "ordinal"), "source_relations": ("source_id", "related_source_id", "relation_type")}
+            unique_keys = {"external_cards": ("card_type", "url"), "topics": ("name",), "source_metadata_revisions": ("source_id", "ordinal"), "content_versions": ("source_id", "ordinal"), "video_analyses": ("content_version_id", "analyzer_name", "config_hash"), "video_frames": ("video_analysis_id", "ordinal"), "search_chunks": ("representation_id", "ordinal"), "source_relations": ("source_id", "related_source_id", "relation_type"), "video_download_provenance": ("source_id",)}
             current = self.repository.rows_for_export()
             conflicts: list[str] = []
             pending: dict[str, list[dict[str, Any]]] = {}

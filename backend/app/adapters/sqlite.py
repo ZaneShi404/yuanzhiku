@@ -139,13 +139,13 @@ CREATE TABLE IF NOT EXISTS backups (
 EXPORT_TABLES = (
     "artifacts", "sources", "source_metadata_revisions", "content_versions", "video_analyses", "video_frames", "source_relations", "representations",
     "search_chunks", "evidence", "citations", "knowledge", "knowledge_evidence", "external_cards", "topics",
-    "topic_sources",
+    "topic_sources", "video_download_provenance",
 )
 
 BACKUP_TABLES = (
     "settings", "artifacts", "sources", "source_metadata_revisions", "content_versions", "video_analyses", "video_frames", "source_relations",
     "representations", "search_chunks", "evidence", "citations", "knowledge", "knowledge_evidence", "jobs",
-    "job_attempts", "audit_events", "external_cards", "topics", "topic_sources", "backups",
+    "job_attempts", "audit_events", "external_cards", "topics", "topic_sources", "backups", "video_download_provenance",
 )
 
 BACKUP_TABLE_COLUMNS = {
@@ -170,6 +170,7 @@ BACKUP_TABLE_COLUMNS = {
     "topics": ("id", "name", "created_at"),
     "topic_sources": ("topic_id", "source_id"),
     "backups": ("id", "archive_name", "manifest_sha256", "state", "created_at"),
+    "video_download_provenance": ("id", "source_id", "platform", "url_sanitized", "yt_dlp_version", "format_profile", "cookie_used", "config_hash", "created_at"),
 }
 
 
@@ -546,6 +547,21 @@ class SqliteRepository:
                 connection.execute(
                     "INSERT INTO schema_migrations(version, applied_at) VALUES(6, ?)", (now(),)
                 )
+            migration_versions = {
+                row["version"] for row in connection.execute("SELECT version FROM schema_migrations")
+            }
+            if 7 not in migration_versions:
+                # 链接下载出处记录（REQ-047.5）：对老库幂等补表。
+                connection.execute(
+                    "CREATE TABLE IF NOT EXISTS video_download_provenance ("
+                    "id TEXT PRIMARY KEY, source_id TEXT NOT NULL REFERENCES sources(id) UNIQUE, "
+                    "platform TEXT NOT NULL, url_sanitized TEXT NOT NULL, yt_dlp_version TEXT NOT NULL, "
+                    "format_profile TEXT NOT NULL, cookie_used INTEGER NOT NULL, config_hash TEXT NOT NULL, "
+                    "created_at TEXT NOT NULL)"
+                )
+                connection.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES(7, ?)", (now(),)
+                )
             defaults = {
                 "parser_timeout_seconds": "86400",
                 "parser_no_progress_seconds": "86400",
@@ -557,6 +573,9 @@ class SqliteRepository:
                 "video_max_frames": "12",
                 "job_lease_seconds": "300",
                 "max_retry_attempts": "2",
+                "download_timeout_seconds": "3600",
+                "download_no_progress_seconds": "10",
+                "download_disk_limit_mb": "2048",
                 "last_backup_date": "",
                 "last_integrity_sample_date": "",
             }
@@ -668,11 +687,16 @@ class SqliteRepository:
         rights: str, categories: list[str], tags: list[str], artifact_sha256: str, original_name: str,
         media_type: str | None, byte_size: int, job_payload: dict[str, Any], priority: int,
         audit_event: str, source_date: str | None = None, job_kind: str = "parse",
+        download_provenance: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
         """Persist every logical ingest record in one transaction.
 
-        The caller compensates the physical artifact only when this transaction
-        fails and it created the content-addressed file itself.
+        ``download_provenance`` (REQ-047.5) is written in the same transaction
+        as the source/content version/artifact and the queued follow-up job;
+        ``video_download_provenance.source_id`` is UNIQUE so a source carries at
+        most one provenance row. The caller compensates the physical artifact
+        only when this transaction fails and it created the content-addressed
+        file itself.
         """
         source_id = identifier()
         version_id = identifier()
@@ -702,6 +726,22 @@ class SqliteRepository:
                 "INSERT INTO audit_events(id, event_type, entity_id, result, created_at) VALUES(?, ?, ?, ?, ?)",
                 (identifier(), audit_event, source_id, "queued", stamp),
             )
+            if download_provenance is not None:
+                connection.execute(
+                    "INSERT INTO video_download_provenance(id,source_id,platform,url_sanitized,"
+                    "yt_dlp_version,format_profile,cookie_used,config_hash,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                    (
+                        identifier(),
+                        source_id,
+                        download_provenance["platform"],
+                        download_provenance["url_sanitized"],
+                        download_provenance["yt_dlp_version"],
+                        download_provenance["format_profile"],
+                        int(download_provenance["cookie_used"]),
+                        download_provenance["config_hash"],
+                        stamp,
+                    ),
+                )
             self._record_metadata_revision(connection, source_id, stamp)
             source = self._row(connection.execute("SELECT * FROM sources WHERE id=?", (source_id,)).fetchone()) or {}
             version = self._row(connection.execute("SELECT * FROM content_versions WHERE id=?", (version_id,)).fetchone()) or {}
@@ -1518,6 +1558,7 @@ class SqliteRepository:
             connection.execute("DELETE FROM video_analyses WHERE content_version_id IN (SELECT id FROM content_versions WHERE source_id=?)", (source_id,))
             connection.execute("DELETE FROM content_versions WHERE source_id=?", (source_id,))
             connection.execute("DELETE FROM source_metadata_revisions WHERE source_id=?", (source_id,))
+            connection.execute("DELETE FROM video_download_provenance WHERE source_id=?", (source_id,))
             connection.execute("DELETE FROM sources WHERE id=?", (source_id,))
             orphaned: list[str] = []
             for sha256 in hashes:

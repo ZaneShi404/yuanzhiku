@@ -24,6 +24,10 @@ class DataPaths:
         return self.root / "state"
 
     @property
+    def download(self) -> Path:
+        return self.state / "download"
+
+    @property
     def artifacts(self) -> Path:
         return self.root / "artifacts"
 
@@ -64,7 +68,7 @@ class DataPaths:
         return self.state / "maintenance.lock"
 
     def create(self) -> None:
-        for path in (self.root, self.state, self.artifacts, self.staging, self.models, self.backups, self.exports, self.logs):
+        for path in (self.root, self.state, self.download, self.artifacts, self.staging, self.models, self.backups, self.exports, self.logs):
             path.mkdir(parents=True, exist_ok=True)
 
 
