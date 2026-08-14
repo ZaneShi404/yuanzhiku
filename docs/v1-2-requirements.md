@@ -79,7 +79,7 @@
 
 1. 平台白名单 `bilibili`、`douyin`；URL 严格校验：HTTPS、主域或子域匹配白名单（bilibili 组显式含 `b23.tv` 入口短链）、无内嵌凭据、长度上限；未知或不支持的 URL 拒绝，拒绝消息不含 URL 内容。
 2. 下载器为锁定版本的 yt-dlp（`REQ-046`，写入 `requirements.lock`），仅以无 shell 子进程运行（`shell=False`）、stdin 关闭、忽略用户级配置文件与缓存；**出站一律经作业内回环过滤代理**（仅监听 127.0.0.1、仅作业生命周期内存活），代理逐连接校验目标主机名必须命中平台注册域清单（7.2.1），未登记域直接拒绝；解析到回环/内网/保留段的地址拒绝，但注册域主机名解析落入隧道段（198.18.0.0/15、28.0.0.0/8，代理工具 fake-IP 环境）时按 7.2.1 隧道段例外处理（决策 10）；显式 `--proxy` 指向回环代理并清空子进程代理环境变量（等效禁用环境代理）；重定向链的每一个新连接都在代理处强制校验，无静默重定向跟随外平台。
-3. 下载仅写入独立 per-job staging：总超时、内存、磁盘断路器沿用 `REQ-016` 纪律；无进展（静默期）断路器按 `REQ-033` 语义**新实现**（staging 目录总量滚动窗口无增长判定，见 7.2）；全部支持协作取消；下载产物经 ffprobe 校验为合法 MP4/WebM、时长合法、**高度 ≤1080**、≤2GB 且通过容量预检后，流式写入不可变 SHA-256 artifact。
+3. 下载仅写入独立 per-job staging：总超时、内存、磁盘断路器沿用 `REQ-016` 纪律；无进展（静默期）断路器按 `REQ-033` 语义**新实现**（staging 目录总量滚动窗口无增长判定，见 7.2）；全部支持协作取消；下载产物经 ffprobe 校验为合法 MP4/WebM、时长合法、**分辨率档位 ≤1080p（短边 ≤1080 且长边 ≤1920，含竖屏 1080×1920，决策 12）**、≤2GB 且通过容量预检后，流式写入不可变 SHA-256 artifact。
 4. 提交链接时权利声明（owned/authorized/permitted/open_license/other）必填，与本地导入一致（`REQ-011`）。
 5. 下载出处记录（provenance）：平台、脱敏链接（`scheme://host/path`，去 userinfo/query/fragment）、yt-dlp 版本、所选格式、是否使用 Cookie 写入 `video_download_provenance` 表（进 `EXPORT_TABLES`/`BACKUP_TABLES`，随导出 manifest 与备份快照携带并受既有 hash 校验）；审计事件仅记 `event_type`/`entity_id`/`result`；下载作业 `payload_json` 只存脱敏链接；Cookie 内容、原始请求头、下载响应体绝不进入数据库、日志、API 响应、备份或导出（`REQ-042`）。
 6. 新增作业 kind `video_download`：持久租约、心跳、取消、优先级与有限重试；成功后在作业内创建 source/content version/artifact 并自动入队 `video_analyze`；分析失败、取消或 blocked 不降低已完成下载（对齐 `REQ-033a` 精神）。任何失败路径不残留半成品 source；staging 与 Cookie 拷贝作业结束即清理。
@@ -122,7 +122,7 @@
 | 下载器被恶意/伪造 URL 利用（SSRF、外平台跳转） | 平台白名单 + 严格 URL 校验；yt-dlp 无 shell 子进程、忽略用户配置；出站经作业内回环过滤代理逐连接校验注册域清单、拒绝内网/回环解析目标；显式代理覆盖环境代理；断路器限制资源 | REQ-047 |
 | Cookie 泄露或进入分发物 | cookies.txt 仅存 `data/state/download`、逐作业拷贝即删；不进 DB/日志/备份/导出/reimport；UI 显式删除；浏览器 Cookie 库直读已按二次决策整体删除 | REQ-047a, REQ-040..042 |
 | 平台反爬、账号风控 | 单 worker、无并发批量、无自动化调度、有限重试；Cookie 由用户自愿导入且可随时删除 | REQ-047, REQ-047a |
-| 下载内容不可信（伪造/损坏/超限） | 复用 REQ-015/016 全部断路器与 ffprobe/hash 校验，高度 ≤1080 后置校验；失败保留原状 | REQ-047, REQ-016 |
+| 下载内容不可信（伪造/损坏/超限） | 复用 REQ-015/016 全部断路器与 ffprobe/hash 校验，分辨率档位（短边 ≤1080 且长边 ≤1920）后置校验；失败保留原状 | REQ-047, REQ-016 |
 | 平台条款与版权 | 用户权利声明必填；仅个人本地使用；不绕过 DRM/会员/付费墙；产品不提供分发能力，导出后使用由用户自担；外部卡仍不构成证据 | REQ-011, REQ-030, REQ-047 |
 
 ## 6. API 契约
@@ -224,7 +224,7 @@ class MediaDownloaderPort(Protocol):
   `--proxy http://127.0.0.1:<作业端口> --no-playlist --no-simulate --ignore-config --no-cache-dir --retries 1 --socket-timeout 30 --merge-output-format mp4 --remux-video mp4 -S "res:1080" -o <staging>/video.%(ext)s <url>`
   - `use_cookie=true` 时追加 `--cookies <staging 内 Cookie 拷贝>`；
   - 子进程环境清空 `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`/`no_proxy`（显式 `--proxy` 已覆盖环境代理，清空为双保险）。
-- 格式与画质：`-S "res:1080"` 语义为"选择不超过 1080p 的最佳组合"（取代原 `-f .../b` 无高度过滤的兜底）；另在产物校验阶段**后置断言 probe 高度 ≤1080**，超出 → `DownloadInputInvalid`（测试 F-07 修复，格式选择 + probe 双保险）。
+- 格式与画质：`-S "res:1080"` 语义为"选择不超过 1080p 档位的最佳组合"（取代原 `-f .../b` 无高度过滤的兜底）；另在产物校验阶段**后置断言分辨率档位 ≤1080p（短边 ≤1080 且长边 ≤1920，竖屏 1080×1920 属 1080p 档位）**，超出 → `DownloadInputInvalid`（测试 F-07 修复 + 决策 12 竖屏语义修正，格式选择 + probe 双保险）。
 - FFmpeg 角色限定（审核 N-02）：FFmpeg 在本功能中**仅作本地音视频合并/remux 工具，绝不作为网络下载器使用**；网络取流仅 yt-dlp 经回环代理完成，不得向 yt-dlp 指定任何以 ffmpeg 为下载器的选项。
 - 断路器（审核 F-03 归因更正后的可实现设计）：
   - 总超时/内存/磁盘：沿用 `backend/app/adapters/media.py:68-131` `_run` 的检查循环模式（总超时 deadline、`_workspace_size` 磁盘、内存 RSS）——`_run` 本身**没有**无进展检测，故不再声称"复用无进展断路器"；
@@ -232,7 +232,7 @@ class MediaDownloaderPort(Protocol):
   - 无进展（静默期）断路器：**新实现**——父进程监控循环以 `download_no_progress_seconds`（默认 10s）为观察窗口间隔，触发阈值＝**连续两个观察窗口内 staging 目录总字节数无增长且子进程无输出**（输出字节计数由适配器维护、不落日志正文；总大小统计复用 `_workspace_size` 同源）→ `DownloadInputInvalid`；
   - 2GB 检查对象：**staging 目录总量**（yt-dlp 合并/remux 期间存在多个中间文件，单文件检查会漏判；与 `maximum_workspace_bytes` 统一，审核 F-14）。
 - 取消清理（审核 F-15）：取消时终止 yt-dlp 进程并**进程树终止**其拉起的 ffmpeg 等子进程（实施时确认锁定 yt-dlp 版本收到终止信号后的自清理行为，必要时用 psutil 进程树终止），随后清理 staging 与 Cookie 拷贝；T-VID-003 覆盖。
-- 产物校验：复用 `LocalFfmpegMediaAnalyzer.probe`（`backend/app/adapters/media.py:133-178`）验证容器/时长/尺寸并**追加高度 ≤1080 断言**，再 `ArtifactStore.store_stream`（`backend/app/adapters/storage.py:57`）写入 artifact——与上传路径同一入口。
+- 产物校验：复用 `LocalFfmpegMediaAnalyzer.probe`（`backend/app/adapters/media.py:133-178`）验证容器/时长/尺寸并**追加分辨率档位 ≤1080p 断言（短边 ≤1080 且长边 ≤1920）**，再 `ArtifactStore.store_stream`（`backend/app/adapters/storage.py:57`）写入 artifact——与上传路径同一入口。
 - 依赖：`backend/requirements.lock` 增加 `yt-dlp==<实施时锁定版本>` 与 `psutil==<实施时锁定版本>`（当前 lock 共 10 个包，`backend/requirements.lock:1-10`，两者均不在列）；ffprobe/ffmpeg 复用现有 `YUANZHIKU_FFPROBE_BIN`/`YUANZHIKU_FFMPEG_BIN` 环境发现（`backend/app/adapters/media.py:28-30`）。
 
 #### 7.2.1 出站注册域清单与回环过滤代理（决策 7）
@@ -266,7 +266,7 @@ class MediaDownloaderPort(Protocol):
 ### 7.3 `video_download` 作业流（`backend/app/services/jobs.py` 扩展）
 
 - 现状：`run_once` 只有 parse/video_analyze/video_transcribe/summarize/backup/integrity_sample 分支（`backend/app/services/jobs.py:133-181`），未知 kind 落入 `else` 分支判 `failed "未知作业类型"`（`jobs.py:180-181`）。本版在分支链中新增 `elif job["kind"] == "video_download"`。
-- 流程：校验 payload → 检查 yt-dlp/FFmpeg 可用（缺失 → blocked，对齐 `MediaToolUnavailable` 处理 `jobs.py:196-202`）→ 建 per-job staging + 按需拷贝 Cookie → 启动回环过滤代理（**启动失败 → blocked，fail-closed，绝不直连回退**）→ `downloader.download`（心跳/进度/取消）→ `probe` 校验（含高度 ≤1080）→ `check_capacity`（`storage.py:49`）→ `store_stream` 写 artifact → 经 `create_ingest`（`backend/app/adapters/sqlite.py:665-709`，参数 `source_type="video_link"`、`job_kind="video_analyze"`、`audit_event="video_download"`）**在同一数据库事务内**创建 source/content version/artifact、写入 `video_download_provenance` 行并自动入队 `video_analyze`（幂等不变量见 7.4）→ 事务提交后 `audit("video_download", source_id, "succeeded")` → `finally` 关闭代理、清理 staging 与 Cookie 拷贝。
+- 流程：校验 payload → 检查 yt-dlp/FFmpeg 可用（缺失 → blocked，对齐 `MediaToolUnavailable` 处理 `jobs.py:196-202`）→ 建 per-job staging + 按需拷贝 Cookie → 启动回环过滤代理（**启动失败 → blocked，fail-closed，绝不直连回退**）→ `downloader.download`（心跳/进度/取消）→ `probe` 校验（含分辨率档位 ≤1080p，短边 ≤1080 且长边 ≤1920）→ `check_capacity`（`storage.py:49`）→ `store_stream` 写 artifact → 经 `create_ingest`（`backend/app/adapters/sqlite.py:665-709`，参数 `source_type="video_link"`、`job_kind="video_analyze"`、`audit_event="video_download"`）**在同一数据库事务内**创建 source/content version/artifact、写入 `video_download_provenance` 行并自动入队 `video_analyze`（幂等不变量见 7.4）→ 事务提交后 `audit("video_download", source_id, "succeeded")` → `finally` 关闭代理、清理 staging 与 Cookie 拷贝。
 - 失败语义：
   - `DownloadUnavailable` → `blocked`（对齐 `MediaToolUnavailable`，`jobs.py:196-202`）；
   - `DownloadInputInvalid` → `failed`（可重试；对齐 `MediaInputInvalid`，`jobs.py:203-209`）；
@@ -339,7 +339,7 @@ class MediaDownloaderPort(Protocol):
   2. Cookie 单通道治理：cookies.txt >1MB → `413`；重复导入覆盖旧文件；DELETE 幂等；`use_cookie=true` 而未导入 → `422`；`use_cookie=false` 时全程不读取 Cookie 文件；作业结束（成功/失败/取消）staging 内 Cookie 拷贝即删且原文件未被修改；
   3. 断路器：总超时、无进展（连续两个观察窗口（`download_no_progress_seconds`，默认 10s）内 staging 目录总字节数无增长且子进程无输出 → failed）、内存 RSS（psutil 锁定后生效）、staging 磁盘总量、目录总量 >2GB 立即终止；
   4. 取消清理：协作取消 → 终止 yt-dlp 并进程树终止其 ffmpeg 子进程、staging 与 Cookie 拷贝清理、无半成品 source；
-  5. 产物校验回滚：probe 非法容器/时长/尺寸/**高度 >1080** → failed、不写 artifact；
+  5. 产物校验回滚：probe 非法容器/时长/尺寸/**分辨率档位超限（短边 >1080 或长边 >1920，如 2560×1440、2160×3840、1080×1921）** → failed、不写 artifact；竖屏 1080×1920 合法放行（决策 12）；
   6. 工具缺失：yt-dlp/FFmpeg 缺失 → capabilities `enabled=false`、API `503`、作业 blocked；
   7. 出处记录与脱敏双重断言：`video_download_provenance` 行存在（platform/url_sanitized/yt_dlp_version/format_profile/cookie_used/config_hash 齐全）且 `url_sanitized` 无 userinfo/query/fragment；作业 payload 无原文 URL 参数；备份快照 payload 断言；导出 `records.json` 含 provenance 行；审计事件仅 event_type/entity_id/result；重试幂等断言：provenance 写入失败 → 事务回滚、无 source 残留、重试不重复创建 source/version（`source_id UNIQUE` 断言）；
   8. 权利声明：rights 缺失或非法值 → `422`（REQ-047.4 显式覆盖）；
@@ -425,6 +425,7 @@ class MediaDownloaderPort(Protocol):
 9. **T-VID-004 测试注入模式豁免**（2026-08-13 上层裁决，审核 N-03 落地）：T-VID-004 以真实 yt-dlp 下载 localhost 合成 fixture 时，仅测试代码路径注入"保留段拒绝豁免"标志——不进生产注册表、生产代码无该分支（fail-closed 语义不变）；豁免只影响回环/保留段解析拒绝，**不影响注册域主机名校验与出站计数断言**。
 10. **隧道段例外（2026-08-13 真实链接验收发现，fake-IP 环境兼容）**：验收环境为代理工具 fake-IP 模式（`b23.tv`/`v.douyin.com`/`upos*.bilivideo.com` 等均解析到 `198.18.x` 隧道段，且对公共 DNS 的查询同样被网络层接管），按规范原文本拒绝保留段将阻断全部真实下载。裁定：注册域主机名校验通过的前提下，放行隧道段 `198.18.0.0/15` 与 `28.0.0.0/8`（公网不可路由、本地 TUN 独占）；其余保留段仍无条件拒绝。安全论证见 7.2.1；属安全边界变更，经独立审核门禁后生效。
 11. **注册域登记：`365yg.com`（douyin 组，2026-08-14 实测登记）**：真实抖音链接下载实测出站命中 `v95-aw-default.365yg.com`（字节系媒体 CDN），未登记导致代理拒绝、下载失败——即 §15"注册域清单漂移"的预期场景。按维护规则（7.2.1）附实测证据登记 `365yg.com`，经人工安全评估（字节跳动媒体 CDN 域，非第三方）与独立审核门禁后生效。
+12. **分辨率档位语义修正（2026-08-14 抖音竖屏实测）**："≤1080p"的后置断言原实现为 `高度 ≤1080`，会拒绝所有竖屏 1080×1920 视频（抖音主流形态）。修正为**短边 ≤1080 且长边 ≤1920**（1080p 档位：横向 1920×1080 与竖屏 1080×1920 均属之；2K/4K 拒绝）。REQ-047.3、7.2、7.3、威胁模型、T-VID-003 用例 5、假设 4 同步修订。
 
 ## 15. 遗留、风险与开发子智能体自述假设
 
@@ -441,7 +442,7 @@ class MediaDownloaderPort(Protocol):
 1. yt-dlp 与 psutil 的具体锁定版本在实施步骤 1 确定；本文档不预判版本号，仅约束锁定与手动评估更新流程。
 2. 下载作业先以 `create_job`（空 source/version）入队、成功后经 `create_ingest`（source_type=video_link、job_kind=video_analyze、audit_event=video_download）落库，是本次核实确认的可行路径（`sqlite.py:665-709`、`sqlite.py:1188-1197`）；实施者若走等价路径须保持相同不变量（失败无半成品 source、成功自动入队）。
 3. 下载元数据承载：payload_json 只存脱敏链接（`scheme://host/path`）；出处详情存 `video_download_provenance`（进 EXPORT/BACKUP_TABLES，随导出 manifest 与备份快照并受 hash 校验）；审计事件只记 event_type/entity_id/result（audit_events 无内容列，`sqlite.py:119-121`）。由此备份快照与导出均不含原文 URL 参数、不含 Cookie 内容。
-4. 产物校验复用 `LocalFfmpegMediaAnalyzer.probe`（`media.py:133-178`，≤24h 时长与宽高校验）并追加高度 ≤1080 后置断言；格式选择 `-S "res:1080"` 与后置断言双保险保证 ≤1080p。
+4. 产物校验复用 `LocalFfmpegMediaAnalyzer.probe`（`media.py:133-178`，≤24h 时长与宽高校验）并追加分辨率档位 ≤1080p 后置断言（短边 ≤1080 且长边 ≤1920，决策 12）；格式选择 `-S "res:1080"` 与后置断言双保险保证 ≤1080p 档位。
 5. T-VID-004 使用真实 yt-dlp 指向 localhost 合成服务器时在适配器/服务层直调（绕过 API 层 URL 校验——两层控制独立），并注入测试专用注册域清单（仅 fixture 域、仅测试代码注入，不进生产注册表）；回环代理记录断言全部出站 ⊆ 测试注册表。
 6. `cookie_file_available`＝`data/state/download/cookies.txt` 存在且 ≤1MB；探测失败一律按不可用处理并给出导入引导。
 7. 本文档全部 `file:line` 引用以 2026-08-13 工作区代码为基准核实；冻结前不改动代码，行号持续有效。
@@ -483,3 +484,4 @@ class MediaDownloaderPort(Protocol):
   - 审核 N-02：补两行加固句——代理启动失败 → 作业 blocked（fail-closed，绝不直连回退，7.2.1/7.3）；FFmpeg 仅作本地合并/remux、绝不作为网络下载器（网络取流仅 yt-dlp 经代理，7.2）。
 - 2026-08-13（真实链接验收环境发现）：B站/抖音真实下载在 fake-IP 网络环境被代理的保留段拒绝阻断（`b23.tv`→`198.18.0.55` 等，公共 DNS 查询同样被网络层接管）。裁定新增**隧道段例外**（决策 10）——注册域主机名校验通过时放行 `198.18.0.0/15` 与 `28.0.0.0/8`，其余保留段仍无条件拒绝；REQ-047.2、7.2.1、T-VID-003 用例 10 同步修订，属安全边界变更、经独立审核门禁。
 - 2026-08-14（抖音真实下载实测）：douyin 组注册域清单增补 `365yg.com`（媒体 CDN，实测 `v95-aw-default.365yg.com`；决策 11），7.2.1 表格同步。
+- 2026-08-14（抖音竖屏实测）：分辨率档位语义修正（决策 12）——"高度 ≤1080"后置断言改为"短边 ≤1080 且长边 ≤1920"，竖屏 1080×1920 放行；REQ-047.3、7.2、7.3、威胁模型行、T-VID-003 用例 5、假设 4 同步。
