@@ -73,6 +73,14 @@
       "acceptance_report": "reports/testing/20260814T163250Z-v1-2-archive-local-acceptance.md",
       "acceptance_report_sha256": "f998747a063a67c9d311eb35f328ecb6ffe2dcdaa7bab459ead4cde0cba54265",
       "supersedes_run_id": "20260731T011535Z-accepted-acl-successor"
+    },
+    {
+      "run_id": "20260814T174651Z",
+      "manifest_sha256": "f4d1454742553624ec848a20b8fd0c5a24aabfc8d97a3c3bc2968061c86bb21b",
+      "archive_local_verdict": "accepted",
+      "acceptance_report": "reports/testing/20260814T175203Z-v1-2-archive-final-record-acceptance.md",
+      "acceptance_report_sha256": "3a920f6dc23a30aa56f170a8cdf00b1fb1a1e5cd3ef80d5763c184afd9fa7bb2",
+      "supersedes_run_id": "20260814T162733Z"
     }
   ]
 }

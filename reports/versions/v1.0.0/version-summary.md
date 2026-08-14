@@ -19,6 +19,7 @@
 | `20260731T010513Z-acl-sealing-remediated` | `accepted` | `437146f5d6b8360b50c1e8db15697ed63766370b8dac5a7d5b05854b876c2784` | `20260731T011000Z-independent-acl-successor-acceptance` | 后继 `003731`；历史 archive-local 接受 |
 | `20260731T011535Z-accepted-acl-successor` | `accepted` | `9c8fe2ca617e78e30c0aa63171b66d8ba9ce6f39d4b2ff7502463df5aed32bde` | `20260731T011700Z-independent-accepted-record-archive-acceptance` | 后继 `010513`；当前推荐，承载前一接受记录并通过独立 archive-local 验收 |
 | `20260814T162733Z` | `accepted` | `4c3bf7815f6e168bcf98a74bf4122503b9c3b44defcc9f5106fe6a3bd380965a` | `20260814T163250Z-v1-2-archive-local-acceptance` | 后继 `011535`；v1.2 候选（本版本汇总的推荐快照仍为 `011535`，v1.2 推荐见 `reports/versions/v1.2.0/`） |
+| `20260814T174651Z` | `accepted` | `f4d1454742553624ec848a20b8fd0c5a24aabfc8d97a3c3bc2968061c86bb21b` | `20260814T175203Z-v1-2-archive-final-record-acceptance` | 后继 `162733`；v1.2 最终后继（本版本汇总的推荐快照仍为 `011535`） |
 
 ## 已解决的归档复核项
 
