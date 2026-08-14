@@ -31,6 +31,7 @@ from app.adapters.downloader import (
     LoopbackFilterProxy,
     YtDlpDownloader,
     host_matches_registered_domain,
+    registered_domains,
 )
 from app.domain.media import ExtractedVideoFrame, MediaProcessingLimits, VideoMetadata
 from app.domain.models import sanitize_download_url
@@ -871,6 +872,17 @@ def test_registered_domain_matching_by_label_boundary() -> None:
     assert not host_matches_registered_domain("bilibili.com.evil.com", domains)
     assert not host_matches_registered_domain("evil-bilibili.com", domains)
     assert not host_matches_registered_domain("127.0.0.1", domains)
+
+
+def test_douyin_registry_includes_365yg_media_cdn() -> None:
+    # 决策 11：2026-08-14 真实链接实测登记字节系媒体 CDN（v95-aw-default.365yg.com）。
+    domains = registered_domains("douyin")
+    assert "365yg.com" in domains
+    assert host_matches_registered_domain("v95-aw-default.365yg.com", domains)
+    assert host_matches_registered_domain("a1.365yg.com", domains)
+    # 标签边界：非子域冒充不得匹配
+    assert not host_matches_registered_domain("evil365yg.com", domains)
+    assert not host_matches_registered_domain("365yg.com.evil.com", domains)
 
 
 def test_proxy_rejects_unregistered_connect_without_outbound_bytes() -> None:

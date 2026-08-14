@@ -43,7 +43,11 @@ MAX_COOKIE_BYTES = 1024 * 1024
 # 清单变更属于安全边界变更，必须附实测证据并经独立审核门禁；未实证域一律不登记。
 DOWNLOAD_REGISTRY: dict[str, tuple[str, ...]] = {
     "bilibili": ("bilibili.com", "bilivideo.com", "hdslb.com", "b23.tv"),
-    "douyin": ("douyin.com", "iesdouyin.com", "snssdk.com", "douyinvod.com"),
+    "douyin": (
+        "douyin.com", "iesdouyin.com", "snssdk.com", "douyinvod.com",
+        # 决策 11：2026-08-14 真实链接实测登记（v95-aw-default.365yg.com）
+        "365yg.com",
+    ),
 }
 
 DOWNLOAD_PLATFORMS = tuple(DOWNLOAD_REGISTRY)
