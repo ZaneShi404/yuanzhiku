@@ -77,6 +77,23 @@ def data_paths(root: str | Path | None = None) -> DataPaths:
     return DataPaths(Path(selected).expanduser().resolve())
 
 
+def compose_data_root(value: str | Path | None = None) -> Path:
+    """集成测试 compose 数据根守卫（REQ-045）。
+
+    `YUANZHIKU_COMPOSE_DATA_ROOT` 只允许解析为仓库内
+    `tests/runtime/compose-<run-id>`；任何其他位置（尤其是日常数据根）
+    直接拒绝，防止集成测试污染日常使用数据。
+    """
+    raw = value or os.environ.get("YUANZHIKU_COMPOSE_DATA_ROOT")
+    if not raw:
+        raise ValueError("必须将 YUANZHIKU_COMPOSE_DATA_ROOT 设为 tests/runtime/compose-<run-id>")
+    resolved = Path(raw).expanduser().resolve()
+    runtime_root = (Path(__file__).resolve().parents[3] / "tests" / "runtime").resolve()
+    if resolved.parent != runtime_root or not resolved.name.startswith("compose-"):
+        raise ValueError("集成测试数据根必须位于 tests/runtime/compose-<run-id>，不得使用日常数据目录")
+    return resolved
+
+
 def database_url(paths: DataPaths) -> str:
     """Select SQLite by default; Compose supplies an explicit PostgreSQL URL."""
     return os.environ.get("YUANZHIKU_DATABASE_URL", f"sqlite:///{paths.database.as_posix()}")

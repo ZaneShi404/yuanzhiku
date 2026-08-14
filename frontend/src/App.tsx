@@ -95,6 +95,7 @@ type CitationDetail = Citation & {
   locator: Locator
   context: string
   human_revised: boolean
+  location_action: { source_id: string; evidence_id: string }
 }
 type Knowledge = {
   id: string
@@ -520,6 +521,7 @@ function SourceDetail({
   const [evidence, setEvidence] = useState<Evidence[]>([])
   const [citations, setCitations] = useState<Record<string, Citation[]>>({})
   const [citation, setCitation] = useState<CitationDetail | null>(null)
+  const [citationContextOpen, setCitationContextOpen] = useState(false)
   const [editingRevision, setEditingRevision] = useState(false)
   const [revisedText, setRevisedText] = useState('')
   const [highlightedExcerpt, setHighlightedExcerpt] = useState('')
@@ -737,10 +739,19 @@ function SourceDetail({
   }
   const loadCitation = async (citationId: string) => {
     try {
+      setCitationContextOpen(false)
       setCitation(await request<CitationDetail>(`/citations/${citationId}`))
     } catch (error) {
       onMessage(error instanceof Error ? error.message : '读取引用失败')
     }
+  }
+  const locateCitation = (detail: CitationDetail) => {
+    const target = evidence.find(item => item.id === detail.location_action.evidence_id)
+    if (!target) {
+      onMessage('该引用的证据不在当前表示中，请切换到对应表示后定位')
+      return
+    }
+    locateEvidence(target)
   }
   const locateEvidence = (item: Evidence) => {
     const page = asText(item.locator.page)
@@ -819,7 +830,7 @@ function SourceDetail({
           <div className="inline-actions"><button type="button" className="text-button" onClick={() => locateEvidence(item)}><MapPin size={15}/>定位</button>{!sourceDeleted && <button type="button" className="text-button" disabled={Boolean(busyAction)} onClick={() => void createCitation(item.id)}><Plus size={15}/>{busyAction === `citation-${item.id}` ? '正在创建' : '创建引用'}</button>}</div>
           <div className="citation-row">{(citations[item.id] || []).map(entry => <button type="button" className="citation-chip" key={entry.id} onClick={() => void loadCitation(entry.id)}>引用 {entry.id.slice(0, 8)}</button>)}</div>
         </article>) : <p className="muted">当前表示尚无可引用 evidence。</p>}
-        {citation && <article className="citation-detail"><header><b>{citation.title}</b><button type="button" className="icon-button" onClick={() => setCitation(null)} title="关闭引用"><X size={15}/></button></header><p>{citation.context}</p><small>{locatorLabel(citation.locator)} · {citation.human_revised ? '人工修订表示' : '原始表示'}</small></article>}
+        {citation && <article className="citation-detail"><header><b>{citation.title}</b><Status value={citation.processing_state}/><button type="button" className="icon-button" onClick={() => setCitation(null)} title="关闭引用"><X size={15}/></button></header>{citationContextOpen ? <p>{citation.context}</p> : <p>{citation.context.slice(0, 80)}{citation.context.length > 80 ? '…' : ''}</p>}<div className="inline-actions">{citation.context.length > 80 && <button type="button" className="text-button" onClick={() => setCitationContextOpen(current => !current)}>{citationContextOpen ? '收起上下文' : '展开上下文'}</button>}<button type="button" className="text-button" onClick={() => locateCitation(citation)}><MapPin size={15}/>定位</button></div><small>{locatorLabel(citation.locator)} · {citation.human_revised ? '人工修订表示' : '原始表示'}</small></article>}
       </section>
 
       {!sourceDeleted && <section className="knowledge-draft-panel">
@@ -832,7 +843,7 @@ function SourceDetail({
         </form>
       </section>}
 
-      {!sourceDeleted && version?.media_type === 'application/pdf' && <section className="document-panel"><header><h2>PDF 只读预览</h2><span>隔离预览</span></header><iframe title="PDF 只读预览" sandbox="allow-same-origin" src={`${API}/sources/${source.id}/original#toolbar=0&navpanes=0`} /></section>}
+      {!sourceDeleted && version?.media_type === 'application/pdf' && <section className="document-panel"><header><h2>PDF 只读预览</h2><span>隔离预览</span><a className="text-button" href={`${API}/sources/${source.id}/original`} target="_blank" rel="noreferrer">外部打开</a></header><iframe title="PDF 只读预览" sandbox="allow-same-origin" src={`${API}/sources/${source.id}/original#toolbar=0&navpanes=0`} /></section>}
     </div>
     <aside className="detail-side">
       <h2>版本</h2>{source.versions.map(item => <div className="version" key={item.id}><Box size={17}/><div><b>{item.original_name}</b><small>{item.artifact_sha256.slice(0, 16)}...</small><Status value={item.completeness}/></div></div>)}

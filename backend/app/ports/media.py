@@ -51,6 +51,13 @@ class MediaAnalyzerPort(Protocol):
 
 
 class MediaAiPort(Protocol):
+    """可选媒体 AI 提供方边界（REQ-017）。
+
+    转写结果落 evidence 时，每条摘录的 locator 只能经
+    ``app.domain.media.video_time_range_locator`` 构造（毫秒起止范围，
+    REQ-016）；实现方不得返回无法定位到时间范围的转写文本。
+    """
+
     def capability(self) -> dict[str, object]: ...
 
     def config_hash(self, operation: str) -> str: ...

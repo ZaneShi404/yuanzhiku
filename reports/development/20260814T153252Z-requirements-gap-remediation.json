@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "report_id": "RPT-REQUIREMENTS-GAP-REMEDIATION-20260814T153252Z-001",
+  "recorded_at_utc": "2026-08-14T15:32:52Z",
+  "report_kind": "development",
+  "author_role": "development",
+  "independence": "non_independent",
+  "product_version": "v1.2",
+  "decision_scope": "archive_local",
+  "verdict": "accepted",
+  "requirements": ["REQ-004", "REQ-013", "REQ-016", "REQ-021", "REQ-023", "REQ-044", "REQ-045", "REQ-047"],
+  "defects": [
+    "DEF-YTDLP-TITLE-ENCODING",
+    "DEF-DOCLING-PAGE-LOCATOR-MISSING",
+    "DEF-CITATION-DETAIL-INCOMPLETE",
+    "DEF-INTEGRATION-TESTS-MISSING"
+  ],
+  "evidence_refs": [
+    "tests/unit/test_docling_segments.py",
+    "tests/unit/test_model_lock.py",
+    "tests/unit/test_video_media.py",
+    "tests/integration/test_local_full_chain.py",
+    "reports/testing/20260813T072039Z-T-VID-005-real-platform-acceptance.json"
+  ],
+  "release_gates": [
+    {"gate_id": "GATE-UNIT-INTEGRATION-REGRESSION", "status": "passed", "requirements": ["REQ-004", "REQ-013", "REQ-016", "REQ-021", "REQ-023", "REQ-044", "REQ-045", "REQ-047"]},
+    {"gate_id": "GATE-FRONTEND-BUILD", "status": "passed", "requirements": ["REQ-023", "REQ-044"]},
+    {"gate_id": "GATE-BROWSER-BLACKBOX", "status": "blocked", "requirements": ["REQ-023", "REQ-044"]},
+    {"gate_id": "GATE-COMPOSE-PHYSICAL", "status": "blocked", "requirements": ["REQ-045"]},
+    {"gate_id": "GATE-RELEASE-READINESS", "status": "blocked", "requirements": ["REQ-046"]}
+  ],
+  "summary": "Remediation of the 2026-08-14 requirements audit: one real defect fixed (yt-dlp title encoding), three clear gaps closed (REQ-021 docling page locators verified with the real docling-core model, REQ-023 citation detail UI, REQ-045 local integration tests plus compose data-root guard), three structural deviations resolved per user decisions (REQ-004 doc mapping, REQ-013 stricter model-lock validation without a download channel, REQ-016 video_time_range locator factory), and governance records synchronized. Full regression: 214 passed, 2 skipped. Release remains blocked."
+}

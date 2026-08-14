@@ -76,6 +76,39 @@ def parse_local(artifact_path: Path, filename: str, media_type: str | None = Non
     return ParsedDocument("", "unsupported-local", _config_hash("unsupported-local", "1"), suffix.lstrip("."), "不支持的文档类型")
 
 
+def _docling_segments(document: Any) -> tuple[str, list[ParsedSegment]] | None:
+    """按 Docling 条目 provenance 页码聚合文本，产出 pdf_page_char_range segments。
+
+    REQ-021：PDF 证据 locator 必须含真实页码。任何非空文本条目缺少页码时
+    返回 None（调用方回退整文路径），绝不产出 page 未知的页级证据。
+    """
+    pages: dict[int, list[str]] = {}
+    seen_items = False
+    for item in getattr(document, "texts", []) or []:
+        item_text = getattr(item, "text", "") or ""
+        if not item_text.strip():
+            continue
+        seen_items = True
+        prov = list(getattr(item, "prov", None) or [])
+        page_no = getattr(prov[0], "page_no", None) if prov else None
+        if not isinstance(page_no, int) or page_no < 1:
+            return None
+        pages.setdefault(page_no, []).append(item_text)
+    if not seen_items:
+        return None
+    segments: list[ParsedSegment] = []
+    page_texts: list[str] = []
+    offset = 0
+    for page_no in sorted(pages):
+        page_text = "\n".join(pages[page_no])
+        page_texts.append(page_text)
+        segments.append(ParsedSegment(offset, offset + len(page_text), {
+            "type": "pdf_page_char_range", "page": page_no, "char_range": [0, len(page_text)],
+        }))
+        offset += len(page_text) + 2
+    return "\n\n".join(page_texts), segments
+
+
 class LocalDocumentParser:
     """Docling-first only when an approved, complete local cache is present.
 
@@ -95,13 +128,15 @@ class LocalDocumentParser:
         models = lock.get("models")
         if not isinstance(models, list) or not models:
             return False, "没有已批准的 Docling 模型", {}
+        required_fields = ("name", "version", "source_url", "license", "cache_path", "sha256")
         for model in models:
             if not isinstance(model, dict):
                 return False, "模型锁文件无效", {}
-            relative_path = model.get("cache_path")
-            expected_hash = model.get("sha256")
-            if not isinstance(relative_path, str) or not isinstance(expected_hash, str):
-                return False, "模型锁文件缺少 cache_path 或 sha256", {}
+            # REQ-013：预批准条目必须锁定版本/来源/许可证/哈希，缺一不予使用。
+            if any(not isinstance(model.get(field), str) or not model.get(field) for field in required_fields):
+                return False, "模型锁文件缺少必需字段（name/version/source_url/license/cache_path/sha256）", {}
+            relative_path = model["cache_path"]
+            expected_hash = model["sha256"]
             candidate = self.models_directory / relative_path
             if not candidate.is_file():
                 return False, "已批准的 Docling 模型未缓存", {}
@@ -144,9 +179,17 @@ class LocalDocumentParser:
 
                 workspace.mkdir(parents=True, exist_ok=True)
                 result = DocumentConverter().convert(str(artifact_path))
-                text = result.document.export_to_markdown()
+                extracted = _docling_segments(result.document)
+                if extracted is not None:
+                    text, segments = extracted
+                else:
+                    # 条目缺页码 provenance：整文路径，evidence 走原生兜底 locator。
+                    text, segments = result.document.export_to_markdown(), []
                 if text.strip():
-                    return ParsedDocument(text, "docling-local", _config_hash("docling-local", "approved-cache"), "pdf")
+                    return ParsedDocument(
+                        text, "docling-local", _config_hash("docling-local", "approved-cache"), "pdf",
+                        segments=tuple(segments),
+                    )
             except Exception:
                 # No exception content reaches durable job messages. The native
                 # fallback is preferred over a cloud or first-use model download.

@@ -507,6 +507,10 @@ class YtDlpDownloader(MediaDownloaderPort):
         """
         blocked = {"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"}
         env = {key: value for key, value in os.environ.items() if key.upper() not in blocked}
+        # 强制子进程 stdout/stderr 使用 UTF-8：中文区域 Windows 上 yt-dlp
+        # 默认按 GBK 编码 --print 输出，而 _extract_title 按 UTF-8 解码，
+        # 不固定编码会把平台标题以乱码落库。
+        env["PYTHONIOENCODING"] = "utf-8"
         ffmpeg_dir = self._resolve_ffmpeg_dir()
         if ffmpeg_dir is not None:
             path_key = next((key for key in env if key.upper() == "PATH"), "PATH")

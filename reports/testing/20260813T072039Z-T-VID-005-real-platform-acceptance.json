@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "report_id": "RPT-T-VID-005-REAL-PLATFORM-ACCEPTANCE-20260813T072039Z-001",
+  "recorded_at_utc": "2026-08-13T07:20:39Z",
+  "report_kind": "acceptance",
+  "author_role": "acceptance",
+  "independence": "non_independent",
+  "product_version": "v1.2",
+  "decision_scope": "archive_local",
+  "verdict": "accepted",
+  "requirements": ["REQ-047", "REQ-047a", "REQ-015", "REQ-042"],
+  "defects": [
+    "DEF-TUNNEL-SEGMENT-FAKE-IP",
+    "DEF-CONNECT-HEADER-DRAIN",
+    "DEF-YTDLP-FFMPEG-DISCOVERY",
+    "DEF-SCALE-FILTER-COMMA-ESCAPE",
+    "DEF-PSUTIL-NOSUCHPROCESS-RACE"
+  ],
+  "evidence_refs": [
+    "reports/testing/20260813T072039Z-T-VID-005-real-platform-acceptance.md"
+  ],
+  "release_gates": [
+    {"gate_id": "GATE-REAL-PLATFORM-BILIBILI", "status": "passed", "requirements": ["REQ-047"]},
+    {"gate_id": "GATE-REAL-PLATFORM-DOUYIN", "status": "passed", "requirements": ["REQ-047", "REQ-047a"]},
+    {"gate_id": "GATE-RELEASE-READINESS", "status": "blocked", "requirements": ["REQ-046"]}
+  ],
+  "summary": "Operator-assisted real-platform acceptance for the v1.2 restricted link-download channel: bilibili and douyin both accepted (douyin completed 2026-08-14). Recorded as non_independent because execution was operator-assisted; archive-local scope only, release_readiness remains blocked. Sidecar added 2026-08-14 to satisfy the dual-file registration convention; the Markdown record is unchanged."
+}

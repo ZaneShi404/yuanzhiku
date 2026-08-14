@@ -17,6 +17,7 @@
 | T-BACK-001 | 备份与导出 | ZIP manifest 和 SHA 验证、禁止原路径字段 | REQ-040, REQ-041, REQ-042 |
 | T-UI-001 | UI 烟测 | 真实浏览器访问库、导入、作业、外部卡页面；视频页链接获取表单（平台选择/URL/权利声明/Cookie 开关按 cookie_file_available 禁用引导/联网告知/提交跳转作业页）；跨源 DELETE 下载 Cookie 预检 | REQ-001, REQ-044 |
 | T-COMP-001 | Compose | 仅 `tests/runtime/compose-<run-id>` 数据卷，loopback 发布；一次性 `migrate` 成功后 API/worker 才启动，web 不挂载宿主 `dist` | REQ-045 |
+| T-INT-001 | 本地全链路集成 | `tests/integration/test_local_full_chain.py`：TestClient 全链路（导入→解析→证据→引用→知识发布→检索→备份→导出→再导入→软删/恢复/purge）；`compose_data_root` 守卫强制 `YUANZHIKU_COMPOSE_DATA_ROOT` 解析为 `tests/runtime/compose-<run-id>`，日常数据根直接拒绝 | REQ-045, REQ-023 |
 | T-ARCH-001 | v2 过程档案报告 | 构建 schema v2 目录与 ZIP；核对 Markdown + JSON 同 stem、`report_id`、UTC/枚举、REQ/DEF、来源/证据/manifest 交叉引用、`legacy_inferred` 最小字段、冻结 legacy 路径/哈希全集、冻结 snapshot 有序链、版本汇总逐项一致及 release blocked 门禁；验证已发布目录 ACL 拒绝写入，篡改仅在隔离副本进行；重算 manifest 后仍拒绝 schema、登记、验收身份、运行输出或候选链篡改，v1 fixture 继续验证 | REQ-001, REQ-044, REQ-045, REQ-046 |
 
 测试数据只能位于 `tests/fixtures` 与 `tests/runtime/<run-id>`。开发自测不构成独立测试或验收结论。

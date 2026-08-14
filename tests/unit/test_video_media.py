@@ -313,3 +313,17 @@ def test_process_memory_bytes_tolerates_exited_process() -> None:
     尽力而为返回 None，绝不炸 video_analyze 抽帧作业。"""
     result = LocalFfmpegMediaAnalyzer._process_memory_bytes(_recently_exited_pid())
     assert result is None or isinstance(result, int)
+
+
+def test_video_time_range_locator_validation() -> None:
+    """REQ-016：转写证据唯一允许的 locator 必须带合法毫秒起止范围。"""
+    from app.domain.media import video_time_range_locator
+
+    locator = video_time_range_locator(0, 1500)
+    assert locator == {"type": "video_time_range", "start_ms": 0, "end_ms": 1500}
+    for start_ms, end_ms in [(-1, 10), (10, 10), (20, 10)]:
+        with pytest.raises(ValueError):
+            video_time_range_locator(start_ms, end_ms)
+    for bad in ("0", 1.5, True):
+        with pytest.raises(ValueError):
+            video_time_range_locator(bad, 10)  # type: ignore[arg-type]

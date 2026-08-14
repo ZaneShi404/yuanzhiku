@@ -3,7 +3,7 @@
 ## 1. 元数据与状态
 
 - 版本：v1.2（链接获取 / 视频下载）
-- 状态：**DRAFT（未冻结；冻结前不改动任何代码）**——已通过独立测试验证与独立审核首轮，按两份报告的 findings 与 2026-08-13 人工拍板完成修订（见文末"修订记录"）。
+- 状态：**已并入 `docs/requirements.md` 冻结基线并已完成实现**（REQ-015/031/043/044 修订与 REQ-047/047a 新增均已进入冻结需求文本，代码与测试已落地）。残留形式事项：§10 冻结门禁第 3 项（真实平台验收）的登记形式已按双件约定补齐 sidecar（`independence=non_independent`，如实登记 operator-assisted）；`release_readiness` 仍保持 blocked，发布门禁不受影响。2026-08-14 状态同步。
 - 日期：2026-08-13（决策拍板与修订日；首稿由开发子智能体撰写，本轮按测试/审核 findings 修订）
 - 上游草案：`reports/development/20260812T222057Z-link-acquisition-v1-2-draft.md`（2026-08-12 起稿，2026-08-13 六项决策拍板）
 - 首轮验证/审核输入：`reports/testing/20260812T225424Z-v1-2-requirements-verification.md`（11 条）、`reports/testing/20260812T230103Z-v1-2-requirements-review.md`（17 条）
