@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "report_id": "RPT-V1-2-REQUIREMENTS-REVIEW-FINAL-20260812T231724Z-001",
+  "recorded_at_utc": "2026-08-12T23:17:24Z",
+  "report_kind": "testing",
+  "author_role": "testing",
+  "independence": "independent",
+  "product_version": "v1.2.0",
+  "decision_scope": "archive_local",
+  "verdict": "accepted",
+  "requirements": ["REQ-015", "REQ-031", "REQ-047", "REQ-047a"],
+  "defects": [],
+  "evidence_refs": [
+    "reports/testing/20260812T231724Z-v1-2-requirements-review-final.md",
+    "reports/testing/20260812T231526Z-v1-2-requirements-verification-round2.md"
+  ],
+  "release_gates": [
+    {"gate_id": "GATE-RELEASE-READINESS", "status": "blocked", "requirements": ["REQ-046"]}
+  ],
+  "summary": "v1.2 需求文档独立终审：首轮 17 条发现全部关闭（含原阻断项 F-01），新发现 3 项经收尾修订闭环；最终裁定 accepted，release_readiness 保持 blocked。"
+}

@@ -43,7 +43,7 @@
 
 ### F-03（次要）title 缺省时的"平台标题"回填未实现
 
-- 位置：`backend/app/services/imports.py` 约 158-159 行（`downloaded_video` 内 `if not title.strip(): title = "未命名视频"`）；`backend/app/adapters/downloader.py` 子进程 stdout=DEVNULL、无 `--print` 参数；`frontend/src/App.tsx` 标题占位文案"可留空，默认未命名视频"
+- 位置：`backend/app/services/imports.py` 约 158-159 行（`downloaded_video` 内 `if not title.strip(): title = "未命名视频"`）；`backend/app/adapters/downloader.py` 子进程 标准输出=DEVNULL、无 `--print` 参数；`frontend/src/App.tsx` 标题占位文案"可留空，默认未命名视频"
 - 证据：规范 6.2 字段表写明"title 缺省时下载成功后使用平台标题，退化为'未命名视频'"。实现从未捕获平台标题，恒退化为"未命名视频"，规范中"使用平台标题"分支为空转；docs/api-contract.md 亦按规范原文保留了该承诺，形成文档与代码不一致。
 - 影响：功能完整性缺口（用户体验降级），无安全影响。
 - 建议：二选一并裁决——(a) 实现平台标题回填（yt-dlp 增加 `--print`/info-json 只提取标题，仍不落盘、不落日志）；(b) 若按"最小面"维持现状，则需修订规范 6.2 与 api-contract 对应行文案为"缺省时使用'未命名视频'"，避免规范承诺与实现不符。本条需人工拍板。
@@ -86,7 +86,7 @@
 ### 2. Cookie 治理（REQ-047a 单通道）
 - 仅 `data/state/download/cookies.txt`：1MB 上限（读 1MB+1 判定 413）、重复导入覆盖（`.part` 临时文件 + `os.replace`，finally 清理）、DELETE 幂等（`unlink(missing_ok=True)` 恒 204）。
 - 逐作业拷贝：`jobs.py` 拷贝进 per-job staging，作业结束统一 `shutil.rmtree`（成功/失败/取消/blocked/代理启动失败全覆盖），原文件全程只读；`use_cookie=false` 全程不触碰文件；`use_cookie=true` 且未导入 → API 422，作业层二次校验 → failed，绝不静默回退。
-- 零持久化：Cookie 内容不进 DB（provenance 表列不含 Cookie）、不进日志（yt-dlp stderr 入匿名临时文件即删、操作日志只记路由模板+状态码）、不进审计（audit_events 仅 event_type/entity_id/result）、不进备份/导出/reimport（manifest `exclusions` 增 `state/download`，且归档构建只白名单写入、从不遍历数据根）；`.gitignore` 第 16 行 `data/` 覆盖并有新增回归锚点断言。
+- 零持久化：Cookie 内容不进 DB（provenance 表列不含 Cookie）、不进日志（yt-dlp 错误输出 入匿名临时文件即删、操作日志只记路由模板+状态码）、不进审计（audit_events 仅 event_type/entity_id/result）、不进备份/导出/reimport（manifest `exclusions` 增 `state/download`，且归档构建只白名单写入、从不遍历数据根）；`.gitignore` 第 16 行 `data/` 覆盖并有新增回归锚点断言。
 
 ### 3. 脱敏与泄露面
 - `sanitize_download_url`：`scheme://host/path`，去 userinfo（`netloc.rsplit("@",1)[-1]`）、query、fragment，4096 截断；实测用例通过。
@@ -178,7 +178,7 @@
 - `backend/app/services/jobs.py` 在 probe 调用处捕获 `MediaProcessingCancelled` 并转换 `raise DownloadProcessingCancelled() from None`，作业落 `cancelled` 且消息为"链接下载已取消"；专项用例 `test_probe_phase_cancel_uses_download_cancel_message` 实测通过（无 source 残留）。
 
 ### F-03 已关闭 —— 平台标题回填实现（用户已裁决"实现回填"选项）
-- `backend/app/adapters/downloader.py` 追加 `--print "%(title)s"`：stdout 仅捕获标题到 `tempfile.TemporaryFile`（即删，不落 data/、不进日志/消息/审计），512KB 上限纪律（超限 → `DownloadInputInvalid("output_limit")` → failed，fail-closed）；`_extract_title` 清洗控制字符/换行并截断 500（与 title 字段上限一致）。
+- `backend/app/adapters/downloader.py` 追加 `--print "%(title)s"`：标准输出 仅捕获标题到 `tempfile.TemporaryFile`（即删，不落 data/、不进日志/消息/审计），512KB 上限纪律（超限 → `DownloadInputInvalid("output_limit")` → failed，fail-closed）；`_extract_title` 清洗控制字符/换行并截断 500（与 title 字段上限一致）。
 - `DownloadedVideo` 增 `title` 字段（默认空），`jobs.py` 优先级：用户显式提交 > 平台标题 > "未命名视频"（落库侧回退）；前端占位文案同步为"可留空，默认使用平台标题"。
 - 新增 5 条用例（回填/空捕获退化/显式标题优先/清洗截断/合成服务器 og:title 真实 yt-dlp 捕获）覆盖；FakeDownloader 相关断言已适配。实测通过。
 - 残留观察（非阻断）：yt-dlp 对缺失字段的默认输出为 "NA" 字面值，极端情况下标题可能显示 "NA" 而非"未命名视频"；如在意可在 `_extract_title` 追加 `{"NA", "null"}` 黑名单归一。
@@ -192,7 +192,7 @@
 - `tests/unit/test_api.py` 两处断言改为以 `shutil.which(ffmpeg/ffprobe)`（含 `YUANZHIKU_FFMPEG_BIN`/`YUANZHIKU_FFPROBE_BIN` 环境变量覆盖）计算 `tools_available` 后断言 `enabled` 与 503/201 两态，不再硬编码测试机无 FFmpeg；503 语义改由作业级工具缺失用例覆盖。
 
 ### 新引入安全面复核（静态）
-- stdout 捕获：标题字节流仅存在于匿名临时文件 → `DownloadedVideo.title` → `sources.title`（与本地导入文件名/标题同信任级），任何作业消息、进度回调、审计事件、操作日志均不承载标题字节；512KB 上限 fail-closed。
+- 标准输出 捕获：标题字节流仅存在于匿名临时文件 → `DownloadedVideo.title` → `sources.title`（与本地导入文件名/标题同信任级），任何作业消息、进度回调、审计事件、操作日志均不承载标题字节；512KB 上限 fail-closed。
 - 预检中间件：无新出站路径、无新增路由暴露、无请求体读取（仅头部判定），审计中间件仍只记路由模板+状态码。
 - `is_global` 收窄：对公网 CDN IPv4/IPv6 无回归（测试断言保留），仅扩大拒绝面，符合 fail-closed 方向。
 - 取消/异常路径：probe 期取消转换不改变清理链路（staging/代理/Cookie 拷贝仍由既有 finally 保证）；新增 `test_cookie_copy_removed_on_failure_and_cancel` 补齐 use_cookie=true 的失败/取消两条路径的拷贝清理断言，实测通过。

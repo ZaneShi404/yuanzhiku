@@ -5,16 +5,18 @@
   "report_kind": "acceptance",
   "author_role": "acceptance",
   "independence": "non_independent",
-  "product_version": "v1.2",
+  "product_version": "v1.2.0",
   "decision_scope": "archive_local",
   "verdict": "accepted",
-  "requirements": ["REQ-047", "REQ-047a", "REQ-015", "REQ-042"],
+  "requirements": ["REQ-015", "REQ-042", "REQ-047", "REQ-047a"],
   "defects": [
-    "DEF-TUNNEL-SEGMENT-FAKE-IP",
-    "DEF-CONNECT-HEADER-DRAIN",
-    "DEF-YTDLP-FFMPEG-DISCOVERY",
-    "DEF-SCALE-FILTER-COMMA-ESCAPE",
-    "DEF-PSUTIL-NOSUCHPROCESS-RACE"
+    {"defect_id": "DEF-LINK-001", "relationship": "repaired"},
+    {"defect_id": "DEF-LINK-002", "relationship": "repaired"},
+    {"defect_id": "DEF-LINK-003", "relationship": "repaired"},
+    {"defect_id": "DEF-LINK-004", "relationship": "repaired"},
+    {"defect_id": "DEF-LINK-005", "relationship": "repaired"},
+    {"defect_id": "DEF-LINK-006", "relationship": "repaired"},
+    {"defect_id": "DEF-LINK-007", "relationship": "repaired"}
   ],
   "evidence_refs": [
     "reports/testing/20260813T072039Z-T-VID-005-real-platform-acceptance.md"
@@ -24,5 +26,5 @@
     {"gate_id": "GATE-REAL-PLATFORM-DOUYIN", "status": "passed", "requirements": ["REQ-047", "REQ-047a"]},
     {"gate_id": "GATE-RELEASE-READINESS", "status": "blocked", "requirements": ["REQ-046"]}
   ],
-  "summary": "Operator-assisted real-platform acceptance for the v1.2 restricted link-download channel: bilibili and douyin both accepted (douyin completed 2026-08-14). Recorded as non_independent because execution was operator-assisted; archive-local scope only, release_readiness remains blocked. Sidecar added 2026-08-14 to satisfy the dual-file registration convention; the Markdown record is unchanged."
+  "summary": "v1.2 受限链接下载通道的真实平台验收：哔哩哔哩与抖音均 accepted（抖音 2026-08-14 补验完成）。执行方式为 operator-assisted，故 independence=non_independent；裁定范围仅 archive_local，release_readiness 保持 blocked。验收过程发现并修复七项真实缺陷（见 defects）。"
 }

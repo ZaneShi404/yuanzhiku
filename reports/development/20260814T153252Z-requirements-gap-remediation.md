@@ -10,7 +10,7 @@
 **yt-dlp 平台标题 GBK 乱码（真实 bug，REQ-047.6/6.2 标题回填意图）**
 
 - 现象：全量单测 1 失败——`test_synthetic_download_captures_platform_title`：中文区域 Windows 上 yt-dlp 子进程按 GBK 输出 `--print` 标题，`_extract_title` 按 UTF-8 解码，真实下载会把乱码标题落库。
-- 修复：`backend/app/adapters/downloader.py` `_subprocess_environment` 增加 `env["PYTHONIOENCODING"] = "utf-8"`（约 :512），强制子进程 stdout/stderr UTF-8。
+- 修复：`backend/app/adapters/downloader.py` `_subprocess_environment` 增加 `env["PYTHONIOENCODING"] = "utf-8"`（约 :512），强制子进程 标准输出/错误输出 UTF-8。
 - 验证：该用例由失败转通过；`test_video_download.py` 全模块 67 通过（4 分 58 秒）。
 
 ## 1. 明确缺口修复（3 项）

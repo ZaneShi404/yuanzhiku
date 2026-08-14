@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "report_id": "RPT-V1-2-REQUIREMENTS-VERIFICATION-20260812T225424Z-001",
+  "recorded_at_utc": "2026-08-12T22:54:24Z",
+  "report_kind": "testing",
+  "author_role": "testing",
+  "independence": "independent",
+  "product_version": "v1.2.0",
+  "decision_scope": "archive_local",
+  "verdict": "accepted",
+  "requirements": ["REQ-015", "REQ-030", "REQ-031", "REQ-043", "REQ-044", "REQ-047", "REQ-047a"],
+  "defects": [],
+  "evidence_refs": [
+    "reports/testing/20260812T225424Z-v1-2-requirements-verification.md",
+    "reports/development/20260812T222057Z-link-acquisition-v1-2-draft.md"
+  ],
+  "release_gates": [
+    {"gate_id": "GATE-RELEASE-READINESS", "status": "blocked", "requirements": ["REQ-046"]}
+  ],
+  "summary": "v1.2 需求文档首轮独立验证：45 处 file:line 引用逐项核实，11 条发现（0 阻断、3 主要、8 次要），结论为有条件通过；全部发现已由后续修订轮次闭环，最终裁定为通过。"
+}

@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "report_id": "RPT-V1-2-REGISTRY-365YG-GATE-20260814T111601Z-001",
+  "recorded_at_utc": "2026-08-14T11:16:01Z",
+  "report_kind": "testing",
+  "author_role": "testing",
+  "independence": "independent",
+  "product_version": "v1.2.0",
+  "decision_scope": "archive_local",
+  "verdict": "accepted",
+  "requirements": ["REQ-047"],
+  "defects": [
+    {"defect_id": "DEF-LINK-005", "relationship": "accepted"},
+    {"defect_id": "DEF-LINK-006", "relationship": "accepted"}
+  ],
+  "evidence_refs": [
+    "reports/testing/20260814T111601Z-v1-2-registry-365yg-gate.md",
+    "reports/testing/20260813T072039Z-T-VID-005-real-platform-acceptance.md"
+  ],
+  "release_gates": [
+    {"gate_id": "GATE-REGISTRY-365YG", "status": "passed", "requirements": ["REQ-047"]},
+    {"gate_id": "GATE-RELEASE-READINESS", "status": "blocked", "requirements": ["REQ-046"]}
+  ],
+  "summary": "365yg.com 注册域登记的安全门禁独立审核：规范证据链、实现与测试核验通过；裁定有条件放行，放行条件（实测证据归档）已由 T-VID-005 附记满足，最终视为放行。"
+}

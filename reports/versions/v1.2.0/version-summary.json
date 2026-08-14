@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "report_id": "RPT-V1-2-0-SUMMARY-001",
+  "recorded_at_utc": "2026-08-14T16:40:00Z",
+  "report_kind": "version_summary",
+  "author_role": "release_management",
+  "independence": "not_applicable",
+  "product_version": "v1.2.0",
+  "decision_scope": "version_archive",
+  "verdict": "accepted",
+  "requirements": [],
+  "defects": [
+    {"defect_id": "DEF-ARCH-001", "relationship": "accepted"},
+    {"defect_id": "DEF-ARCH-002", "relationship": "accepted"},
+    {"defect_id": "DEF-ARCH-003", "relationship": "accepted"},
+    {"defect_id": "DEF-ARCH-004", "relationship": "accepted"},
+    {"defect_id": "DEF-ARCH-005", "relationship": "accepted"},
+    {"defect_id": "DEF-ARCH-006", "relationship": "accepted"},
+    {"defect_id": "DEF-ARCH-007", "relationship": "accepted"},
+    {"defect_id": "DEF-ARCH-008", "relationship": "accepted"},
+    {"defect_id": "DEF-ARCH-009", "relationship": "accepted"},
+    {"defect_id": "DEF-ARCH-010", "relationship": "accepted"},
+    {"defect_id": "DEF-ARCH-011", "relationship": "accepted"},
+    {"defect_id": "DEF-ARCH-012", "relationship": "accepted"},
+    {"defect_id": "DEF-LINK-001", "relationship": "accepted"},
+    {"defect_id": "DEF-LINK-002", "relationship": "accepted"},
+    {"defect_id": "DEF-LINK-003", "relationship": "accepted"},
+    {"defect_id": "DEF-LINK-004", "relationship": "accepted"},
+    {"defect_id": "DEF-LINK-005", "relationship": "accepted"},
+    {"defect_id": "DEF-LINK-006", "relationship": "accepted"},
+    {"defect_id": "DEF-LINK-007", "relationship": "accepted"},
+    {"defect_id": "DEF-YTDLP-TITLE-ENCODING", "relationship": "accepted"},
+    {"defect_id": "DEF-DOCLING-PAGE-LOCATOR-MISSING", "relationship": "accepted"},
+    {"defect_id": "DEF-CITATION-DETAIL-INCOMPLETE", "relationship": "accepted"},
+    {"defect_id": "DEF-INTEGRATION-TESTS-MISSING", "relationship": "accepted"}
+  ],
+  "evidence_refs": [
+    "reports/testing/20260814T163250Z-v1-2-archive-local-acceptance.md",
+    "reports/testing/20260813T072039Z-T-VID-005-real-platform-acceptance.md"
+  ],
+  "release_gates": [
+    {"gate_id": "GATE-PG-PHYSICAL", "status": "blocked", "requirements": ["REQ-045"]},
+    {"gate_id": "GATE-COMPOSE-PHYSICAL", "status": "blocked", "requirements": ["REQ-045"]},
+    {"gate_id": "GATE-BROWSER-BLACKBOX", "status": "blocked", "requirements": ["REQ-001", "REQ-044"]},
+    {"gate_id": "GATE-RELEASE-READINESS", "status": "blocked", "requirements": ["REQ-046"]}
+  ],
+  "snapshot_chain": [
+    {"run_id": "20260730T110828Z", "manifest_sha256": "7fd9cc5afd3576b959989c1a43abca4f75b5599d126fd8017ca56f55577b49da", "archive_local_verdict": "rejected", "acceptance_report": "reports/testing/20260730T120300Z-independent-archive-review-remediation.md", "acceptance_report_sha256": "8aedeb76690b822d4d8cf048d6f1ec36a57cb5c2dd23c68f53e1dc1dc1d158d2", "supersedes_run_id": null},
+    {"run_id": "20260730T121500Z-archive-remediated", "manifest_sha256": "f196d50e81518bd4ed4c8ac702095bd3794864af585e7cad27950b415ab6e708", "archive_local_verdict": "rejected", "acceptance_report": "reports/testing/20260730T123000Z-independent-successor-archive-rejection.md", "acceptance_report_sha256": "2280f136e1627e77eb27a91cc18964c3c699841a97dacae06ca87665803485f3", "supersedes_run_id": "20260730T110828Z"},
+    {"run_id": "20260730T135500Z-archive-contract-remediated", "manifest_sha256": "55e6cf2ebb9bf743e9830b64bca5402df5d4246478d98af0e36f4baf75d4424e", "archive_local_verdict": "rejected", "acceptance_report": "reports/testing/20260730T141000Z-independent-successor-archive-acceptance-rejection.md", "acceptance_report_sha256": "3000c6a8f692ef87b428ee801055252aafd1e6ce08a74aa2a49f1072bb1115b2", "supersedes_run_id": "20260730T121500Z-archive-remediated"},
+    {"run_id": "20260730T145000Z-replay-contract-remediated", "manifest_sha256": "1b03170cec6e9db53df1c8f1ad1a8966becc1f110bb45b61fa8edc3cca22cd8d", "archive_local_verdict": "accepted", "acceptance_report": "reports/testing/20260730T150000Z-independent-successor-archive-acceptance.md", "acceptance_report_sha256": "28569d2efad208a7c3dd26e8e4233ff61ae3e04b5600b9a17e7f63ccf944ef52", "supersedes_run_id": "20260730T135500Z-archive-contract-remediated"},
+    {"run_id": "20260730T231357Z-normalized-reports", "manifest_sha256": "b5bcdbd6cfad51dc9babd428571bc751f706f382df3cd9eb3ccb494ac03f9655", "archive_local_verdict": "rejected", "acceptance_report": "reports/testing/20260730T232000Z-independent-normalized-archive-acceptance-rejection.md", "acceptance_report_sha256": "1ff4b49369fee8b2c8b17e29e4ac66c007211ffd8ad01443c04ddbb337c1c9ce", "supersedes_run_id": "20260730T145000Z-replay-contract-remediated"},
+    {"run_id": "20260731T003731Z-normalized-reports-remediated", "manifest_sha256": "279aae29fed0eadb402c77a8faea30429afb43c376eb36cfd2fed87c7194b8bb", "archive_local_verdict": "rejected", "acceptance_report": "reports/testing/20260731T004200Z-independent-acl-candidate-acceptance-rejection.md", "acceptance_report_sha256": "760597f87650b1c015d63fa59bd71f0f89972c0187d2d05b15ce77c982dd1874", "supersedes_run_id": "20260730T231357Z-normalized-reports"},
+    {"run_id": "20260731T010513Z-acl-sealing-remediated", "manifest_sha256": "437146f5d6b8360b50c1e8db15697ed63766370b8dac5a7d5b05854b876c2784", "archive_local_verdict": "accepted", "acceptance_report": "reports/testing/20260731T011000Z-independent-acl-successor-acceptance.md", "acceptance_report_sha256": "d0c693dd4fdefecdec9eeb74c51629e8a00f48c66411a4a251521cf51170643f", "supersedes_run_id": "20260731T003731Z-normalized-reports-remediated"},
+    {"run_id": "20260731T011535Z-accepted-acl-successor", "manifest_sha256": "9c8fe2ca617e78e30c0aa63171b66d8ba9ce6f39d4b2ff7502463df5aed32bde", "archive_local_verdict": "accepted", "acceptance_report": "reports/testing/20260731T011700Z-independent-accepted-record-archive-acceptance.md", "acceptance_report_sha256": "0f6ac6dd5b2a49d9e9c6690f64154be99fc620d4a8618bbfc8aeb59ed35d4cf3", "supersedes_run_id": "20260731T010513Z-acl-sealing-remediated"},
+    {"run_id": "20260814T162733Z", "manifest_sha256": "4c3bf7815f6e168bcf98a74bf4122503b9c3b44defcc9f5106fe6a3bd380965a", "archive_local_verdict": "accepted", "acceptance_report": "reports/testing/20260814T163250Z-v1-2-archive-local-acceptance.md", "acceptance_report_sha256": "f998747a063a67c9d311eb35f328ecb6ffe2dcdaa7bab459ead4cde0cba54265", "supersedes_run_id": "20260731T011535Z-accepted-acl-successor"}
+  ],
+  "recommended_snapshot_run_id": "20260814T162733Z",
+  "summary": "v1.2.0 链接获取升级的版本归档汇总：候选链与冻结快照登记完全一致（9 项），推荐快照 20260814T162733Z 已通过独立 archive-local 验收。version_archive 范围裁定为 accepted；发布门禁保持 blocked，release_readiness 为 blocked。"
+}

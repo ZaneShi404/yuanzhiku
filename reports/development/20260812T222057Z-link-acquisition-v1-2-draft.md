@@ -106,7 +106,7 @@ class MediaDownloaderPort(Protocol):
 
 ### 6.2 新适配器 `YtDlpDownloader`（`backend/app/adapters/downloader.py` 新文件）
 
-- 子进程 `sys.executable -m yt_dlp`，`shell=False`、`stdin=DEVNULL`，stderr 不落日志。
+- 子进程 `sys.executable -m yt_dlp`，`shell=False`、`stdin=DEVNULL`，错误输出 不落日志。
 - 骨架参数：`--no-playlist --no-simulate --ignore-config --no-cache-dir --retries 1 --socket-timeout 30 --merge-output-format mp4 --remux-video mp4 -f "bv*[height<=1080]+ba/b" -o <staging>/video.%(ext)s <url>`；`cookie_source=file` 时追加 `--cookies <staging-copy>`，`cookie_source=browser` 时追加 `--cookies-from-browser <edge|chrome>`。
 - 断路器复用 `media.py` 现有 `_run` 模式：总超时、内存 RSS、staging 磁盘上限、输出静默期心跳；下载中检查输出文件大小，超过 2GB 立即终止并判失败。
 - 产物校验：复用 `LocalFfmpegMediaAnalyzer.probe` 验证容器/时长/尺寸，再 `store_stream` 写入 artifact（与上传路径同一入口）。

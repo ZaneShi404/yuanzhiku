@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "report_id": "RPT-LINK-ACQUISITION-DRAFT-20260812T222057Z-001",
+  "recorded_at_utc": "2026-08-12T22:20:57Z",
+  "report_kind": "development",
+  "author_role": "development",
+  "independence": "non_independent",
+  "product_version": "v1.2.0",
+  "decision_scope": "archive_local",
+  "verdict": "not_applicable",
+  "requirements": ["REQ-015", "REQ-030", "REQ-031", "REQ-043", "REQ-044", "REQ-047", "REQ-047a"],
+  "defects": [],
+  "evidence_refs": [
+    "reports/development/20260812T222057Z-link-acquisition-v1-2-draft.md",
+    "reports/testing/20260812T225424Z-v1-2-requirements-verification.md",
+    "reports/testing/20260812T230103Z-v1-2-requirements-review.md"
+  ],
+  "release_gates": [
+    {"gate_id": "GATE-RELEASE-READINESS", "status": "blocked", "requirements": ["REQ-046"]}
+  ],
+  "summary": "v1.2 链接获取需求草案：把 v1.1 的不可提交预留位升级为受限下载通道。记录 2026-08-13 六项人工拍板（双平台、Cookie 通道、yt-dlp 接入、交付物）与后续决策（隧道段例外、仅 cookies.txt、完整白名单机制、分辨率档位语义）。草案性质，不承载裁定。"
+}
