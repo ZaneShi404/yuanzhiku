@@ -1,0 +1,14 @@
+# Canonical line endings: archive registers freeze SHA-256 of stored content.
+# Windows checkouts must stay byte-identical to the repository (LF), otherwise
+# frozen report hashes in docs/v1-archive/*-register.json stop matching.
+* text=auto eol=lf
+
+# Never treat these as text.
+*.zip binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.exe binary
+*.db binary
+*.pyc binary
