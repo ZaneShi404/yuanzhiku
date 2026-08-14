@@ -22,9 +22,26 @@
 | 流式播放 | `Range: bytes=0-1023` → `206`，1024 字节 | `GET /videos/{id}/stream` |
 | 出站控制 | 全程经回环过滤代理；实测出站主机 ⊆ 注册域清单（b23.tv、www/api.bilibili.com、upos*.bilivideo.com） | 代理 CONNECT 记录 |
 
-### 抖音：待执行（pending，需 Cookie）
+### 抖音：通过（accepted，2026-08-14 补验）
 
-链接形态：v.douyin.com 分享短链。无 Cookie 直接探测失败（平台返回 "Fresh cookies (not necessarily logged in) are needed"——不需要登录账号，但需要浏览器访问过抖音产生的新鲜 Cookie）。按 REQ-047a 单通道，需用户导入 cookies.txt 后重跑验收。抖音链接原文（含签名参数）未写入本记录与任何仓库文件。
+链接形态：v.douyin.com 分享短链（原文含签名参数，未写入任何记录；provenance 登记脱敏形式）。前置条件：用户经 Chrome 扩展导出的 cookies.txt（仅 douyin.com 域，9.6KB）导入应用。
+
+| 验收点 | 结果 | 证据 |
+|---|---|---|
+| Cookie 导入 | `POST /settings/download-cookie` → `204`；`cookie_file_available=true` | capabilities |
+| 链接提交（use_cookie=true） | `201`，`video_download` 作业入队 | job `97112ff5…`（首轮因注册域缺失与竖屏档位语义失败，修复后重试成功） |
+| 下载 | succeeded；产物 mp4（hevc 720×1280 竖屏 + aac 音频） | artifact，probe 元数据 |
+| 平台标题回填 | 成功（与平台页面标题一致） | sources.title |
+| provenance | `platform=douyin`、`url_sanitized` 脱敏、`cookie_used=1`、yt-dlp 版本齐全 | `video_download_provenance` 行 |
+| 自动入队分析 | `video_analyze` succeeded | job `d03cd686…` |
+| 流式播放 | `Range: bytes=0-1023` → `206` | `GET /videos/{id}/stream` |
+| 出站控制 | 全程经回环代理；实测出站 ⊆ 注册域清单 | 代理 CONNECT 记录 |
+
+补验过程中按维护规则登记并修复的 3 项：
+
+1. **注册域登记 `365yg.com`（决策 11）**：实测抖音媒体 CDN 出站主机 `v95-aw-default.365yg.com` 未登记被代理 fail-closed 拒绝。证据：真实链接全量下载的出站抓取（回环代理 CONNECT 记录，含 v.douyin.com/www.iesdouyin.com/www.douyin.com/v95-aw-default.365yg.com），锁定版本 `yt-dlp==2026.7.4`。经独立审核门禁**有条件放行**（F-1 要求本附记归档实测证据——本表即该附记）。提交 `606823e`/`dc354a3`/`71636c4`。
+2. **分辨率档位语义修正（决策 12）**：竖屏 1080×1920 被"高度 ≤1080"后置校验误拒；修正为"短边 ≤1080 且长边 ≤1920"。实测本视频为 720×1280 竖屏（1080p 档位内）。提交 `d5f1baa`/`854be84`。
+3. Cookie 来源合规：用户显式导出、文件域纯净（仅 douyin.com）、大小 9.6KB < 1MB。
 
 ## 验收过程中发现并修复的真实缺陷（5 项，均为真实硬件环境才暴露）
 
@@ -37,12 +54,12 @@
 ## 冻结门禁状态更新
 
 - FFmpeg/ffprobe 物理可用验证：**已满足**（本次安装并实测启用）。
-- 注册域清单实测比对：**B站组已实证**（b23.tv、bilibili.com、api.bilibili.com、upos*.bilivideo.com 全部命中登记清单）；douyin 组待 Cookie 后比对。
-- 真实平台独立验收：B站完成；抖音待 cookies.txt。
+- 注册域清单实测比对：**B站组已实证**（b23.tv、bilibili.com、api.bilibili.com、upos*.bilivideo.com）；**douyin 组已实证**（v.douyin.com、www.iesdouyin.com、www.douyin.com、v95-aw-default.365yg.com——后者触发决策 11 登记）。
+- 真实平台独立验收：**B站与抖音均通过**（2026-08-14 抖音补验完成）。
 - release_readiness：保持 **blocked**（与 v1.1 政策一致；archive-local acceptance 不等于 release approval）。
 
 ## 遗留与后续
 
-- 抖音验收待用户提供 cookies.txt（浏览器扩展导出 douyin.com 域，或由编排代理经用户确认后从 Edge/Chrome 提取）。
-- 验收期间产生的失败测试数据已软删除（source `04d4a717…`，纯视频半成品）；成功条目保留于用户库中。
+- 抖音链接依赖用户 Cookie（反爬机制随平台变化，成功率不保证；失败如实登记）。
+- 验收期间产生的失败测试数据已软删除（source `04d4a717…`，纯视频半成品）；成功条目保留于用户库中（B站 1 条、抖音 1 条）。
 - 失败作业记录保留为审计轨迹，未删除。
