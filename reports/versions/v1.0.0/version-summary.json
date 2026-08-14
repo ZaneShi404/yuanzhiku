@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "report_id": "RPT-V1-0-0-SUMMARY-001",
-  "recorded_at_utc": "2026-07-30T22:40:07Z",
+  "recorded_at_utc": "2026-08-14T17:50:00Z",
   "report_kind": "version_summary",
   "author_role": "release_management",
   "independence": "not_applicable",
@@ -10,27 +10,82 @@
   "verdict": "accepted",
   "requirements": [],
   "defects": [
-    {"defect_id": "DEF-ARCH-001", "relationship": "accepted"},
-    {"defect_id": "DEF-ARCH-002", "relationship": "accepted"},
-    {"defect_id": "DEF-ARCH-003", "relationship": "accepted"},
-    {"defect_id": "DEF-ARCH-004", "relationship": "accepted"},
-    {"defect_id": "DEF-ARCH-005", "relationship": "accepted"},
-    {"defect_id": "DEF-ARCH-006", "relationship": "accepted"},
-    {"defect_id": "DEF-ARCH-007", "relationship": "accepted"},
-    {"defect_id": "DEF-ARCH-008", "relationship": "accepted"},
-    {"defect_id": "DEF-ARCH-009", "relationship": "accepted"},
-    {"defect_id": "DEF-ARCH-010", "relationship": "accepted"},
-    {"defect_id": "DEF-ARCH-011", "relationship": "accepted"},
-    {"defect_id": "DEF-ARCH-012", "relationship": "accepted"}
+    {
+      "defect_id": "DEF-ARCH-001",
+      "relationship": "accepted"
+    },
+    {
+      "defect_id": "DEF-ARCH-002",
+      "relationship": "accepted"
+    },
+    {
+      "defect_id": "DEF-ARCH-003",
+      "relationship": "accepted"
+    },
+    {
+      "defect_id": "DEF-ARCH-004",
+      "relationship": "accepted"
+    },
+    {
+      "defect_id": "DEF-ARCH-005",
+      "relationship": "accepted"
+    },
+    {
+      "defect_id": "DEF-ARCH-006",
+      "relationship": "accepted"
+    },
+    {
+      "defect_id": "DEF-ARCH-007",
+      "relationship": "accepted"
+    },
+    {
+      "defect_id": "DEF-ARCH-008",
+      "relationship": "accepted"
+    },
+    {
+      "defect_id": "DEF-ARCH-009",
+      "relationship": "accepted"
+    },
+    {
+      "defect_id": "DEF-ARCH-010",
+      "relationship": "accepted"
+    },
+    {
+      "defect_id": "DEF-ARCH-011",
+      "relationship": "accepted"
+    },
+    {
+      "defect_id": "DEF-ARCH-012",
+      "relationship": "accepted"
+    }
   ],
   "evidence_refs": [
     "reports/testing/20260730T150000Z-independent-successor-archive-acceptance.md",
     "reports/testing/20260730T232000Z-independent-normalized-archive-acceptance-rejection.md"
   ],
   "release_gates": [
-    {"gate_id": "GATE-PG-PHYSICAL", "status": "blocked", "requirements": ["REQ-045"]},
-    {"gate_id": "GATE-COMPOSE-PHYSICAL", "status": "blocked", "requirements": ["REQ-045"]},
-    {"gate_id": "GATE-BROWSER-BLACKBOX", "status": "blocked", "requirements": ["REQ-001", "REQ-044"]}
+    {
+      "gate_id": "GATE-PG-PHYSICAL",
+      "status": "blocked",
+      "requirements": [
+        "REQ-045"
+      ]
+    },
+    {
+      "gate_id": "GATE-COMPOSE-PHYSICAL",
+      "status": "blocked",
+      "requirements": [
+        "REQ-045"
+      ]
+    },
+    {
+      "gate_id": "GATE-BROWSER-BLACKBOX",
+      "status": "blocked",
+      "requirements": [
+        "REQ-001",
+        "REQ-044"
+      ]
+    }
   ],
   "recommended_snapshot_run_id": "20260731T011535Z-accepted-acl-successor",
   "snapshot_chain": [
@@ -97,6 +152,14 @@
       "acceptance_report": "reports/testing/20260731T011700Z-independent-accepted-record-archive-acceptance.md",
       "acceptance_report_sha256": "0f6ac6dd5b2a49d9e9c6690f64154be99fc620d4a8618bbfc8aeb59ed35d4cf3",
       "supersedes_run_id": "20260731T010513Z-acl-sealing-remediated"
+    },
+    {
+      "run_id": "20260814T162733Z",
+      "manifest_sha256": "4c3bf7815f6e168bcf98a74bf4122503b9c3b44defcc9f5106fe6a3bd380965a",
+      "archive_local_verdict": "accepted",
+      "acceptance_report": "reports/testing/20260814T163250Z-v1-2-archive-local-acceptance.md",
+      "acceptance_report_sha256": "f998747a063a67c9d311eb35f328ecb6ffe2dcdaa7bab459ead4cde0cba54265",
+      "supersedes_run_id": "20260731T011535Z-accepted-acl-successor"
     }
   ],
   "summary": "The recommended snapshot is accepted for archive-local audit only. Product release remains blocked by physical PostgreSQL, Docker Compose, and Edge/Chrome validation gates."
