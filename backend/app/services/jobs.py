@@ -437,8 +437,9 @@ class JobService:
 
     def _video_download(self, job: dict) -> None:
         """Restricted link download flow (REQ-047): payload 校验 → 工具可用性 →
-        per-job staging + Cookie 拷贝 → 回环过滤代理 → download → probe（含高度
-        ≤1080）→ 容量预检 → artifact → 同事务 source/version/provenance 与
+        per-job staging + Cookie 拷贝 → 回环过滤代理 → download → probe（含分辨率
+        档位 ≤1080p：短边 ≤1080 且长边 ≤1920，决策 12）→ 容量预检 → artifact →
+        同事务 source/version/provenance 与
         video_analyze 入队 → 审计；任何失败路径不残留半成品 source。
         """
         if self.downloader is None or self.videos is None or self.imports is None:
@@ -527,9 +528,13 @@ class JobService:
                 raise DownloadProcessingCancelled() from None
             except MediaInputInvalid as exc:
                 raise DownloadInputInvalid("product_invalid") from exc
-            if metadata.height is not None and metadata.height > 1080:
-                # 高度 ≤1080 后置断言：格式选择 + probe 双保险（REQ-047.9）。
-                raise DownloadInputInvalid("height")
+            if metadata.width is not None and metadata.height is not None and (
+                min(metadata.width, metadata.height) > 1080 or max(metadata.width, metadata.height) > 1920
+            ):
+                # 分辨率档位 ≤1080p 后置断言（决策 12）：短边 ≤1080 且长边 ≤1920，
+                # 竖屏 1080×1920 属 1080p 档位，2K/4K 拒绝——格式选择 + probe 双保险
+                # （REQ-047.9）。宽高任一为 None 时不判定：probe 已保证二者存在。
+                raise DownloadInputInvalid("resolution")
             self.artifacts.check_capacity(result.byte_size)
             capability = self.downloader.capability()
             url_sanitized = sanitize_download_url(url)

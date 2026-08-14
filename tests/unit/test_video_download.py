@@ -51,9 +51,16 @@ GENERIC_FAILURE_MESSAGE = "链接失效、平台拒绝或下载产物无效，�
 
 
 class FakeMediaAnalyzer:
-    """Unit analyzer fake：probe 高度可配置，供下载产物校验与 video_analyze 链使用。"""
+    """Unit analyzer fake：probe 分辨率/错误可配置，供下载产物校验与 video_analyze 链使用。"""
 
-    def __init__(self, height: int = 720, probe_error: str | None = None, probe_cancel: bool = False) -> None:
+    def __init__(
+        self,
+        width: int = 1280,
+        height: int = 720,
+        probe_error: str | None = None,
+        probe_cancel: bool = False,
+    ) -> None:
+        self.width = width
         self.height = height
         self.probe_error = probe_error
         self.probe_cancel = probe_cancel
@@ -73,7 +80,7 @@ class FakeMediaAnalyzer:
         heartbeat()
         if self.probe_error is not None:
             raise MediaInputInvalid(self.probe_error)
-        return VideoMetadata("mov,mp4,m4a,3gp,3g2,mj2", 10_000, 1280, self.height, "h264", "aac")
+        return VideoMetadata("mov,mp4,m4a,3gp,3g2,mj2", 10_000, self.width, self.height, "h264", "aac")
 
     def extract_frames(
         self, artifact_path: Path, metadata: VideoMetadata, workspace: Path, maximum_frames: int,
@@ -660,17 +667,11 @@ def test_download_job_blocked_when_ffmpeg_missing(client_and_services) -> None:
     assert services.repository.list_sources() == []
 
 
-# --- 用例 5：产物校验回滚 ---
+# --- 用例 5：产物校验回滚（含分辨率档位，决策 12） ---
 
-@pytest.mark.parametrize("scenario", ["invalid_probe", "height_too_high"])
-def test_product_validation_rejects_bad_products_without_artifact(
-    client_and_services, scenario: str,
-) -> None:
+def test_product_validation_rejects_invalid_probe_without_artifact(client_and_services) -> None:
     client, services, _ = client_and_services
-    if scenario == "invalid_probe":
-        services.videos.analyzer = FakeMediaAnalyzer(probe_error="invalid_metadata")
-    else:
-        services.videos.analyzer = FakeMediaAnalyzer(height=1081)
+    services.videos.analyzer = FakeMediaAnalyzer(probe_error="invalid_metadata")
     assert _submit_link(client, "https://www.bilibili.com/video/BV1test").status_code == 201
     failed = _claim_and_run(services)
     assert failed["state"] == "failed"
@@ -680,9 +681,36 @@ def test_product_validation_rejects_bad_products_without_artifact(
     assert not [path for path in artifact_root.rglob("*") if path.is_file()] if artifact_root.exists() else True
 
 
-def test_height_1080_boundary_is_accepted(client_and_services) -> None:
+@pytest.mark.parametrize(
+    ("width", "height"),
+    [(2560, 1440), (2160, 3840), (1080, 1921), (1280, 1081)],
+    ids=["2k", "4k", "portrait_over_long_edge", "landscape_over_short_edge"],
+)
+def test_resolution_tier_oversize_is_failed_without_artifact(
+    client_and_services, width: int, height: int,
+) -> None:
+    # 决策 12：分辨率档位 ≤1080p＝短边 ≤1080 且长边 ≤1920；2K/4K 与任一边越界
+    # → failed、通用脱敏消息、无 source 残留、不写 artifact。
     client, services, _ = client_and_services
-    services.videos.analyzer = FakeMediaAnalyzer(height=1080)
+    services.videos.analyzer = FakeMediaAnalyzer(width=width, height=height)
+    assert _submit_link(client, "https://www.bilibili.com/video/BV1test").status_code == 201
+    failed = _claim_and_run(services)
+    assert failed["state"] == "failed"
+    assert failed["message"] == GENERIC_FAILURE_MESSAGE
+    assert services.repository.list_sources() == []
+    artifact_root = services.paths.artifacts
+    assert not [path for path in artifact_root.rglob("*") if path.is_file()] if artifact_root.exists() else True
+
+
+@pytest.mark.parametrize(
+    ("width", "height"),
+    [(1920, 1080), (1080, 1920), (720, 1280)],
+    ids=["landscape_1080p", "portrait_1080p", "portrait_720p"],
+)
+def test_resolution_tier_1080p_accepted(client_and_services, width: int, height: int) -> None:
+    # 决策 12：横屏 1920×1080 与竖屏 1080×1920 均属 1080p 档位，合法放行。
+    client, services, _ = client_and_services
+    services.videos.analyzer = FakeMediaAnalyzer(width=width, height=height)
     assert _submit_link(client, "https://www.bilibili.com/video/BV1test").status_code == 201
     completed = _claim_and_run(services)
     assert completed["state"] == "succeeded"
