@@ -20,6 +20,9 @@
 | `20260731T011535Z-accepted-acl-successor` | `accepted` | `9c8fe2ca617e78e30c0aa63171b66d8ba9ce6f39d4b2ff7502463df5aed32bde` | `20260731T011700Z-independent-accepted-record-archive-acceptance` | 后继 `010513`；当前推荐，承载前一接受记录并通过独立 archive-local 验收 |
 | `20260814T162733Z` | `accepted` | `4c3bf7815f6e168bcf98a74bf4122503b9c3b44defcc9f5106fe6a3bd380965a` | `20260814T163250Z-v1-2-archive-local-acceptance` | 后继 `011535`；v1.2 候选（本版本汇总的推荐快照仍为 `011535`，v1.2 推荐见 `reports/versions/v1.2.0/`） |
 | `20260814T174651Z` | `accepted` | `f4d1454742553624ec848a20b8fd0c5a24aabfc8d97a3c3bc2968061c86bb21b` | `20260814T175203Z-v1-2-archive-final-record-acceptance` | 后继 `162733`；v1.2 最终后继（本版本汇总的推荐快照仍为 `011535`） |
+| `20260815T080921Z-v1-3-candidate` | `accepted` | `084a6c2ca26e184e806cc7c0f203bced823249f469577aa196b946d4f42a0169` | `20260815T081829Z-v1-3-archive-candidate-acceptance` | 后继 `174651`；v1.3 升级候选，通过独立 archive-local 验收与隔离副本重放 |
+| `20260815T082711Z-v1-3-final-record` | `accepted` | `b0a8d087bcbd07e4bddb1581d53db1c8675679e2cfab4ecbc40bf244edfd5412` | `20260815T101124Z-v1-3-archive-final-record-acceptance` | 后继 `080921`；v1.3 最终后继（本版本汇总的推荐快照仍为 `011535`） |
+| `20260815T121704Z-archive-tooling` | `accepted` | `372535a7b7ed902ac4d4306fb47110530f5474cee701cd5cdaff10e9f4c24fa9` | `20260815T121207Z-v1-3-archive-tooling-acceptance` | 后继 `082711`；归档流程工具化批次（non_independent 验收，不进入推荐位） |
 
 ## 已解决的归档复核项
 

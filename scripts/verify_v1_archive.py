@@ -31,6 +31,8 @@ REPORT_VERDICTS = frozenset({"accepted", "rejected", "blocked", "not_applicable"
 REPORT_GATE_STATUSES = frozenset({"passed", "blocked", "not_applicable"})
 REPORT_DEFECT_RELATIONSHIPS = frozenset({"discovered", "reproduced", "repaired", "retested", "accepted", "rejected", "noted"})
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+GIT_HEAD_PATTERN = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
+GIT_STATE_KEYS = frozenset({"head", "dirty", "dirty_entries"})
 SOURCE_RUN_ID_PATTERN = re.compile(r"^[0-9]{8}T[0-9]{6}Z?$")
 URL_USERINFO_PATTERN = re.compile(r"(?i)\b[a-z][a-z0-9+.-]*://[^\s/@]+@")
 WINDOWS_ABSOLUTE_PATH_PATTERN = re.compile(r"(?i)\b[a-z]:[\\/][^\s\"'<>|]*")
@@ -163,6 +165,22 @@ def _member_map(members: list[Member]) -> dict[str, Member]:
     return result
 
 
+def _validate_git_state(manifest: dict[str, object]) -> None:
+    git_state = manifest.get("git_state")
+    if git_state is None:
+        return
+    if not isinstance(git_state, dict) or set(git_state) != GIT_STATE_KEYS:
+        raise VerificationError("manifest git_state 形状无效")
+    head = git_state["head"]
+    if head is not None and (not isinstance(head, str) or not GIT_HEAD_PATTERN.fullmatch(head)):
+        raise VerificationError("manifest git_state 形状无效")
+    if not isinstance(git_state["dirty"], bool):
+        raise VerificationError("manifest git_state 形状无效")
+    dirty_entries = git_state["dirty_entries"]
+    if not isinstance(dirty_entries, list) or any(not isinstance(item, str) for item in dirty_entries):
+        raise VerificationError("manifest git_state 形状无效")
+
+
 def _validate_manifest(member_map: dict[str, Member]) -> dict[str, object]:
     if "manifest.json" not in member_map or "manifest.sha256" not in member_map:
         raise VerificationError("归档缺少 manifest")
@@ -191,6 +209,7 @@ def _validate_manifest(member_map: dict[str, Member]) -> dict[str, object]:
     entries = manifest.get("entries")
     if not isinstance(entries, list):
         raise VerificationError("manifest entries 无效")
+    _validate_git_state(manifest)
     return manifest
 
 

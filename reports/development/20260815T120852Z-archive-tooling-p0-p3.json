@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "report_id": "RPT-ARCHIVE-TOOLING-P0-P3-20260815T120852Z-001",
+  "recorded_at_utc": "2026-08-15T12:08:52Z",
+  "report_kind": "development",
+  "author_role": "development",
+  "independence": "non_independent",
+  "product_version": "v1.3.0",
+  "decision_scope": "archive_local",
+  "verdict": "accepted",
+  "requirements": [
+    "REQ-042",
+    "REQ-046"
+  ],
+  "defects": [
+    {
+      "defect_id": "DEF-INSTANCE-LOCK-APPEND-GROWTH",
+      "relationship": "repaired"
+    },
+    {
+      "defect_id": "DEF-BILIBILI-CDN-REGISTRY-GAP",
+      "relationship": "repaired"
+    },
+    {
+      "defect_id": "DEF-PROXY-RELAY-LIFETIME-CAP",
+      "relationship": "repaired"
+    }
+  ],
+  "evidence_refs": [
+    "reports/development/20260815T120852Z-archive-tooling-p0-p3.md",
+    "reports/development/20260815T031800Z-instance-lock-append-repair.md",
+    "reports/development/20260815T061108Z-bilibili-download-channel-repair.md"
+  ],
+  "release_gates": [
+    {
+      "gate_id": "GATE-UNIT-INTEGRATION-REGRESSION",
+      "status": "passed",
+      "requirements": [
+        "REQ-042",
+        "REQ-046"
+      ]
+    },
+    {
+      "gate_id": "GATE-FRONTEND-BUILD",
+      "status": "passed",
+      "requirements": []
+    },
+    {
+      "gate_id": "GATE-BROWSER-BLACKBOX",
+      "status": "blocked",
+      "requirements": []
+    },
+    {
+      "gate_id": "GATE-COMPOSE-PHYSICAL",
+      "status": "blocked",
+      "requirements": []
+    },
+    {
+      "gate_id": "GATE-RELEASE-READINESS",
+      "status": "blocked",
+      "requirements": []
+    }
+  ]
+}

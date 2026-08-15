@@ -126,6 +126,19 @@ def _refresh_manifest_member(archive: Path, relative: str) -> None:
     )
 
 
+def _rewrite_manifest(archive: Path, manifest: dict[str, object]) -> None:
+    _unseal_test_archive(archive)
+    manifest_path = archive / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    (archive / "manifest.sha256").write_text(
+        hashlib.sha256(manifest_path.read_bytes()).hexdigest() + "  manifest.json\n",
+        encoding="ascii",
+    )
+
+
 def _write_fixture_repository(
     root: Path,
     *,
@@ -283,6 +296,43 @@ def _write_fixture_repository(
     _write(root / "docs/v1-archive/predecessor-register.json", json.dumps({
         "schema_version": 1,
         "entries": [],
+    }))
+    _write(root / "docs/v1-archive/defect-ledger.json", json.dumps({
+        "schema_version": 1,
+        "defects": [
+            {
+                "defect_id": "DEF-PG-001",
+                "severity": "P1",
+                "summary": "真实 PostgreSQL 源库到独立空目标还原未物理验证",
+                "discovery": "reports/testing/legacy-rejected-acceptance.md",
+                "retest": "无；需要独立的物理 PostgreSQL 环境",
+                "disposition": "blocked",
+            },
+            {
+                "defect_id": "DEF-INSTANCE-LOCK-APPEND-GROWTH",
+                "severity": "P3",
+                "summary": "InstanceLock.acquire 以追加模式打开锁文件且空文件判断恒真，每次获取追加 1 字节",
+                "discovery": "reports/testing/legacy-rejected-acceptance.md",
+                "retest": "tests/unit/test_defect_fixes.py（test_instance_lock_acquisition_never_grows_lock_file）",
+                "disposition": "resolved_locally",
+            },
+            {
+                "defect_id": "DEF-BILIBILI-CDN-REGISTRY-GAP",
+                "severity": "P2",
+                "summary": "bilibili 注册域清单缺 bilivideo.cn（MCDN 流媒域），代理按策略拒连导致下载失败",
+                "discovery": "reports/testing/legacy-rejected-acceptance.md",
+                "retest": "tests/unit/test_video_download.py（test_bilibili_registry_includes_bilivideo_cn_media_cdn）",
+                "disposition": "resolved_locally",
+            },
+            {
+                "defect_id": "DEF-PROXY-RELAY-LIFETIME-CAP",
+                "severity": "P2",
+                "summary": "回环代理 _bidirectional_relay 的 join 固定超时导致活跃传输 ~60s 后被强拆",
+                "discovery": "reports/testing/legacy-rejected-acceptance.md",
+                "retest": "tests/unit/test_video_download.py（test_proxy_relay_has_no_absolute_lifetime_cap）",
+                "disposition": "resolved_locally",
+            },
+        ],
     }))
     _write(root / FIXTURE_RUNTIME_SOURCE, json.dumps(runtime_content or {"status": "passed", "path": "relative"}))
     _write(root / "scripts/verify_v1_archive.py", "placeholder\n")
@@ -1044,3 +1094,159 @@ def test_verifier_rejects_duplicate_zip_member_and_bad_manifest_hash(runtime_roo
             target.writestr(info.filename, b"bad hash\n" if info.filename == "manifest.sha256" else source.read(info))
     with pytest.raises(verify_v1_archive.VerificationError, match="自身哈希"):
         verify_v1_archive.verify_archive(bad_hash_zip)
+
+
+def test_builder_rejects_missing_or_invalid_defect_ledger(runtime_root: Path) -> None:
+    missing_repository = _write_fixture_repository(runtime_root / "ledger-missing")
+    (missing_repository / "docs/v1-archive/defect-ledger.json").unlink()
+    with pytest.raises(archive_v1.ArchiveError, match="缺陷台账不存在"):
+        _build_fixture_archive(missing_repository, "20260730T010234Z")
+
+    invalid_repository = _write_fixture_repository(runtime_root / "ledger-invalid")
+    _write(invalid_repository / "docs/v1-archive/defect-ledger.json", "{not-json\n")
+    with pytest.raises(archive_v1.ArchiveError, match="JSON 格式无效"):
+        _build_fixture_archive(invalid_repository, "20260730T010235Z")
+
+    shape_repository = _write_fixture_repository(runtime_root / "ledger-shape")
+    _write(shape_repository / "docs/v1-archive/defect-ledger.json", json.dumps({
+        "schema_version": 1,
+        "defects": [{"defect_id": "DEF-PG-001", "severity": "P1"}],
+    }))
+    with pytest.raises(archive_v1.ArchiveError, match="缺陷台账条目无效"):
+        _build_fixture_archive(shape_repository, "20260730T010236Z")
+
+
+def test_new_cycle_defects_are_ledgered_and_referenceable(runtime_root: Path) -> None:
+    new_defect_ids = (
+        "DEF-INSTANCE-LOCK-APPEND-GROWTH",
+        "DEF-BILIBILI-CDN-REGISTRY-GAP",
+        "DEF-PROXY-RELAY-LIFETIME-CAP",
+    )
+    repository = _write_fixture_repository(runtime_root / "repository")
+    summary_path = repository / "reports/versions/v1.0.0/version-summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary["defects"] = [
+        {"defect_id": defect_id, "relationship": "noted"} for defect_id in new_defect_ids
+    ]
+    summary_path.write_text(json.dumps(summary), encoding="utf-8")
+
+    archive, archive_zip = _build_fixture_archive(repository, "20260730T010237Z")
+
+    ledger = (archive / "index/defect-ledger.md").read_text(encoding="utf-8")
+    for defect_id in new_defect_ids:
+        assert defect_id in ledger
+    assert verify_v1_archive.verify_archive(archive)["status"] == "verified"
+    assert verify_v1_archive.verify_archive(archive_zip)["status"] == "verified"
+
+
+def test_real_defect_ledger_contains_migrated_and_current_cycle_entries() -> None:
+    project_root = Path(__file__).resolve().parents[2]
+    ledger = json.loads((project_root / "docs/v1-archive/defect-ledger.json").read_text(encoding="utf-8"))
+    assert ledger["schema_version"] == 1
+    by_id = {item["defect_id"]: item for item in ledger["defects"]}
+    assert len(by_id) == 44
+    assert by_id["DEF-PG-001"]["disposition"] == "blocked"
+    for defect_id in (
+        "DEF-INSTANCE-LOCK-APPEND-GROWTH",
+        "DEF-BILIBILI-CDN-REGISTRY-GAP",
+        "DEF-PROXY-RELAY-LIFETIME-CAP",
+    ):
+        assert by_id[defect_id]["disposition"] == "resolved_locally"
+        assert set(by_id[defect_id]) == {"defect_id", "severity", "summary", "discovery", "retest", "disposition"}
+
+
+def test_check_tree_passes_without_building_and_fails_on_missing_sidecar(runtime_root: Path) -> None:
+    repository = _write_fixture_repository(runtime_root / "check-pass")
+    summary = archive_v1.check_tree(repository)
+    assert summary["status"] == "passed"
+    assert summary["defects"] == 4
+    assert summary["reports"] == 3
+    assert not list((repository / "archives").glob("V1-current-audit-*"))
+
+    broken = _write_fixture_repository(runtime_root / "check-fail")
+    (broken / "reports/versions/v1.0.0/version-summary.json").unlink()
+    with pytest.raises(archive_v1.ArchiveError, match="缺少同名 JSON"):
+        archive_v1.check_tree(broken)
+    assert not list((broken / "archives").glob("V1-current-audit-*"))
+
+
+def test_check_tree_cli_exit_codes(runtime_root: Path) -> None:
+    environment = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+    compliant = _write_fixture_repository(runtime_root / "cli-pass")
+    shutil.copy(SCRIPTS / "archive_v1.py", compliant / "scripts/archive_v1.py")
+    passed = subprocess.run(
+        [sys.executable, "scripts/archive_v1.py", "--check-tree"],
+        cwd=compliant, capture_output=True, text=True, encoding="utf-8", env=environment, check=False,
+    )
+    assert passed.returncode == 0
+    assert json.loads(passed.stdout)["status"] == "passed"
+    assert not list((compliant / "archives").glob("V1-current-audit-*"))
+
+    broken = _write_fixture_repository(runtime_root / "cli-fail")
+    shutil.copy(SCRIPTS / "archive_v1.py", broken / "scripts/archive_v1.py")
+    (broken / "reports/versions/v1.0.0/version-summary.json").unlink()
+    failed = subprocess.run(
+        [sys.executable, "scripts/archive_v1.py", "--check-tree"],
+        cwd=broken, capture_output=True, text=True, encoding="utf-8", env=environment, check=False,
+    )
+    assert failed.returncode == 2
+    assert "工作树预检失败" in failed.stderr
+    assert not list((broken / "archives").glob("V1-current-audit-*"))
+
+
+def test_manifest_git_state_shape_validation(runtime_root: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    repository = _write_fixture_repository(runtime_root / "repository")
+    archive, _ = _build_mutable_fixture_archive(repository, "20260730T010238Z")
+
+    assert "警告" in capsys.readouterr().out
+    manifest = json.loads((archive / "manifest.json").read_text(encoding="utf-8"))
+    git_state = manifest["git_state"]
+    assert set(git_state) == {"head", "dirty", "dirty_entries"}
+    assert git_state["head"] is None or isinstance(git_state["head"], str)
+    assert isinstance(git_state["dirty"], bool)
+    assert all(isinstance(item, str) and "\\" not in item for item in git_state["dirty_entries"])
+
+    original = manifest["git_state"]
+    del manifest["git_state"]
+    _rewrite_manifest(archive, manifest)
+    assert verify_v1_archive.verify_archive(archive)["status"] == "verified"
+
+    for valid_git_state in (
+        {"head": "0" * 40, "dirty": False, "dirty_entries": []},
+        {"head": None, "dirty": True, "dirty_entries": ["docs/sample.md"]},
+        original,
+    ):
+        manifest["git_state"] = valid_git_state
+        _rewrite_manifest(archive, manifest)
+        assert verify_v1_archive.verify_archive(archive)["status"] == "verified"
+
+    for invalid_git_state in (
+        {"head": "0" * 40, "dirty": False},
+        {"head": "0" * 40, "dirty": False, "dirty_entries": [], "extra": True},
+        {"head": 40, "dirty": False, "dirty_entries": []},
+        {"head": "not-a-sha", "dirty": False, "dirty_entries": []},
+        {"head": None, "dirty": "yes", "dirty_entries": []},
+        {"head": None, "dirty": True, "dirty_entries": "docs/sample.md"},
+        {"head": None, "dirty": True, "dirty_entries": [0]},
+    ):
+        manifest["git_state"] = invalid_git_state
+        _rewrite_manifest(archive, manifest)
+        with pytest.raises(verify_v1_archive.VerificationError, match="git_state"):
+            verify_v1_archive.verify_archive(archive)
+
+
+SEALED_ARCHIVES_EXPECTED_TO_VERIFY = (
+    "V1-current-audit-20260730T135500Z-archive-contract-remediated",
+    "V1-current-audit-20260731T011535Z-accepted-acl-successor.zip",
+    "V1-current-audit-20260815T101415Z-v1-3-summary-check",
+)
+
+
+def test_verifier_accepts_existing_sealed_archives() -> None:
+    archives_root = Path(__file__).resolve().parents[2] / "archives"
+    if not all((archives_root / name).exists() for name in SEALED_ARCHIVES_EXPECTED_TO_VERIFY):
+        pytest.skip("封存档案不在当前工作树（隔离副本重放场景）")
+    for name in SEALED_ARCHIVES_EXPECTED_TO_VERIFY:
+        archive = archives_root / name
+        assert archive.exists(), name
+        assert verify_v1_archive.verify_archive(archive)["status"] == "verified", name

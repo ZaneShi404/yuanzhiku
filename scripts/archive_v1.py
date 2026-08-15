@@ -83,6 +83,9 @@ SOURCE_DIRECTORIES = (
 )
 ALLOWED_SUFFIXES = frozenset({".py", ".ps1", ".md", ".json", ".sql", ".ts", ".tsx", ".css", ".yml", ".yaml", ".ini", ".lock"})
 PREDECESSOR_REGISTER_PATH = "docs/v1-archive/predecessor-register.json"
+DEFECT_LEDGER_PATH = "docs/v1-archive/defect-ledger.json"
+DEFECT_LEDGER_KEYS = ("defect_id", "severity", "summary", "discovery", "retest", "disposition")
+DEFECT_ID_PATTERN = re.compile(r"^DEF-[A-Z0-9][A-Z0-9-]*$")
 REPORT_DEFECTS = {
     "reports/testing/20260728T225152Z-independent-test-report.md": [
         "DEF-ING-001", "DEF-BACK-001", "DEF-LOC-001", "DEF-REIMPORT-001", "DEF-LIFE-001", "DEF-JOB-001", "DEF-SEC-001", "DEF-JOB-002", "DEF-META-001", "DEF-SEARCH-001", "DEF-PORT-001",
@@ -411,6 +414,33 @@ def _git_provenance(repository_root: Path) -> str:
             output = "\n".join(line.replace(str(repository_root), "<repo>") for line in output.splitlines()) or "clean"
         lines.extend((f"## {label}", "```text", output, "```", ""))
     return "\n".join(lines)
+
+
+def _git_state(repository_root: Path) -> dict[str, Any]:
+    """Record commit head and dirty worktree entries; degrade to dirty when git is unavailable."""
+    unavailable = {"dirty": True, "dirty_entries": [], "head": None}
+    try:
+        head_result = subprocess.run(
+            ["git", "-C", str(repository_root), "rev-parse", "HEAD"],
+            cwd=repository_root, capture_output=True, encoding="utf-8", errors="replace", check=False,
+        )
+        status_result = subprocess.run(
+            ["git", "-c", "core.quotePath=false", "-C", str(repository_root), "status", "--porcelain"],
+            cwd=repository_root, capture_output=True, encoding="utf-8", errors="replace", check=False,
+        )
+    except OSError:
+        return unavailable
+    if head_result.returncode != 0 or status_result.returncode != 0:
+        return unavailable
+    head = head_result.stdout.strip() or None
+    dirty_entries: list[str] = []
+    for line in status_result.stdout.splitlines():
+        if len(line) < 4:
+            continue
+        entry = line[3:].split(" -> ")[-1].strip().strip('"')
+        if entry:
+            dirty_entries.append(entry)
+    return {"dirty": bool(dirty_entries), "dirty_entries": sorted(dirty_entries), "head": head}
 
 
 def _requirements_from_text(value: str) -> list[str]:
@@ -891,7 +921,36 @@ def _build_report_register(
     return sorted(entries, key=lambda item: item["markdown"]["source_path"])
 
 
-def _write_process_indexes(archive_root: Path, repository_root: Path, records: list[SourceRecord], allowlist: list[dict[str, Any]]) -> None:
+def _load_defect_ledger(repository_root: Path) -> list[tuple[str, str, str, str, str, str]]:
+    ledger_path = repository_root / DEFECT_LEDGER_PATH
+    if not ledger_path.is_file():
+        raise ArchiveError("缺陷台账不存在")
+    payload = _safe_json(ledger_path)
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != {"schema_version", "defects"}
+        or payload.get("schema_version") != 1
+        or not isinstance(payload.get("defects"), list)
+        or not payload["defects"]
+    ):
+        raise ArchiveError("缺陷台账格式无效")
+    defects: list[tuple[str, str, str, str, str, str]] = []
+    seen_ids: set[str] = set()
+    for item in payload["defects"]:
+        if not isinstance(item, dict) or set(item) != set(DEFECT_LEDGER_KEYS):
+            raise ArchiveError("缺陷台账条目无效")
+        values = tuple(str(item[key]) for key in DEFECT_LEDGER_KEYS)
+        if any(not isinstance(item[key], str) or not item[key].strip() for key in DEFECT_LEDGER_KEYS):
+            raise ArchiveError("缺陷台账条目无效")
+        defect_id = values[0]
+        if not DEFECT_ID_PATTERN.fullmatch(defect_id) or defect_id in seen_ids:
+            raise ArchiveError("缺陷台账标识无效或重复")
+        seen_ids.add(defect_id)
+        defects.append(values)
+    return defects
+
+
+def _write_process_indexes(archive_root: Path, repository_root: Path, records: list[SourceRecord], allowlist: list[dict[str, Any]]) -> list[dict[str, Any]]:
     report_records = sorted((record for record in records if record.source_path.startswith("reports/") and record.source_path.endswith(".md")), key=lambda record: record.source_path)
     timeline_lines = [
         "# V1 过程时间线", "", "本索引只链接可审计的工作树文件；未落盘的对话或临时操作不被虚构为完整过程记录。", "",
@@ -912,49 +971,7 @@ def _write_process_indexes(archive_root: Path, repository_root: Path, records: l
         register.append({"archive_path": item["archive_path"], "category": item["category"], "defects": item["defects"], "purpose": item["purpose"], "requirements": item["requirements"], "source_path": item["source"], "source_run_id": item["source_run_id"], "tier": item["tier"]})
     _write_json(archive_root / "index/evidence-register.json", {"schema_version": 1, "entries": register})
 
-    defects = [
-        ("DEF-ING-001", "P1", "导入失败留下无引用 artifact", "reports/testing/20260728T225152Z-independent-test-report.md", "reports/development/20260728T165623Z-defect-fix-report.md；reports/testing/20260728T172345Z-independent-retest-report.md", "resolved_locally"),
-        ("DEF-BACK-001", "P1", "同秒备份命名冲突可留下无归档的成功记录", "reports/testing/20260728T225152Z-independent-test-report.md", "reports/development/20260728T165623Z-defect-fix-report.md；reports/testing/20260728T172345Z-independent-retest-report.md", "resolved_locally"),
-        ("DEF-LOC-001", "P1", "多页或多段内容的 evidence locator 不精确", "reports/testing/20260728T225152Z-independent-test-report.md", "reports/development/20260728T165623Z-defect-fix-report.md；reports/testing/20260728T172345Z-independent-retest-report.md", "resolved_locally"),
-        ("DEF-REIMPORT-001", "P1", "再导入冲突可在写入 artifact 后返回 500", "reports/testing/20260728T225152Z-independent-test-report.md", "reports/development/20260728T165623Z-defect-fix-report.md；reports/testing/20260728T172345Z-independent-retest-report.md", "resolved_locally"),
-        ("DEF-LIFE-001", "P1", "共享 artifact 的软删除永久清理触发外键失败", "reports/testing/20260728T225152Z-independent-test-report.md", "reports/development/20260728T165623Z-defect-fix-report.md；reports/testing/20260728T172345Z-independent-retest-report.md", "resolved_locally"),
-        ("DEF-JOB-001", "P1", "解析安全断路器已配置但未在执行路径生效", "reports/testing/20260728T225152Z-independent-test-report.md", "reports/development/20260728T165623Z-defect-fix-report.md；reports/testing/20260728T172345Z-independent-retest-report.md", "resolved_locally_with_open_content_coverage"),
-        ("DEF-SEC-001", "P1", "外部 URL userinfo 可进入可移植导出", "reports/testing/20260728T225152Z-independent-test-report.md", "reports/development/20260728T165623Z-defect-fix-report.md；reports/testing/20260728T172345Z-independent-retest-report.md", "resolved_locally"),
-        ("DEF-JOB-002", "P2", "max_retry_attempts 未影响新作业", "reports/testing/20260728T225152Z-independent-test-report.md", "reports/development/20260728T165623Z-defect-fix-report.md；reports/testing/20260728T172345Z-independent-retest-report.md", "resolved_locally"),
-        ("DEF-PG-ROUTING-001", "P2", "PostgreSQL URL 曾静默选择 SQLite", "reports/testing/20260728T172345Z-independent-retest-report.md", "reports/development/20260728T173841Z-postgresql-url-selection-repair.md；reports/testing/20260728T181807Z-database-frontend-independent-retest.md", "resolved_locally"),
-        ("DEF-PG-001", "P1", "真实 PostgreSQL 源库到独立空目标还原未物理验证", "reports/testing/20260729T164836Z-independent-port-lifecycle-retest.md", "无；需要独立的物理 PostgreSQL 环境", "blocked"),
-        ("DEF-PG-CATALOG-001", "P1", "PostgreSQL 完整备份曾遗漏 backup catalog", "reports/testing/20260729-1127-postgres-regression-check.md", "reports/development/20260729-041016-postgres-backup-catalog-repair.md；后续 PostgreSQL backup retest", "resolved_in_simulated_coverage"),
-        ("DEF-EXPORT-001", "P1", "SQLite 可移植导出曾保留 backups catalog", "reports/testing/20260729T050712Z-independent-pg-backup-retest.md", "reports/development/20260729T053724Z-pg-backup-catalog-portable-export-repair.md；reports/testing/20260729T061118Z-independent-backup-export-retest.md", "resolved_locally"),
-        ("DEF-BACK-WIN-001", "P1", "Windows 不安全 backup archive name 可在目标变更前被接受", "reports/testing/20260729T061118Z-independent-backup-export-retest.md", "reports/development/20260729T062534Z-backup-export-repair.md；reports/testing/20260729T070015Z-independent-windows-backup-retest.md", "resolved_locally"),
-        ("DEF-BACK-002", "P2", "Windows 长路径下 portable reimport 的临时 staging 路径曾超出兼容边界", "reports/testing/20260729T061118Z-independent-backup-export-retest.md", "reports/development/20260729T062534Z-backup-export-repair.md；reports/testing/20260729T070015Z-independent-windows-backup-retest.md", "resolved_locally"),
-        ("DEF-REIMPORT-WIN-001", "P2", "长 Windows 数据根下 portable reimport 失败", "reports/testing/20260729T061118Z-independent-backup-export-retest.md", "reports/development/20260729T062534Z-backup-export-repair.md；reports/testing/20260729T070015Z-independent-windows-backup-retest.md", "resolved_locally"),
-        ("DEF-ARCH-001", "P1", "归档 T1 PID 语义键未完整脱敏", "reports/testing/20260730T120300Z-independent-archive-review-remediation.md", "scripts/archive_v1.py；scripts/verify_v1_archive.py；tests/unit/test_v1_archive.py", "resolved_in_successor_snapshot"),
-        ("DEF-ARCH-002", "P2", "归档 T1 保留嵌套运行输出和 traceback", "reports/testing/20260730T120300Z-independent-archive-review-remediation.md", "scripts/archive_v1.py；scripts/verify_v1_archive.py；tests/unit/test_v1_archive.py", "resolved_in_successor_snapshot"),
-        ("DEF-ARCH-003", "P2", "证据登记引用的缺陷 ID 未被账本覆盖", "reports/testing/20260730T120300Z-independent-archive-review-remediation.md", "scripts/archive_v1.py；scripts/verify_v1_archive.py；tests/unit/test_v1_archive.py", "resolved_in_successor_snapshot"),
-        ("DEF-ARCH-004", "P2", "归档基线测试与 URL userinfo 敏感规则不一致", "reports/testing/20260730T120300Z-independent-archive-review-remediation.md", "tests/unit/test_v1_archive.py；后继档案基线；待独立复核", "implemented_pending_independent_acceptance"),
-        ("DEF-ARCH-005", "P1", "T1 来源运行标识缺失且无法在三方记录间交叉验证", "reports/testing/20260730T123000Z-independent-successor-archive-rejection.md", "docs/v1-archive/evidence-allowlist.json；scripts/archive_v1.py；scripts/verify_v1_archive.py；tests/unit/test_v1_archive.py；待独立复核", "implemented_pending_independent_acceptance"),
-        ("DEF-ARCH-006", "P2", "T0 文本脱敏改变归档测试的合成 userinfo 语义", "reports/testing/20260730T123000Z-independent-successor-archive-rejection.md", "tests/unit/test_v1_archive.py；后继档案基线；待独立复核", "implemented_pending_independent_acceptance"),
-        ("DEF-ARCH-007", "P1", "T1 JSON 凭据式键可绕过文本敏感规则", "reports/testing/20260730T131500Z-independent-archive-contract-review.md", "scripts/archive_v1.py；scripts/verify_v1_archive.py；tests/unit/test_v1_archive.py；待独立复核", "implemented_pending_independent_acceptance"),
-        ("DEF-ARCH-008", "P1", "并发归档构建可能覆盖或删除同名封存目标", "reports/testing/20260730T131500Z-independent-archive-contract-review.md", "scripts/archive_v1.py；tests/unit/test_v1_archive.py；待独立复核", "implemented_pending_independent_acceptance"),
-        ("DEF-ARCH-009", "P2", "固定前序 run ID 列表不能持续选择最新拒绝快照", "reports/testing/20260730T131500Z-independent-archive-contract-review.md", "docs/v1-archive/predecessor-register.json；scripts/archive_v1.py；scripts/verify_v1_archive.py；tests/unit/test_v1_archive.py；待独立复核", "implemented_pending_independent_acceptance"),
-        ("DEF-ARCH-010", "P1", "归档副本回归缺少既有项目虚拟环境的明确复现契约", "reports/testing/20260730T141000Z-independent-successor-archive-acceptance-rejection.md", "docs/v1-archive/archive-policy.md；archives/README.md；tests/unit/test_v1_archive.py；待独立复核", "implemented_pending_independent_acceptance"),
-        ("DEF-ARCH-011", "P1", "已发布目录可被写入未受 manifest 管理的缓存成员", "reports/testing/20260730T232000Z-independent-normalized-archive-acceptance-rejection.md", "scripts/archive_v1.py；scripts/verify_v1_archive.py；tests/unit/test_v1_archive.py；待独立复核", "implemented_pending_independent_acceptance"),
-        ("DEF-ARCH-012", "P2", "版本汇总未绑定完整的冻结候选链", "reports/testing/20260730T232000Z-independent-normalized-archive-acceptance-rejection.md", "docs/v1-archive/snapshot-register.json；scripts/archive_v1.py；scripts/verify_v1_archive.py；tests/unit/test_v1_archive.py；待独立复核", "implemented_pending_independent_acceptance"),
-        ("DEF-META-001", "P2", "元数据修订历史缺失", "reports/testing/20260728T225152Z-independent-test-report.md", "reports/development/20260728T165623Z-defect-fix-report.md；reports/testing/20260728T172345Z-independent-retest-report.md", "resolved_locally"),
-        ("DEF-SEARCH-001", "P2", "搜索未暴露要求的排序选择", "reports/testing/20260728T225152Z-independent-test-report.md", "reports/development/20260728T165623Z-defect-fix-report.md；reports/testing/20260728T172345Z-independent-retest-report.md", "resolved_locally"),
-        ("DEF-PORT-001", "P3", "服务曾直接依赖具体 adapter，削弱可替换边界", "reports/testing/20260728T225152Z-independent-test-report.md", "reports/development/20260728T-postgres-repository-repair.md；缺少独立架构复审", "partially_resolved_not_independently_reaudited"),
-        ("DEF-LINK-001", "P1", "下载器子进程无法发现 FFmpeg，音视频合并静默降级为纯视频", "reports/testing/20260813T072039Z-T-VID-005-real-platform-acceptance.md", "reports/testing/20260813T005512Z-v1-2-implementation-review.md；reports/testing/20260813T010642Z-v1-2-implementation-verification.md", "resolved_locally"),
-        ("DEF-LINK-002", "P1", "回环代理 CONNECT 请求头未排空污染 TLS 隧道", "reports/testing/20260813T072039Z-T-VID-005-real-platform-acceptance.md", "reports/testing/20260813T005512Z-v1-2-implementation-review.md；reports/testing/20260813T010642Z-v1-2-implementation-verification.md", "resolved_locally"),
-        ("DEF-LINK-003", "P2", "抽帧滤镜表达式逗号未转义（v1.1 潜伏）", "reports/testing/20260813T072039Z-T-VID-005-real-platform-acceptance.md", "reports/testing/20260813T005512Z-v1-2-implementation-review.md；reports/testing/20260813T010642Z-v1-2-implementation-verification.md", "resolved_locally"),
-        ("DEF-LINK-004", "P2", "内存监测进程退出竞态使分析作业泛化失败", "reports/testing/20260813T072039Z-T-VID-005-real-platform-acceptance.md", "reports/testing/20260813T005512Z-v1-2-implementation-review.md；reports/testing/20260813T010642Z-v1-2-implementation-verification.md", "resolved_locally"),
-        ("DEF-LINK-005", "P2", "fake-IP 网络环境隧道段被代理保留段拒绝阻断下载", "reports/testing/20260813T072039Z-T-VID-005-real-platform-acceptance.md", "reports/testing/20260813T005512Z-v1-2-implementation-review.md；reports/testing/20260814T111601Z-v1-2-registry-365yg-gate.md", "resolved_locally"),
-        ("DEF-LINK-006", "P2", "抖音媒体 CDN 域 365yg.com 未登记导致下载被代理拒绝", "reports/testing/20260813T072039Z-T-VID-005-real-platform-acceptance.md", "reports/testing/20260814T111601Z-v1-2-registry-365yg-gate.md", "resolved_locally"),
-        ("DEF-LINK-007", "P2", "竖屏 1080×1920 被\"高度 ≤1080\"后置校验误拒", "reports/testing/20260813T072039Z-T-VID-005-real-platform-acceptance.md", "reports/testing/20260813T005512Z-v1-2-implementation-review.md；reports/testing/20260813T010642Z-v1-2-implementation-verification.md", "resolved_locally"),
-        ("DEF-YTDLP-TITLE-ENCODING", "P2", "下载器子进程标题输出在中文区域 Windows 下按 GBK 编码而按 UTF-8 解码", "reports/development/20260814T153252Z-requirements-gap-remediation.md", "reports/development/20260814T153252Z-requirements-gap-remediation.md；tests/unit/test_video_download.py", "resolved_locally"),
-        ("DEF-DOCLING-PAGE-LOCATOR-MISSING", "P2", "Docling 解析结果的页面定位信息缺失", "reports/development/20260814T153252Z-requirements-gap-remediation.md", "reports/development/20260814T153252Z-requirements-gap-remediation.md；tests/unit/test_docling_segments.py", "resolved_locally"),
-        ("DEF-CITATION-DETAIL-INCOMPLETE", "P2", "引用详情展示不完整", "reports/development/20260814T153252Z-requirements-gap-remediation.md", "reports/development/20260814T153252Z-requirements-gap-remediation.md", "resolved_locally"),
-        ("DEF-INTEGRATION-TESTS-MISSING", "P2", "本地全链路集成测试缺失", "reports/development/20260814T153252Z-requirements-gap-remediation.md", "reports/development/20260814T153252Z-requirements-gap-remediation.md；tests/integration/test_local_full_chain.py", "resolved_locally"),
-    ]
+    defects = _load_defect_ledger(repository_root)
     known_defects = {defect_id for defect_id, _, _, _, _, _ in defects}
     ledger_lines = ["# V1 缺陷账本", "", "每项保留发现、修复和复测线索。`resolved_locally` 仅表示已有代码和本地复测证据，不等同于发布批准。", "", "| ID | 初始等级 | 问题 | 发现报告 | 修复/复测报告 | 当前状态 |", "| --- | --- | --- | --- | --- | --- |"]
     for defect_id, severity, summary, discovery, retest, disposition in defects:
@@ -972,6 +989,7 @@ def _write_process_indexes(archive_root: Path, repository_root: Path, records: l
         "完整限制和证据边界见 [归档政策](../baseline/docs/v1-archive/archive-policy.md)。",
     ]
     _write_bytes(archive_root / "index/current-status.md", ("\n".join(status_lines) + "\n").encode("utf-8"))
+    return report_register
 
 
 def _load_validation(validation_path: Path | None, repository_root: Path) -> dict[str, Any]:
@@ -1065,7 +1083,7 @@ def _iter_archive_files(archive_root: Path) -> list[Path]:
     return sorted((path for path in archive_root.rglob("*") if path.is_file() and not path.is_symlink()), key=lambda path: _posix_relative(path, archive_root))
 
 
-def _write_manifest(archive_root: Path, run_id: str, validation: dict[str, Any]) -> None:
+def _write_manifest(archive_root: Path, run_id: str, validation: dict[str, Any], git_state: dict[str, Any]) -> None:
     entries = []
     for path in _iter_archive_files(archive_root):
         relative = _posix_relative(path, archive_root)
@@ -1079,6 +1097,7 @@ def _write_manifest(archive_root: Path, run_id: str, validation: dict[str, Any])
         "created_at_utc": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "entries": entries,
         "exclusions": ["data/", "tests/runtime/ except allowlisted synthetic JSON", "*.db", "*.sqlite", "*.zip", "artifacts/", "logs/", ".venv/", "frontend/node_modules/"],
+        "git_state": git_state,
         "integrity": {"archive_integrity": "verified"},
         "local_software_validation": validation["overall_status"],
         "release_readiness": "blocked",
@@ -1173,6 +1192,12 @@ def build_archive(repository_root: Path, output_root: Path, run_id: str, *, vali
     allowlist = _load_allowlist(repository_root)
     validation = _load_validation(validation_path, repository_root)
     git_provenance = _git_provenance(repository_root)
+    git_state = _git_state(repository_root)
+    if git_state["dirty"]:
+        if git_state["head"] is None:
+            print("警告：无法读取 Git 状态，归档 manifest 的 git_state 将按 dirty 记录。")
+        else:
+            print(f"警告：工作树存在 {len(git_state['dirty_entries'])} 项未提交变更，归档 manifest 的 git_state 将标记 dirty。")
     archive_root.parent.mkdir(parents=True, exist_ok=True)
     lock_path = _acquire_build_lock(archive_root.parent, run_id)
     staging_parent = Path(tempfile.mkdtemp(prefix="v1-archive-", dir=archive_root.parent))
@@ -1186,7 +1211,7 @@ def build_archive(repository_root: Path, output_root: Path, run_id: str, *, vali
         _write_json(staging / "provenance/predecessor.json", _load_predecessor(repository_root))
         _write_process_indexes(staging, repository_root, records, allowlist)
         _write_validation(staging, validation)
-        _write_manifest(staging, run_id, validation)
+        _write_manifest(staging, run_id, validation, git_state)
         _verify_with_independent_script(verifier_script, staging, repository_root)
         _publish_archive_without_overwrite(staging, archive_root)
         _seal_archive_directory(archive_root)
@@ -1200,17 +1225,53 @@ def build_archive(repository_root: Path, output_root: Path, run_id: str, *, vali
         lock_path.unlink(missing_ok=True)
 
 
+def check_tree(repository_root: Path) -> dict[str, Any]:
+    """Run every pre-build validation against the working tree without writing an archive."""
+    repository_root = repository_root.resolve()
+    allowlist = _load_allowlist(repository_root)
+    sources = _collect_t0_sources(repository_root)
+    defects = _load_defect_ledger(repository_root)
+    staging_parent = Path(tempfile.mkdtemp(prefix="v1-check-tree-"))
+    try:
+        staging = staging_parent / "working-tree"
+        staging.mkdir()
+        records = [_copy_baseline_source(source, repository_root, staging) for source in sources]
+        records.extend(_copy_t1_source(item, repository_root, staging) for item in allowlist)
+        report_register = _write_process_indexes(staging, repository_root, records, allowlist)
+    finally:
+        shutil.rmtree(staging_parent, ignore_errors=True)
+    return {
+        "baseline_files": len(records),
+        "defects": len(defects),
+        "evidence_entries": len(allowlist),
+        "reports": len(report_register),
+        "status": "passed",
+    }
+
+
 def _parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="构建本机 V1 当前可审计档案")
-    parser.add_argument("--output-root", required=True, type=Path, help="必须为仓库 archives 目录")
-    parser.add_argument("--run-id", required=True, help="UTC 运行标识，例如 20260730T010203Z")
+    parser.add_argument("--output-root", type=Path, help="必须为仓库 archives 目录")
+    parser.add_argument("--run-id", help="UTC 运行标识，例如 20260730T010203Z")
     parser.add_argument("--validation-json", type=Path, help="可选的脱敏本地验证记录")
+    parser.add_argument("--check-tree", action="store_true", help="仅执行构建前校验，不构建归档")
     return parser.parse_args()
 
 
 def main() -> int:
     arguments = _parse_arguments()
     repository_root = Path(__file__).resolve().parents[1]
+    if arguments.check_tree:
+        try:
+            summary = check_tree(repository_root)
+        except ArchiveError as error:
+            print(f"工作树预检失败：{error}", file=sys.stderr)
+            return 2
+        print(json.dumps(summary, ensure_ascii=False))
+        return 0
+    if arguments.output_root is None or arguments.run_id is None:
+        print("归档构建失败：缺少必需的 --output-root 或 --run-id", file=sys.stderr)
+        return 2
     output_root = arguments.output_root if arguments.output_root.is_absolute() else repository_root / arguments.output_root
     validation_path = arguments.validation_json
     if validation_path is not None and not validation_path.is_absolute():

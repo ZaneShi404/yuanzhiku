@@ -168,6 +168,30 @@
       "acceptance_report": "reports/testing/20260814T175203Z-v1-2-archive-final-record-acceptance.md",
       "acceptance_report_sha256": "3a920f6dc23a30aa56f170a8cdf00b1fb1a1e5cd3ef80d5763c184afd9fa7bb2",
       "supersedes_run_id": "20260814T162733Z"
+    },
+    {
+      "run_id": "20260815T080921Z-v1-3-candidate",
+      "manifest_sha256": "084a6c2ca26e184e806cc7c0f203bced823249f469577aa196b946d4f42a0169",
+      "archive_local_verdict": "accepted",
+      "acceptance_report": "reports/testing/20260815T081829Z-v1-3-archive-candidate-acceptance.md",
+      "acceptance_report_sha256": "b25e62954d060f8817e47ae651620851df0f248071ed9b39b9268e68e9944588",
+      "supersedes_run_id": "20260814T174651Z"
+    },
+    {
+      "run_id": "20260815T082711Z-v1-3-final-record",
+      "manifest_sha256": "b0a8d087bcbd07e4bddb1581d53db1c8675679e2cfab4ecbc40bf244edfd5412",
+      "archive_local_verdict": "accepted",
+      "acceptance_report": "reports/testing/20260815T101124Z-v1-3-archive-final-record-acceptance.md",
+      "acceptance_report_sha256": "8a52c00773ca533bf9c46cdccd4f8f3ed2bfb1a8f60603acc99dab83ac99484f",
+      "supersedes_run_id": "20260815T080921Z-v1-3-candidate"
+    },
+    {
+      "run_id": "20260815T121704Z-archive-tooling",
+      "manifest_sha256": "372535a7b7ed902ac4d4306fb47110530f5474cee701cd5cdaff10e9f4c24fa9",
+      "archive_local_verdict": "accepted",
+      "acceptance_report": "reports/testing/20260815T121207Z-v1-3-archive-tooling-acceptance.md",
+      "acceptance_report_sha256": "70bb458770957613eb538d2466ff283b12ed74a8f0b2e3a556fc096c68cd80d8",
+      "supersedes_run_id": "20260815T082711Z-v1-3-final-record"
     }
   ],
   "summary": "The recommended snapshot is accepted for archive-local audit only. Product release remains blocked by physical PostgreSQL, Docker Compose, and Edge/Chrome validation gates."

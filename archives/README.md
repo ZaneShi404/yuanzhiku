@@ -10,6 +10,8 @@ python scripts/archive_v1.py --output-root archives --run-id $runId
 python scripts/verify_v1_archive.py --archive archives/V1-current-audit-$runId
 ```
 
+辅助工具：`python scripts/archive_v1.py --check-tree` 只校验不构建（提交前预检）；`python scripts/new_report.py` 生成合规报告骨架（Markdown + JSON 侧车）；`python scripts/register_snapshot.py` 一步完成快照登记与版本汇总链镜像。
+
 构建器同时生成同名 `.zip`；验证器可接受档案目录或 ZIP 文件。详细边界、证据等级和当前封存口径见 `docs/v1-archive/archive-policy.md`。
 
 ## 封存副本回归

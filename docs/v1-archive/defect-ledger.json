@@ -1,0 +1,357 @@
+{
+  "schema_version": 1,
+  "defects": [
+    {
+      "defect_id": "DEF-ING-001",
+      "severity": "P1",
+      "summary": "导入失败留下无引用 artifact",
+      "discovery": "reports/testing/20260728T225152Z-independent-test-report.md",
+      "retest": "reports/development/20260728T165623Z-defect-fix-report.md；reports/testing/20260728T172345Z-independent-retest-report.md",
+      "disposition": "resolved_locally"
+    },
+    {
+      "defect_id": "DEF-BACK-001",
+      "severity": "P1",
+      "summary": "同秒备份命名冲突可留下无归档的成功记录",
+      "discovery": "reports/testing/20260728T225152Z-independent-test-report.md",
+      "retest": "reports/development/20260728T165623Z-defect-fix-report.md；reports/testing/20260728T172345Z-independent-retest-report.md",
+      "disposition": "resolved_locally"
+    },
+    {
+      "defect_id": "DEF-LOC-001",
+      "severity": "P1",
+      "summary": "多页或多段内容的 evidence locator 不精确",
+      "discovery": "reports/testing/20260728T225152Z-independent-test-report.md",
+      "retest": "reports/development/20260728T165623Z-defect-fix-report.md；reports/testing/20260728T172345Z-independent-retest-report.md",
+      "disposition": "resolved_locally"
+    },
+    {
+      "defect_id": "DEF-REIMPORT-001",
+      "severity": "P1",
+      "summary": "再导入冲突可在写入 artifact 后返回 500",
+      "discovery": "reports/testing/20260728T225152Z-independent-test-report.md",
+      "retest": "reports/development/20260728T165623Z-defect-fix-report.md；reports/testing/20260728T172345Z-independent-retest-report.md",
+      "disposition": "resolved_locally"
+    },
+    {
+      "defect_id": "DEF-LIFE-001",
+      "severity": "P1",
+      "summary": "共享 artifact 的软删除永久清理触发外键失败",
+      "discovery": "reports/testing/20260728T225152Z-independent-test-report.md",
+      "retest": "reports/development/20260728T165623Z-defect-fix-report.md；reports/testing/20260728T172345Z-independent-retest-report.md",
+      "disposition": "resolved_locally"
+    },
+    {
+      "defect_id": "DEF-JOB-001",
+      "severity": "P1",
+      "summary": "解析安全断路器已配置但未在执行路径生效",
+      "discovery": "reports/testing/20260728T225152Z-independent-test-report.md",
+      "retest": "reports/development/20260728T165623Z-defect-fix-report.md；reports/testing/20260728T172345Z-independent-retest-report.md",
+      "disposition": "resolved_locally_with_open_content_coverage"
+    },
+    {
+      "defect_id": "DEF-SEC-001",
+      "severity": "P1",
+      "summary": "外部 URL userinfo 可进入可移植导出",
+      "discovery": "reports/testing/20260728T225152Z-independent-test-report.md",
+      "retest": "reports/development/20260728T165623Z-defect-fix-report.md；reports/testing/20260728T172345Z-independent-retest-report.md",
+      "disposition": "resolved_locally"
+    },
+    {
+      "defect_id": "DEF-JOB-002",
+      "severity": "P2",
+      "summary": "max_retry_attempts 未影响新作业",
+      "discovery": "reports/testing/20260728T225152Z-independent-test-report.md",
+      "retest": "reports/development/20260728T165623Z-defect-fix-report.md；reports/testing/20260728T172345Z-independent-retest-report.md",
+      "disposition": "resolved_locally"
+    },
+    {
+      "defect_id": "DEF-PG-ROUTING-001",
+      "severity": "P2",
+      "summary": "PostgreSQL URL 曾静默选择 SQLite",
+      "discovery": "reports/testing/20260728T172345Z-independent-retest-report.md",
+      "retest": "reports/development/20260728T173841Z-postgresql-url-selection-repair.md；reports/testing/20260728T181807Z-database-frontend-independent-retest.md",
+      "disposition": "resolved_locally"
+    },
+    {
+      "defect_id": "DEF-PG-001",
+      "severity": "P1",
+      "summary": "真实 PostgreSQL 源库到独立空目标还原未物理验证",
+      "discovery": "reports/testing/20260729T164836Z-independent-port-lifecycle-retest.md",
+      "retest": "无；需要独立的物理 PostgreSQL 环境",
+      "disposition": "blocked"
+    },
+    {
+      "defect_id": "DEF-PG-CATALOG-001",
+      "severity": "P1",
+      "summary": "PostgreSQL 完整备份曾遗漏 backup catalog",
+      "discovery": "reports/testing/20260729-1127-postgres-regression-check.md",
+      "retest": "reports/development/20260729-041016-postgres-backup-catalog-repair.md；后续 PostgreSQL backup retest",
+      "disposition": "resolved_in_simulated_coverage"
+    },
+    {
+      "defect_id": "DEF-EXPORT-001",
+      "severity": "P1",
+      "summary": "SQLite 可移植导出曾保留 backups catalog",
+      "discovery": "reports/testing/20260729T050712Z-independent-pg-backup-retest.md",
+      "retest": "reports/development/20260729T053724Z-pg-backup-catalog-portable-export-repair.md；reports/testing/20260729T061118Z-independent-backup-export-retest.md",
+      "disposition": "resolved_locally"
+    },
+    {
+      "defect_id": "DEF-BACK-WIN-001",
+      "severity": "P1",
+      "summary": "Windows 不安全 backup archive name 可在目标变更前被接受",
+      "discovery": "reports/testing/20260729T061118Z-independent-backup-export-retest.md",
+      "retest": "reports/development/20260729T062534Z-backup-export-repair.md；reports/testing/20260729T070015Z-independent-windows-backup-retest.md",
+      "disposition": "resolved_locally"
+    },
+    {
+      "defect_id": "DEF-BACK-002",
+      "severity": "P2",
+      "summary": "Windows 长路径下 portable reimport 的临时 staging 路径曾超出兼容边界",
+      "discovery": "reports/testing/20260729T061118Z-independent-backup-export-retest.md",
+      "retest": "reports/development/20260729T062534Z-backup-export-repair.md；reports/testing/20260729T070015Z-independent-windows-backup-retest.md",
+      "disposition": "resolved_locally"
+    },
+    {
+      "defect_id": "DEF-REIMPORT-WIN-001",
+      "severity": "P2",
+      "summary": "长 Windows 数据根下 portable reimport 失败",
+      "discovery": "reports/testing/20260729T061118Z-independent-backup-export-retest.md",
+      "retest": "reports/development/20260729T062534Z-backup-export-repair.md；reports/testing/20260729T070015Z-independent-windows-backup-retest.md",
+      "disposition": "resolved_locally"
+    },
+    {
+      "defect_id": "DEF-ARCH-001",
+      "severity": "P1",
+      "summary": "归档 T1 PID 语义键未完整脱敏",
+      "discovery": "reports/testing/20260730T120300Z-independent-archive-review-remediation.md",
+      "retest": "scripts/archive_v1.py；scripts/verify_v1_archive.py；tests/unit/test_v1_archive.py",
+      "disposition": "resolved_in_successor_snapshot"
+    },
+    {
+      "defect_id": "DEF-ARCH-002",
+      "severity": "P2",
+      "summary": "归档 T1 保留嵌套运行输出和 traceback",
+      "discovery": "reports/testing/20260730T120300Z-independent-archive-review-remediation.md",
+      "retest": "scripts/archive_v1.py；scripts/verify_v1_archive.py；tests/unit/test_v1_archive.py",
+      "disposition": "resolved_in_successor_snapshot"
+    },
+    {
+      "defect_id": "DEF-ARCH-003",
+      "severity": "P2",
+      "summary": "证据登记引用的缺陷 ID 未被账本覆盖",
+      "discovery": "reports/testing/20260730T120300Z-independent-archive-review-remediation.md",
+      "retest": "scripts/archive_v1.py；scripts/verify_v1_archive.py；tests/unit/test_v1_archive.py",
+      "disposition": "resolved_in_successor_snapshot"
+    },
+    {
+      "defect_id": "DEF-ARCH-004",
+      "severity": "P2",
+      "summary": "归档基线测试与 URL userinfo 敏感规则不一致",
+      "discovery": "reports/testing/20260730T120300Z-independent-archive-review-remediation.md",
+      "retest": "tests/unit/test_v1_archive.py；后继档案基线；待独立复核",
+      "disposition": "implemented_pending_independent_acceptance"
+    },
+    {
+      "defect_id": "DEF-ARCH-005",
+      "severity": "P1",
+      "summary": "T1 来源运行标识缺失且无法在三方记录间交叉验证",
+      "discovery": "reports/testing/20260730T123000Z-independent-successor-archive-rejection.md",
+      "retest": "docs/v1-archive/evidence-allowlist.json；scripts/archive_v1.py；scripts/verify_v1_archive.py；tests/unit/test_v1_archive.py；待独立复核",
+      "disposition": "implemented_pending_independent_acceptance"
+    },
+    {
+      "defect_id": "DEF-ARCH-006",
+      "severity": "P2",
+      "summary": "T0 文本脱敏改变归档测试的合成 userinfo 语义",
+      "discovery": "reports/testing/20260730T123000Z-independent-successor-archive-rejection.md",
+      "retest": "tests/unit/test_v1_archive.py；后继档案基线；待独立复核",
+      "disposition": "implemented_pending_independent_acceptance"
+    },
+    {
+      "defect_id": "DEF-ARCH-007",
+      "severity": "P1",
+      "summary": "T1 JSON 凭据式键可绕过文本敏感规则",
+      "discovery": "reports/testing/20260730T131500Z-independent-archive-contract-review.md",
+      "retest": "scripts/archive_v1.py；scripts/verify_v1_archive.py；tests/unit/test_v1_archive.py；待独立复核",
+      "disposition": "implemented_pending_independent_acceptance"
+    },
+    {
+      "defect_id": "DEF-ARCH-008",
+      "severity": "P1",
+      "summary": "并发归档构建可能覆盖或删除同名封存目标",
+      "discovery": "reports/testing/20260730T131500Z-independent-archive-contract-review.md",
+      "retest": "scripts/archive_v1.py；tests/unit/test_v1_archive.py；待独立复核",
+      "disposition": "implemented_pending_independent_acceptance"
+    },
+    {
+      "defect_id": "DEF-ARCH-009",
+      "severity": "P2",
+      "summary": "固定前序 run ID 列表不能持续选择最新拒绝快照",
+      "discovery": "reports/testing/20260730T131500Z-independent-archive-contract-review.md",
+      "retest": "docs/v1-archive/predecessor-register.json；scripts/archive_v1.py；scripts/verify_v1_archive.py；tests/unit/test_v1_archive.py；待独立复核",
+      "disposition": "implemented_pending_independent_acceptance"
+    },
+    {
+      "defect_id": "DEF-ARCH-010",
+      "severity": "P1",
+      "summary": "归档副本回归缺少既有项目虚拟环境的明确复现契约",
+      "discovery": "reports/testing/20260730T141000Z-independent-successor-archive-acceptance-rejection.md",
+      "retest": "docs/v1-archive/archive-policy.md；archives/README.md；tests/unit/test_v1_archive.py；待独立复核",
+      "disposition": "implemented_pending_independent_acceptance"
+    },
+    {
+      "defect_id": "DEF-ARCH-011",
+      "severity": "P1",
+      "summary": "已发布目录可被写入未受 manifest 管理的缓存成员",
+      "discovery": "reports/testing/20260730T232000Z-independent-normalized-archive-acceptance-rejection.md",
+      "retest": "scripts/archive_v1.py；scripts/verify_v1_archive.py；tests/unit/test_v1_archive.py；待独立复核",
+      "disposition": "implemented_pending_independent_acceptance"
+    },
+    {
+      "defect_id": "DEF-ARCH-012",
+      "severity": "P2",
+      "summary": "版本汇总未绑定完整的冻结候选链",
+      "discovery": "reports/testing/20260730T232000Z-independent-normalized-archive-acceptance-rejection.md",
+      "retest": "docs/v1-archive/snapshot-register.json；scripts/archive_v1.py；scripts/verify_v1_archive.py；tests/unit/test_v1_archive.py；待独立复核",
+      "disposition": "implemented_pending_independent_acceptance"
+    },
+    {
+      "defect_id": "DEF-META-001",
+      "severity": "P2",
+      "summary": "元数据修订历史缺失",
+      "discovery": "reports/testing/20260728T225152Z-independent-test-report.md",
+      "retest": "reports/development/20260728T165623Z-defect-fix-report.md；reports/testing/20260728T172345Z-independent-retest-report.md",
+      "disposition": "resolved_locally"
+    },
+    {
+      "defect_id": "DEF-SEARCH-001",
+      "severity": "P2",
+      "summary": "搜索未暴露要求的排序选择",
+      "discovery": "reports/testing/20260728T225152Z-independent-test-report.md",
+      "retest": "reports/development/20260728T165623Z-defect-fix-report.md；reports/testing/20260728T172345Z-independent-retest-report.md",
+      "disposition": "resolved_locally"
+    },
+    {
+      "defect_id": "DEF-PORT-001",
+      "severity": "P3",
+      "summary": "服务曾直接依赖具体 adapter，削弱可替换边界",
+      "discovery": "reports/testing/20260728T225152Z-independent-test-report.md",
+      "retest": "reports/development/20260728T-postgres-repository-repair.md；缺少独立架构复审",
+      "disposition": "partially_resolved_not_independently_reaudited"
+    },
+    {
+      "defect_id": "DEF-LINK-001",
+      "severity": "P1",
+      "summary": "下载器子进程无法发现 FFmpeg，音视频合并静默降级为纯视频",
+      "discovery": "reports/testing/20260813T072039Z-T-VID-005-real-platform-acceptance.md",
+      "retest": "reports/testing/20260813T005512Z-v1-2-implementation-review.md；reports/testing/20260813T010642Z-v1-2-implementation-verification.md",
+      "disposition": "resolved_locally"
+    },
+    {
+      "defect_id": "DEF-LINK-002",
+      "severity": "P1",
+      "summary": "回环代理 CONNECT 请求头未排空污染 TLS 隧道",
+      "discovery": "reports/testing/20260813T072039Z-T-VID-005-real-platform-acceptance.md",
+      "retest": "reports/testing/20260813T005512Z-v1-2-implementation-review.md；reports/testing/20260813T010642Z-v1-2-implementation-verification.md",
+      "disposition": "resolved_locally"
+    },
+    {
+      "defect_id": "DEF-LINK-003",
+      "severity": "P2",
+      "summary": "抽帧滤镜表达式逗号未转义（v1.1 潜伏）",
+      "discovery": "reports/testing/20260813T072039Z-T-VID-005-real-platform-acceptance.md",
+      "retest": "reports/testing/20260813T005512Z-v1-2-implementation-review.md；reports/testing/20260813T010642Z-v1-2-implementation-verification.md",
+      "disposition": "resolved_locally"
+    },
+    {
+      "defect_id": "DEF-LINK-004",
+      "severity": "P2",
+      "summary": "内存监测进程退出竞态使分析作业泛化失败",
+      "discovery": "reports/testing/20260813T072039Z-T-VID-005-real-platform-acceptance.md",
+      "retest": "reports/testing/20260813T005512Z-v1-2-implementation-review.md；reports/testing/20260813T010642Z-v1-2-implementation-verification.md",
+      "disposition": "resolved_locally"
+    },
+    {
+      "defect_id": "DEF-LINK-005",
+      "severity": "P2",
+      "summary": "fake-IP 网络环境隧道段被代理保留段拒绝阻断下载",
+      "discovery": "reports/testing/20260813T072039Z-T-VID-005-real-platform-acceptance.md",
+      "retest": "reports/testing/20260813T005512Z-v1-2-implementation-review.md；reports/testing/20260814T111601Z-v1-2-registry-365yg-gate.md",
+      "disposition": "resolved_locally"
+    },
+    {
+      "defect_id": "DEF-LINK-006",
+      "severity": "P2",
+      "summary": "抖音媒体 CDN 域 365yg.com 未登记导致下载被代理拒绝",
+      "discovery": "reports/testing/20260813T072039Z-T-VID-005-real-platform-acceptance.md",
+      "retest": "reports/testing/20260814T111601Z-v1-2-registry-365yg-gate.md",
+      "disposition": "resolved_locally"
+    },
+    {
+      "defect_id": "DEF-LINK-007",
+      "severity": "P2",
+      "summary": "竖屏 1080×1920 被\"高度 ≤1080\"后置校验误拒",
+      "discovery": "reports/testing/20260813T072039Z-T-VID-005-real-platform-acceptance.md",
+      "retest": "reports/testing/20260813T005512Z-v1-2-implementation-review.md；reports/testing/20260813T010642Z-v1-2-implementation-verification.md",
+      "disposition": "resolved_locally"
+    },
+    {
+      "defect_id": "DEF-YTDLP-TITLE-ENCODING",
+      "severity": "P2",
+      "summary": "下载器子进程标题输出在中文区域 Windows 下按 GBK 编码而按 UTF-8 解码",
+      "discovery": "reports/development/20260814T153252Z-requirements-gap-remediation.md",
+      "retest": "reports/development/20260814T153252Z-requirements-gap-remediation.md；tests/unit/test_video_download.py",
+      "disposition": "resolved_locally"
+    },
+    {
+      "defect_id": "DEF-DOCLING-PAGE-LOCATOR-MISSING",
+      "severity": "P2",
+      "summary": "Docling 解析结果的页面定位信息缺失",
+      "discovery": "reports/development/20260814T153252Z-requirements-gap-remediation.md",
+      "retest": "reports/development/20260814T153252Z-requirements-gap-remediation.md；tests/unit/test_docling_segments.py",
+      "disposition": "resolved_locally"
+    },
+    {
+      "defect_id": "DEF-CITATION-DETAIL-INCOMPLETE",
+      "severity": "P2",
+      "summary": "引用详情展示不完整",
+      "discovery": "reports/development/20260814T153252Z-requirements-gap-remediation.md",
+      "retest": "reports/development/20260814T153252Z-requirements-gap-remediation.md",
+      "disposition": "resolved_locally"
+    },
+    {
+      "defect_id": "DEF-INTEGRATION-TESTS-MISSING",
+      "severity": "P2",
+      "summary": "本地全链路集成测试缺失",
+      "discovery": "reports/development/20260814T153252Z-requirements-gap-remediation.md",
+      "retest": "reports/development/20260814T153252Z-requirements-gap-remediation.md；tests/integration/test_local_full_chain.py",
+      "disposition": "resolved_locally"
+    },
+    {
+      "defect_id": "DEF-INSTANCE-LOCK-APPEND-GROWTH",
+      "severity": "P3",
+      "summary": "InstanceLock.acquire 以追加模式打开锁文件且空文件判断恒真，每次获取追加 1 字节",
+      "discovery": "reports/development/20260815T031800Z-instance-lock-append-repair.md",
+      "retest": "reports/development/20260815T031800Z-instance-lock-append-repair.md；tests/unit/test_defect_fixes.py（test_instance_lock_acquisition_never_grows_lock_file）",
+      "disposition": "resolved_locally"
+    },
+    {
+      "defect_id": "DEF-BILIBILI-CDN-REGISTRY-GAP",
+      "severity": "P2",
+      "summary": "bilibili 注册域清单缺 bilivideo.cn（MCDN 流媒域），代理按策略拒连导致下载失败",
+      "discovery": "reports/development/20260815T061108Z-bilibili-download-channel-repair.md",
+      "retest": "reports/development/20260815T061108Z-bilibili-download-channel-repair.md；tests/unit/test_video_download.py（test_bilibili_registry_includes_bilivideo_cn_media_cdn）；决策 13",
+      "disposition": "resolved_locally"
+    },
+    {
+      "defect_id": "DEF-PROXY-RELAY-LIFETIME-CAP",
+      "severity": "P2",
+      "summary": "回环代理 _bidirectional_relay 的 join 固定超时导致活跃传输 ~60s 后被强拆",
+      "discovery": "reports/development/20260815T061108Z-bilibili-download-channel-repair.md",
+      "retest": "reports/development/20260815T061108Z-bilibili-download-channel-repair.md；tests/unit/test_video_download.py（test_proxy_relay_has_no_absolute_lifetime_cap）",
+      "disposition": "resolved_locally"
+    }
+  ]
+}

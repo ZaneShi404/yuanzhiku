@@ -1,111 +1,24 @@
 {
   "schema_version": 1,
-  "report_id": "RPT-V1-2-0-SUMMARY-001",
-  "recorded_at_utc": "2026-08-14T17:56:00Z",
+  "report_id": "RPT-V1-3-0-SUMMARY-001",
+  "recorded_at_utc": "2026-08-15T10:11:24Z",
   "report_kind": "version_summary",
   "author_role": "release_management",
   "independence": "not_applicable",
-  "product_version": "v1.2.0",
+  "product_version": "v1.3.0",
   "decision_scope": "version_archive",
   "verdict": "accepted",
   "requirements": [],
-  "defects": [
-    {
-      "defect_id": "DEF-ARCH-001",
-      "relationship": "accepted"
-    },
-    {
-      "defect_id": "DEF-ARCH-002",
-      "relationship": "accepted"
-    },
-    {
-      "defect_id": "DEF-ARCH-003",
-      "relationship": "accepted"
-    },
-    {
-      "defect_id": "DEF-ARCH-004",
-      "relationship": "accepted"
-    },
-    {
-      "defect_id": "DEF-ARCH-005",
-      "relationship": "accepted"
-    },
-    {
-      "defect_id": "DEF-ARCH-006",
-      "relationship": "accepted"
-    },
-    {
-      "defect_id": "DEF-ARCH-007",
-      "relationship": "accepted"
-    },
-    {
-      "defect_id": "DEF-ARCH-008",
-      "relationship": "accepted"
-    },
-    {
-      "defect_id": "DEF-ARCH-009",
-      "relationship": "accepted"
-    },
-    {
-      "defect_id": "DEF-ARCH-010",
-      "relationship": "accepted"
-    },
-    {
-      "defect_id": "DEF-ARCH-011",
-      "relationship": "accepted"
-    },
-    {
-      "defect_id": "DEF-ARCH-012",
-      "relationship": "accepted"
-    },
-    {
-      "defect_id": "DEF-LINK-001",
-      "relationship": "accepted"
-    },
-    {
-      "defect_id": "DEF-LINK-002",
-      "relationship": "accepted"
-    },
-    {
-      "defect_id": "DEF-LINK-003",
-      "relationship": "accepted"
-    },
-    {
-      "defect_id": "DEF-LINK-004",
-      "relationship": "accepted"
-    },
-    {
-      "defect_id": "DEF-LINK-005",
-      "relationship": "accepted"
-    },
-    {
-      "defect_id": "DEF-LINK-006",
-      "relationship": "accepted"
-    },
-    {
-      "defect_id": "DEF-LINK-007",
-      "relationship": "accepted"
-    },
-    {
-      "defect_id": "DEF-YTDLP-TITLE-ENCODING",
-      "relationship": "accepted"
-    },
-    {
-      "defect_id": "DEF-DOCLING-PAGE-LOCATOR-MISSING",
-      "relationship": "accepted"
-    },
-    {
-      "defect_id": "DEF-CITATION-DETAIL-INCOMPLETE",
-      "relationship": "accepted"
-    },
-    {
-      "defect_id": "DEF-INTEGRATION-TESTS-MISSING",
-      "relationship": "accepted"
-    }
-  ],
+  "defects": [],
   "evidence_refs": [
-    "reports/testing/20260814T163250Z-v1-2-archive-local-acceptance.md",
-    "reports/testing/20260813T072039Z-T-VID-005-real-platform-acceptance.md"
+    "reports/testing/20260815T081829Z-v1-3-archive-candidate-acceptance.md",
+    "reports/testing/20260815T101124Z-v1-3-archive-final-record-acceptance.md",
+    "reports/development/20260815T031800Z-instance-lock-append-repair.md",
+    "reports/development/20260815T052125Z-import-prefill-and-image-import.md",
+    "reports/development/20260815T054454Z-unified-import-page.md",
+    "reports/development/20260815T061108Z-bilibili-download-channel-repair.md",
+    "reports/development/20260815T071523Z-per-platform-cookie-library.md",
+    "reports/development/20260815T073837Z-share-text-link-extraction.md"
   ],
   "release_gates": [
     {
@@ -244,6 +157,6 @@
       "supersedes_run_id": "20260815T082711Z-v1-3-final-record"
     }
   ],
-  "recommended_snapshot_run_id": "20260814T174651Z",
-  "summary": "v1.2.0 链接获取升级的版本归档汇总：候选链与冻结快照登记完全一致（9 项），推荐快照 20260814T162733Z 已通过独立 archive-local 验收。version_archive 范围裁定为 accepted；发布门禁保持 blocked，release_readiness 为 blocked。"
+  "recommended_snapshot_run_id": "20260815T082711Z-v1-3-final-record",
+  "summary": "v1.3.0 统一导入与本地化体验升级的版本归档汇总：候选链与冻结快照登记完全一致（12 项），推荐快照 20260815T082711Z-v1-3-final-record 已通过独立 archive-local 验收。version_archive 范围裁定为 accepted；发布门禁保持 blocked，release_readiness 为 blocked。"
 }
