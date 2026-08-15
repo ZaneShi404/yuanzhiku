@@ -15,7 +15,7 @@ from zipfile import ZipFile
 import pytest
 from fastapi.testclient import TestClient
 
-from app.core.config import choose_port, data_paths
+from app.core.config import InstanceLock, choose_port, data_paths
 from app.domain.models import PasteImportRequest
 from app.main import create_app
 from app.services.jobs import JobService, ParserCircuitBreaker
@@ -84,6 +84,18 @@ def test_port_preference_persists_explicit_selection_and_never_rewrites_busy_val
     with pytest.raises(RuntimeError, match="未修改保存的端口偏好"):
         choose_port(paths)
     assert json.loads(paths.port_file.read_text(encoding="utf-8")) == {"port": 18081}
+
+
+def test_instance_lock_acquisition_never_grows_lock_file(runtime_root: Path) -> None:
+    lock_path = runtime_root / "locks" / "instance.lock"
+    for _ in range(5):
+        lock = InstanceLock(lock_path)
+        lock.acquire()
+        try:
+            assert lock_path.stat().st_size == 1
+        finally:
+            lock.release()
+    assert lock_path.read_bytes() == b"0"
 
 
 def test_ingest_failure_compensates_only_new_artifact(runtime_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:

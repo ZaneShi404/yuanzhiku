@@ -28,6 +28,20 @@ class DataPaths:
         return self.state / "download"
 
     @property
+    def download_cookies(self) -> Path:
+        return self.download / "cookies"
+
+    def download_cookie_file(self, platform: str) -> Path:
+        """按平台 Cookie 库文件路径（REQ-047a 修订）；非法平台抛 ValueError。"""
+        # 延迟导入避免 core → adapters 的模块级依赖；合法平台集合与
+        # DOWNLOAD_REGISTRY 键保持单一事实源。
+        from app.adapters.downloader import DOWNLOAD_REGISTRY
+
+        if platform not in DOWNLOAD_REGISTRY:
+            raise ValueError("不支持的视频平台")
+        return self.download_cookies / f"{platform}.txt"
+
+    @property
     def artifacts(self) -> Path:
         return self.root / "artifacts"
 
@@ -68,7 +82,10 @@ class DataPaths:
         return self.state / "maintenance.lock"
 
     def create(self) -> None:
-        for path in (self.root, self.state, self.download, self.artifacts, self.staging, self.models, self.backups, self.exports, self.logs):
+        for path in (
+            self.root, self.state, self.download, self.download_cookies, self.artifacts,
+            self.staging, self.models, self.backups, self.exports, self.logs,
+        ):
             path.mkdir(parents=True, exist_ok=True)
 
 
@@ -210,11 +227,11 @@ class InstanceLock:
                 if os.name == "nt":
                     import msvcrt
 
-                    self.handle.seek(0)
+                    self.handle.seek(0, os.SEEK_END)
                     if self.handle.tell() == 0:
                         self.handle.write(b"0")
                         self.handle.flush()
-                        self.handle.seek(0)
+                    self.handle.seek(0)
                     msvcrt.locking(self.handle.fileno(), msvcrt.LK_NBLCK, 1)
                 else:
                     import fcntl

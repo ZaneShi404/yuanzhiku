@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "report_id": "RPT-INSTANCE-LOCK-APPEND-REPAIR-20260815T031800Z-001",
+  "recorded_at_utc": "2026-08-15T03:18:00Z",
+  "report_kind": "development",
+  "author_role": "development",
+  "independence": "non_independent",
+  "product_version": "v1.3.0",
+  "decision_scope": "archive_local",
+  "verdict": "accepted",
+  "requirements": ["REQ-002"],
+  "defects": [],
+  "evidence_refs": [
+    "reports/development/20260815T031800Z-instance-lock-append-repair.md"
+  ],
+  "release_gates": [
+    {"gate_id": "GATE-UNIT-INTEGRATION-REGRESSION", "status": "passed", "requirements": ["REQ-002"]},
+    {"gate_id": "GATE-FRONTEND-BUILD", "status": "not_applicable", "requirements": []},
+    {"gate_id": "GATE-BROWSER-BLACKBOX", "status": "blocked", "requirements": ["REQ-002"]},
+    {"gate_id": "GATE-COMPOSE-PHYSICAL", "status": "blocked", "requirements": ["REQ-045"]},
+    {"gate_id": "GATE-RELEASE-READINESS", "status": "blocked", "requirements": ["REQ-046"]}
+  ],
+  "summary": "Fixed InstanceLock.acquire appending one byte to instance.lock on every acquisition (empty-file guard measured position instead of size under append mode). Lock file now stays one byte; regression test pins the invariant. Full defect-fixes suite: 21 passed."
+}
