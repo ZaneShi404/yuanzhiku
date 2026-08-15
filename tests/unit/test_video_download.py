@@ -106,31 +106,34 @@ class FakeDownloader:
         self,
         *,
         enabled: bool = True,
-        cookie_file_path: Path | None = None,
+        cookie_resolver=None,
         outcome: str = "ok",
         product: bytes = b"downloaded-mp4-bytes",
         title: str = "",
     ) -> None:
         self.enabled = enabled
-        self.cookie_file_path = cookie_file_path
+        self.cookie_resolver = cookie_resolver
         self.outcome = outcome
         self.product = product
         self.title = title
         self.calls: list[dict] = []
 
     def capability(self) -> dict[str, object]:
-        available = False
-        if self.cookie_file_path is not None:
+        def available(platform: str) -> bool:
+            if self.cookie_resolver is None:
+                return False
             try:
-                available = self.cookie_file_path.is_file() and self.cookie_file_path.stat().st_size <= 1024 * 1024
-            except OSError:
-                available = False
+                path = self.cookie_resolver(platform)
+                return path.is_file() and path.stat().st_size <= 1024 * 1024
+            except (OSError, ValueError):
+                return False
+
         return {
             "enabled": self.enabled,
             "adapter": "yt-dlp",
             "version": "unit-1.0",
             "supported_platforms": ["bilibili", "douyin"],
-            "cookie_file_available": available,
+            "cookies": {platform: available(platform) for platform in ("bilibili", "douyin")},
             "network": True,
         }
 
@@ -171,7 +174,7 @@ def client_and_services(runtime_root: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("YUANZHIKU_EMBEDDED_WORKER", "false")
     app = create_app(runtime_root, acquire_lock=False)
     services = app.state.services
-    downloader = FakeDownloader(cookie_file_path=services.paths.download / "cookies.txt")
+    downloader = FakeDownloader(cookie_resolver=services.paths.download_cookie_file)
     services.downloader = downloader
     services.jobs.downloader = downloader
     services.videos.analyzer = FakeMediaAnalyzer()
@@ -258,41 +261,67 @@ def test_download_link_requires_rights_and_valid_categories(client_and_services)
     assert invalid_category.json()["detail"]["code"] == "request_validation"
 
 
-# --- 用例 2：Cookie 单通道治理 ---
+# --- 用例 2：按平台 Cookie 库治理 ---
 
 def test_cookie_upload_size_limit_overwrite_and_idempotent_delete(client_and_services) -> None:
     client, services, _ = client_and_services
     too_large = client.post(
-        "/api/v1/settings/download-cookie",
+        "/api/v1/settings/download-cookies/bilibili",
         files={"file": ("cookies.txt", b"x" * (1024 * 1024 + 1), "text/plain")},
     )
     assert too_large.status_code == 413
     assert too_large.json()["detail"]["code"] == "cookie_file_too_large"
-    assert not (services.paths.download / "cookies.txt").exists()
+    assert not services.paths.download_cookie_file("bilibili").exists()
 
     first = client.post(
-        "/api/v1/settings/download-cookie",
+        "/api/v1/settings/download-cookies/bilibili",
         files={"file": ("cookies.txt", b"# Netscape HTTP Cookie File\ncontent-one", "text/plain")},
     )
     assert first.status_code == 204
-    cookie_file = services.paths.download / "cookies.txt"
+    cookie_file = services.paths.download_cookie_file("bilibili")
     assert cookie_file.read_bytes() == b"# Netscape HTTP Cookie File\ncontent-one"
     capabilities = client.get("/api/v1/capabilities").json()
-    assert capabilities["downloader"]["cookie_file_available"] is True
+    assert capabilities["downloader"]["cookies"] == {"bilibili": True, "douyin": False}
 
     second = client.post(
-        "/api/v1/settings/download-cookie",
+        "/api/v1/settings/download-cookies/bilibili",
         files={"file": ("cookies.txt", b"content-two", "text/plain")},
     )
     assert second.status_code == 204
     assert cookie_file.read_bytes() == b"content-two"
 
-    deleted = client.delete("/api/v1/settings/download-cookie")
+    deleted = client.delete("/api/v1/settings/download-cookies/bilibili")
     assert deleted.status_code == 204
     assert not cookie_file.exists()
-    deleted_again = client.delete("/api/v1/settings/download-cookie")
+    deleted_again = client.delete("/api/v1/settings/download-cookies/bilibili")
     assert deleted_again.status_code == 204
-    assert client.get("/api/v1/capabilities").json()["downloader"]["cookie_file_available"] is False
+    assert client.get("/api/v1/capabilities").json()["downloader"]["cookies"]["bilibili"] is False
+
+
+@pytest.mark.parametrize("platform", ["bilibili", "douyin"])
+def test_cookie_upload_size_limit_applies_per_platform(client_and_services, platform: str) -> None:
+    client, services, _ = client_and_services
+    too_large = client.post(
+        f"/api/v1/settings/download-cookies/{platform}",
+        files={"file": ("cookies.txt", b"x" * (1024 * 1024 + 1), "text/plain")},
+    )
+    assert too_large.status_code == 413
+    assert too_large.json()["detail"]["code"] == "cookie_file_too_large"
+    assert not services.paths.download_cookie_file(platform).exists()
+
+
+def test_cookie_endpoints_reject_unknown_platform(client_and_services) -> None:
+    client, services, _ = client_and_services
+    uploaded = client.post(
+        "/api/v1/settings/download-cookies/youtube",
+        files={"file": ("cookies.txt", b"content", "text/plain")},
+    )
+    assert uploaded.status_code == 422
+    assert uploaded.json()["detail"]["code"] == "unsupported_platform"
+    deleted = client.delete("/api/v1/settings/download-cookies/youtube")
+    assert deleted.status_code == 422
+    assert deleted.json()["detail"]["code"] == "unsupported_platform"
+    assert not (services.paths.download_cookies / "youtube.txt").exists()
 
 
 def test_use_cookie_without_imported_file_rejected_without_fallback(client_and_services) -> None:
@@ -305,10 +334,25 @@ def test_use_cookie_without_imported_file_rejected_without_fallback(client_and_s
     assert "video_download" not in kinds
 
 
+def test_use_cookie_rejected_when_only_other_platform_imported(client_and_services) -> None:
+    client, services, _ = client_and_services
+    uploaded = client.post(
+        "/api/v1/settings/download-cookies/douyin",
+        files={"file": ("cookies.txt", b"# Netscape HTTP Cookie File\ncontent", "text/plain")},
+    )
+    assert uploaded.status_code == 204
+    # 只导入抖音：bilibili 作业仍按未导入拒绝，绝不跨平台借用
+    response = _submit_link(client, "https://www.bilibili.com/video/BV1test", use_cookie=True)
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "cookie_file_unavailable"
+    kinds = [job["kind"] for job in services.repository.list_jobs()]
+    assert "video_download" not in kinds
+
+
 def test_cookie_copy_is_staging_scoped_and_original_untouched(client_and_services) -> None:
     client, services, downloader = client_and_services
     original = b"# Netscape HTTP Cookie File\nsession-cookie"
-    client.post("/api/v1/settings/download-cookie", files={"file": ("cookies.txt", original, "text/plain")})
+    client.post("/api/v1/settings/download-cookies/bilibili", files={"file": ("cookies.txt", original, "text/plain")})
     assert client.post(
         "/api/v1/videos/link",
         json={"url": "https://www.bilibili.com/video/BV1test", "platform": "bilibili", "rights": "owned", "use_cookie": True},
@@ -321,27 +365,60 @@ def test_cookie_copy_is_staging_scoped_and_original_untouched(client_and_service
     assert call["cookie_content"] == original
     assert call["workspace"].name != "cookies.txt"
     assert not call["workspace"].exists()  # 作业结束 staging 与 Cookie 拷贝即删
-    assert (services.paths.download / "cookies.txt").read_bytes() == original  # 原文件未被修改
+    assert services.paths.download_cookie_file("bilibili").read_bytes() == original  # 原文件未被修改
+
+
+def test_job_uses_only_matching_platform_cookie_file(client_and_services) -> None:
+    client, services, downloader = client_and_services
+    bilibili_original = b"# Netscape HTTP Cookie File\nbilibili-session"
+    douyin_original = b"# Netscape HTTP Cookie File\ndouyin-session"
+    client.post(
+        "/api/v1/settings/download-cookies/bilibili",
+        files={"file": ("cookies.txt", bilibili_original, "text/plain")},
+    )
+    client.post(
+        "/api/v1/settings/download-cookies/douyin",
+        files={"file": ("cookies.txt", douyin_original, "text/plain")},
+    )
+    assert client.post(
+        "/api/v1/videos/link",
+        json={"url": "https://www.bilibili.com/video/BV1test", "platform": "bilibili", "rights": "owned", "use_cookie": True},
+    ).status_code == 201
+    assert client.post(
+        "/api/v1/videos/link",
+        json={"url": "https://www.douyin.com/video/123", "platform": "douyin", "rights": "owned", "use_cookie": True},
+    ).status_code == 201
+    # 每个下载作业成功后自动排入 video_analyze；跑到两个下载都执行为止
+    for _ in range(4):
+        if len(downloader.calls) == 2:
+            break
+        _claim_and_run(services)
+    assert len(downloader.calls) == 2
+    # bilibili 作业只注入 bilibili 平台文件拷贝，douyin 作业只注入 douyin 的
+    assert downloader.calls[0]["platform"] == "bilibili"
+    assert downloader.calls[0]["cookie_content"] == bilibili_original
+    assert downloader.calls[1]["platform"] == "douyin"
+    assert downloader.calls[1]["cookie_content"] == douyin_original
 
 
 def test_use_cookie_false_never_reads_cookie_file(client_and_services) -> None:
     client, services, downloader = client_and_services
     original = b"# Netscape HTTP Cookie File\nsession-cookie"
-    client.post("/api/v1/settings/download-cookie", files={"file": ("cookies.txt", original, "text/plain")})
+    client.post("/api/v1/settings/download-cookies/bilibili", files={"file": ("cookies.txt", original, "text/plain")})
     assert _submit_link(client, "https://www.bilibili.com/video/BV1test", use_cookie=False).status_code == 201
     completed = _claim_and_run(services)
     assert completed["state"] == "succeeded"
     call = downloader.calls[0]
     assert call["use_cookie"] is False
     assert call.get("cookie_content") is None  # 全程未注入 Cookie 拷贝
-    assert (services.paths.download / "cookies.txt").read_bytes() == original
+    assert services.paths.download_cookie_file("bilibili").read_bytes() == original
 
 
 @pytest.mark.parametrize("outcome", ["input_invalid", "cancelled"], ids=["failed", "cancelled"])
 def test_cookie_copy_removed_on_failure_and_cancel(client_and_services, outcome: str) -> None:
     client, services, downloader = client_and_services
     original = b"# Netscape HTTP Cookie File\nsession-cookie"
-    client.post("/api/v1/settings/download-cookie", files={"file": ("cookies.txt", original, "text/plain")})
+    client.post("/api/v1/settings/download-cookies/bilibili", files={"file": ("cookies.txt", original, "text/plain")})
     downloader.outcome = outcome
     assert client.post(
         "/api/v1/videos/link",
@@ -355,7 +432,7 @@ def test_cookie_copy_removed_on_failure_and_cancel(client_and_services, outcome:
     # 拷贝确实位于作业 staging 内，且作业结束（失败/取消）即删
     assert Path(call["cookie_path"]).parent == call["workspace"]
     assert not call["workspace"].exists()
-    assert (services.paths.download / "cookies.txt").read_bytes() == original  # 原文件未被修改
+    assert services.paths.download_cookie_file("bilibili").read_bytes() == original  # 原文件未被修改
     assert services.repository.list_sources() == []
 
 
@@ -363,13 +440,85 @@ def test_cookie_upload_content_length_preflight_rejects_before_parsing(client_an
     client, services, _ = client_and_services
     # Content-Length 超过 1MB+表单开销边界：解析 multipart 前立即 413
     response = client.post(
-        "/api/v1/settings/download-cookie",
+        "/api/v1/settings/download-cookies/bilibili",
         headers={"content-length": str(1024 * 1024 + 128 * 1024)},
         files={"file": ("cookies.txt", b"small-body", "text/plain")},
     )
     assert response.status_code == 413
     assert response.json()["detail"]["code"] == "cookie_file_too_large"
-    assert not (services.paths.download / "cookies.txt").exists()
+    assert not services.paths.download_cookie_file("bilibili").exists()
+
+
+# --- 用例 2b：遗留单文件 cookies.txt 启动迁移 ---
+
+_LEGACY_COOKIE_TEXT = (
+    "# Netscape HTTP Cookie File\n"
+    "# 旧单文件导出注释\n"
+    ".bilibili.com\tTRUE\t/\tFALSE\t0\tbili_name\tBILI-MARKER\n"
+    "#HttpOnly_.api.bilibili.com\tTRUE\t/\tTRUE\t0\tbili_api\tBILI-HTTPONLY-MARKER\n"
+    ".douyin.com\tTRUE\t/\tFALSE\t0\tdouyin_name\tDOUYIN-MARKER\n"
+    "www.iesdouyin.com\tTRUE\t/\tFALSE\t0\ties_name\tIES-MARKER\n"
+    ".unrelated.example\tTRUE\t/\tFALSE\t0\tother\tUNRELATED-MARKER\n"
+    "douyin.com.evil.example\tTRUE\t/\tFALSE\t0\timpostor\tIMPOSTOR-MARKER\n"
+)
+
+
+def _cookie_entry_domains(path: Path) -> list[str]:
+    """提取 Netscape 文件的条目域名列（跳过注释/空行，兼容 #HttpOnly_ 前缀）。"""
+    domains: list[str] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        entry = line
+        if entry.startswith("#HttpOnly_"):
+            entry = entry[len("#HttpOnly_"):]
+        elif entry.startswith("#"):
+            continue
+        domains.append(entry.split("\t", 1)[0])
+    return domains
+
+
+def test_legacy_cookie_file_migrated_into_platform_library(runtime_root: Path) -> None:
+    legacy = runtime_root / "state" / "download" / "cookies.txt"
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text(_LEGACY_COOKIE_TEXT, encoding="utf-8")
+    services = create_app(runtime_root, acquire_lock=False).state.services
+    bilibili = services.paths.download_cookie_file("bilibili")
+    douyin = services.paths.download_cookie_file("douyin")
+    assert bilibili.is_file() and douyin.is_file()
+    # 注释头保留进每个平台文件；各平台只含本平台行（同一行只进一个文件）
+    assert bilibili.read_text(encoding="utf-8").startswith("# Netscape HTTP Cookie File\n")
+    assert _cookie_entry_domains(bilibili) == [".bilibili.com", ".api.bilibili.com"]
+    assert _cookie_entry_domains(douyin) == [".douyin.com", "www.iesdouyin.com"]
+    # 旧文件已删除
+    assert not legacy.exists()
+    # 行内容绝不落操作日志（无关域/冒充域行同样只被丢弃、不外泄）
+    log_text = "".join(path.read_text(encoding="utf-8") for path in services.paths.logs.glob("*.jsonl"))
+    assert "MARKER" not in log_text
+    assert '"event":"legacy_cookie_migration","result":"succeeded"' in log_text
+
+
+def test_legacy_cookie_without_platform_rows_creates_no_files(runtime_root: Path) -> None:
+    legacy = runtime_root / "state" / "download" / "cookies.txt"
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text(
+        "# Netscape HTTP Cookie File\n.unrelated.example\tTRUE\t/\tFALSE\t0\tn\tv\n",
+        encoding="utf-8",
+    )
+    services = create_app(runtime_root, acquire_lock=False).state.services
+    # 没有任何平台匹配条目：不建空文件，但旧文件仍删除
+    assert not services.paths.download_cookie_file("bilibili").exists()
+    assert not services.paths.download_cookie_file("douyin").exists()
+    assert not legacy.exists()
+
+
+def test_legacy_cookie_migration_failure_does_not_block_startup(runtime_root: Path) -> None:
+    legacy = runtime_root / "state" / "download" / "cookies.txt"
+    legacy.mkdir(parents=True)  # 目录冒充文件：读取必失败
+    services = create_app(runtime_root, acquire_lock=False).state.services
+    assert services.repository.get_settings() is not None  # 启动未被阻断
+    log_text = "".join(path.read_text(encoding="utf-8") for path in services.paths.logs.glob("*.jsonl"))
+    assert '"event":"legacy_cookie_migration","result":"failed"' in log_text
 
 
 # --- 用例 3：断路器（适配器级，真实监控循环 + 假 yt_dlp 模块） ---
@@ -913,6 +1062,17 @@ def test_douyin_registry_includes_365yg_media_cdn() -> None:
     assert not host_matches_registered_domain("365yg.com.evil.com", domains)
 
 
+def test_bilibili_registry_includes_bilivideo_cn_media_cdn() -> None:
+    # 决策 13：2026-08-15 真实链接实测登记 B站 MCDN 域（xy119x188x120x16xy.mcdn.bilivideo.cn:8082）。
+    domains = registered_domains("bilibili")
+    assert "bilivideo.cn" in domains
+    assert host_matches_registered_domain("bilivideo.cn", domains)
+    assert host_matches_registered_domain("xy119x188x120x16xy.mcdn.bilivideo.cn", domains)
+    # 标签边界：非子域冒充不得匹配
+    assert not host_matches_registered_domain("evilbilivideo.cn", domains)
+    assert not host_matches_registered_domain("bilivideo.cn.evil.com", domains)
+
+
 def test_proxy_rejects_unregistered_connect_without_outbound_bytes() -> None:
     proxy = LoopbackFilterProxy(("bilibili.com",))
     port = proxy.start()
@@ -978,6 +1138,73 @@ class _LoopbackExemptProxy(LoopbackFilterProxy):
         except ValueError:
             return True
         return False
+
+
+class _FastTimeoutProxy(_LoopbackExemptProxy):
+    """缩小 IO 超时以在亚秒尺度复现长传输：IO 超时 0.2s，旧版强拆点为 0.4+0.4s。"""
+
+    IO_TIMEOUT_SECONDS = 0.2
+
+
+def test_proxy_relay_has_no_absolute_lifetime_cap() -> None:
+    """长传输回归：活跃转发不得被固定时长拦腰切断（旧版 join 超时在 ~2×IO 超时后强拆）。"""
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    server_port = listener.getsockname()[1]
+    results: dict[str, object] = {}
+
+    def echo() -> None:
+        try:
+            conn, _ = listener.accept()
+            with conn:
+                while True:
+                    chunk = conn.recv(4096)
+                    if not chunk:
+                        break
+                    conn.sendall(chunk)
+        except Exception as exc:  # noqa: BLE001
+            results["error"] = repr(exc)
+        finally:
+            listener.close()
+
+    thread = threading.Thread(target=echo, daemon=True)
+    thread.start()
+
+    proxy = _FastTimeoutProxy(("localhost",))  # 测试注入注册域 + 保留段豁免（决策 9）
+    proxy_port = proxy.start()
+    try:
+        client = socket.create_connection(("127.0.0.1", proxy_port), timeout=5)
+        client.sendall(f"CONNECT localhost:{server_port} HTTP/1.1\r\n\r\n".encode("latin-1"))
+        established = b""
+        while b"\r\n\r\n" not in established:
+            chunk = client.recv(4096)
+            if not chunk:
+                break
+            established += chunk
+        assert established.startswith(b"HTTP/1.1 200")
+        # 8 段、每段间隔 0.15s（小于 IO 超时 0.2s，不触发空闲断开），总活跃
+        # 时长 ~1.2s：旧版会在 ~0.8s 处强拆连接，新版转发至传输自然结束。
+        expected = 0
+        received = b""
+        for index in range(8):
+            payload = f"chunk-{index}".encode() * 128
+            expected += len(payload)
+            client.sendall(payload)
+            while len(received) < expected:
+                chunk = client.recv(4096)
+                if not chunk:
+                    break
+                received += chunk
+            time.sleep(0.15)
+        client.close()
+    finally:
+        proxy.close()
+    thread.join(timeout=10)
+    assert "error" not in results, results.get("error")
+    assert len(received) == expected
+    assert proxy.connected_hosts() == {"localhost": 1}
 
 
 # 自签 localhost 证书/私钥（测试专用，CN/SAN=localhost，有效期至 2126 年）。
@@ -1319,7 +1546,7 @@ def _chain_app(runtime_root: Path, monkeypatch: pytest.MonkeyPatch):
 
     downloader = _ChainDownloader(
         proxy_factory=factory,
-        cookie_file_path=services.paths.download / "cookies.txt",
+        cookie_resolver=services.paths.download_cookie_file,
     )
     services.downloader = downloader
     services.jobs.downloader = downloader

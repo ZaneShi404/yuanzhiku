@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "report_id": "RPT-PER-PLATFORM-COOKIE-LIBRARY-20260815T071523Z-001",
+  "recorded_at_utc": "2026-08-15T07:15:23Z",
+  "report_kind": "development",
+  "author_role": "development",
+  "independence": "non_independent",
+  "product_version": "v1.3.0",
+  "decision_scope": "archive_local",
+  "verdict": "accepted",
+  "requirements": ["REQ-043", "REQ-044", "REQ-047a"],
+  "defects": [],
+  "evidence_refs": [
+    "reports/development/20260815T071523Z-per-platform-cookie-library.md"
+  ],
+  "release_gates": [
+    {"gate_id": "GATE-UNIT-INTEGRATION-REGRESSION", "status": "passed", "requirements": ["REQ-043", "REQ-047a"]},
+    {"gate_id": "GATE-FRONTEND-BUILD", "status": "passed", "requirements": ["REQ-044"]},
+    {"gate_id": "GATE-BROWSER-BLACKBOX", "status": "blocked", "requirements": ["REQ-044", "REQ-047a"]},
+    {"gate_id": "GATE-COMPOSE-PHYSICAL", "status": "blocked", "requirements": ["REQ-045"]},
+    {"gate_id": "GATE-RELEASE-READINESS", "status": "blocked", "requirements": ["REQ-046"]}
+  ],
+  "summary": "REQ-047a revised from a single cookies.txt to a per-platform cookie library (cookies/<platform>.txt): downloads and probes auto-select the file matching the recognized link platform; legacy single file is migrated at startup by registry-domain sorting without logging cookie content; all cookie-handling invariants preserved. Backend regression 114 passed; live migration of the existing bilibili cookies verified."
+}

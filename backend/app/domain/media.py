@@ -48,6 +48,38 @@ class MediaTranscript:
 
 VIDEO_METADATA_LOCATOR_TYPE = "video_metadata"
 VIDEO_TIME_RANGE_LOCATOR_TYPE = "video_time_range"
+IMAGE_METADATA_LOCATOR = "image_metadata"
+
+
+def image_metadata_locator(
+    width: int,
+    height: int,
+    image_format: str,
+    datetime_original: str | None = None,
+) -> dict[str, int | str | None]:
+    """图片元数据证据唯一允许的 locator：尺寸与格式等只读字段（REQ-048）。
+
+    图片分析落 evidence 时只能用本工厂构造的 locator；非法尺寸或格式直接
+    拒绝，避免无法定位回 artifact 的元数据进入证据链。
+    """
+    if (
+        isinstance(width, bool) or isinstance(height, bool)
+        or not isinstance(width, int) or not isinstance(height, int)
+    ):
+        raise ValueError("image_metadata locator 的宽高必须为整数像素")
+    if width <= 0 or height <= 0:
+        raise ValueError("image_metadata locator 的宽高必须为正整数")
+    if not isinstance(image_format, str) or not image_format.strip():
+        raise ValueError("image_metadata locator 的格式必须为非空字符串")
+    if datetime_original is not None and not isinstance(datetime_original, str):
+        raise ValueError("image_metadata locator 的拍摄时间必须为字符串或 None")
+    return {
+        "type": IMAGE_METADATA_LOCATOR,
+        "width": width,
+        "height": height,
+        "format": image_format.strip(),
+        "datetime_original": datetime_original,
+    }
 
 
 def video_time_range_locator(start_ms: int, end_ms: int) -> dict[str, int | str]:

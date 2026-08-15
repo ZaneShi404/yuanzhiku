@@ -21,10 +21,16 @@ from starlette.requests import Request
 from app.adapters.sqlite import SqliteRepository
 from app.adapters.storage import ArtifactStore, StorageLimitError
 from app.adapters.parsers import LocalDocumentParser
-from app.adapters.downloader import DOWNLOAD_PLATFORMS, YtDlpDownloader
+from app.adapters.downloader import (
+    DOWNLOAD_PLATFORMS,
+    DOWNLOAD_REGISTRY,
+    YtDlpDownloader,
+    host_matches_registered_domain,
+)
 from app.adapters.media import LocalFfmpegMediaAnalyzer, UnconfiguredMediaAi
 from app.core.config import DataPaths, InstanceLock, data_paths, database_backend, database_url
 from app.core.operations import OperationalLog
+from app.ports.media import DownloadInputInvalid, DownloadUnavailable
 from app.ports.repository import RepositoryPort
 from app.domain.models import (
     DownloadLinkRequest,
@@ -32,6 +38,7 @@ from app.domain.models import (
     ExportCreate,
     ExternalCardCreate,
     KnowledgeCreate,
+    LinkProbeRequest,
     ManualRepresentationCreate,
     PasteImportRequest,
     RelationCreate,
@@ -47,8 +54,11 @@ from app.domain.models import (
 )
 from app.services.documents import DocumentService
 from app.services.external_cards import ExternalCardService
+from app.services.images import ImageService
 from app.services.imports import ImportService
 from app.services.jobs import JobService
+from app.services.prefill import ALLOWED_SUFFIXES as PREFILL_SUFFIXES
+from app.services.prefill import suggest_document, suggest_text
 from app.services.lifecycle import LifecycleService
 from app.services.videos import VideoService
 from app.services.search import SearchService
@@ -61,6 +71,7 @@ class ApplicationServices:
         self.paths = paths
         self.operations = OperationalLog(paths.logs)
         self.operations.prune()
+        _migrate_legacy_download_cookie(paths, self.operations)
         selected_database_url = database_url(paths)
         selected_backend = database_backend(selected_database_url)
         if selected_backend == "postgresql":
@@ -77,9 +88,10 @@ class ApplicationServices:
         self.parser = LocalDocumentParser(paths.models, Path(__file__).resolve().parents[1] / "models.lock.json")
         self.media_analyzer = LocalFfmpegMediaAnalyzer()
         self.media_ai = UnconfiguredMediaAi()
-        self.downloader = YtDlpDownloader(cookie_file_path=paths.download / "cookies.txt")
+        self.downloader = YtDlpDownloader(cookie_resolver=paths.download_cookie_file)
         self.documents = DocumentService(self.repository)
         self.videos = VideoService(self.repository, self.artifacts, self.documents, self.media_analyzer)
+        self.images = ImageService(self.repository, self.artifacts, self.documents)
         self.transfers = TransferService(paths, self.repository, self.artifacts)
         self.imports = ImportService(self.repository, self.artifacts)
         self.jobs = JobService(
@@ -92,10 +104,55 @@ class ApplicationServices:
             videos=self.videos,
             imports=self.imports,
             downloader=self.downloader,
+            images=self.images,
         )
         self.external_cards = ExternalCardService(self.repository)
         self.lifecycle = LifecycleService(self.repository, self.artifacts)
         self.search = SearchService(self.repository)
+
+
+def _migrate_legacy_download_cookie(paths: DataPaths, operations: OperationalLog) -> None:
+    """遗留单文件 cookies.txt → 按平台 Cookie 库分拣（REQ-047a 修订）。
+
+    逐行解析 Netscape 格式：跳过注释/空行，``\\t`` 分隔取首列域名（兼容
+    ``#HttpOnly_`` 前缀条目），按 DOWNLOAD_REGISTRY 做标签边界子域匹配分拣到
+    ``cookies/<platform>.txt``（每个文件保留原注释头 + 匹配行；同一行只进一个
+    平台文件；无法匹配任何平台的行不进任何文件）。两个平台都没有匹配条目则
+    不建空文件；分拣完成后删除旧 cookies.txt。行内容绝不打印/落日志；迁移
+    失败不阻断启动（记操作日志事件）。
+    """
+    legacy = paths.download / "cookies.txt"
+    if not legacy.exists():
+        return
+    try:
+        header_lines: list[str] = []
+        matched: dict[str, list[str]] = {platform: [] for platform in DOWNLOAD_REGISTRY}
+        for line in legacy.read_text(encoding="utf-8", errors="replace").splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if stripped.startswith("#HttpOnly_"):
+                entry = stripped[len("#HttpOnly_"):]
+            elif stripped.startswith("#"):
+                header_lines.append(line)
+                continue
+            else:
+                entry = stripped
+            host = entry.split("\t", 1)[0].lstrip(".")
+            for platform, domains in DOWNLOAD_REGISTRY.items():
+                if host_matches_registered_domain(host, domains):
+                    matched[platform].append(line)
+                    break
+        for platform, lines in matched.items():
+            if not lines:
+                continue
+            content = "\n".join(header_lines + lines) + "\n"
+            (paths.download_cookies / f"{platform}.txt").write_text(content, encoding="utf-8")
+        legacy.unlink()
+        operations.write("legacy_cookie_migration", "succeeded")
+    except Exception:
+        # 迁移失败不阻断启动；事件不含任何行内容。
+        operations.write("legacy_cookie_migration", "failed")
 
 
 def _source_view(source: dict[str, Any] | None) -> dict[str, Any]:
@@ -225,7 +282,7 @@ def create_app(root: str | Path | None = None, *, acquire_lock: bool = True) -> 
 
     @app.middleware("http")
     async def upload_capacity_preflight(request, call_next):
-        if request.method == "POST" and request.url.path in {"/api/v1/imports/file", "/api/v1/videos/local"}:
+        if request.method == "POST" and request.url.path in {"/api/v1/imports/file", "/api/v1/imports/image", "/api/v1/videos/local"}:
             content_length = request.headers.get("content-length")
             try:
                 expected_bytes = int(content_length) if content_length is not None else None
@@ -247,10 +304,10 @@ def create_app(root: str | Path | None = None, *, acquire_lock: bool = True) -> 
 
     @app.middleware("http")
     async def cookie_upload_length_preflight(request, call_next):
-        # cookies.txt 1MB 上限前移（REQ-047a）：解析 multipart 前按 Content-Length
-        # 预检（1MB 文件 + 表单开销边界），超大请求立即 413 不落临时盘；
-        # 端点内解析后的二次校验保留兜底。
-        if request.method == "POST" and request.url.path == "/api/v1/settings/download-cookie":
+        # 按平台 Cookie 1MB 上限前移（REQ-047a 修订）：解析 multipart 前按
+        # Content-Length 预检（1MB 文件 + 表单开销边界），超大请求立即 413 不落
+        # 临时盘；端点内解析后的二次校验保留兜底。
+        if request.method == "POST" and request.url.path.startswith("/api/v1/settings/download-cookies/"):
             content_length = request.headers.get("content-length")
             try:
                 expected_bytes = int(content_length) if content_length is not None else None
@@ -300,12 +357,18 @@ def create_app(root: str | Path | None = None, *, acquire_lock: bool = True) -> 
     def put_settings(request: SettingsUpdate, svc: ApplicationServices = Depends(get_services)) -> dict[str, Any]:
         return svc.repository.update_settings(request.model_dump(exclude_none=True))
 
-    @app.post(f"{api}/settings/download-cookie", status_code=204, tags=["settings"])
+    @app.post(f"{api}/settings/download-cookies/{{platform}}", status_code=204, tags=["settings"])
     async def upload_download_cookie(
+        platform: str,
         file: Annotated[UploadFile, File(...)],
         svc: ApplicationServices = Depends(get_services),
     ) -> Response:
-        # 单通道 cookies.txt（REQ-047a）：1MB 上限，重复导入覆盖旧文件。
+        # 按平台 Cookie 库（REQ-047a 修订）：每平台 1MB 上限，重复导入覆盖旧文件。
+        if platform not in DOWNLOAD_PLATFORMS:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "unsupported_platform", "message": "不支持的视频平台"},
+            )
         content = await file.read(1024 * 1024 + 1)
         await file.close()
         if len(content) > 1024 * 1024:
@@ -313,9 +376,9 @@ def create_app(root: str | Path | None = None, *, acquire_lock: bool = True) -> 
                 status_code=413,
                 detail={"code": "cookie_file_too_large", "message": "cookies.txt 超过 1MB 限制"},
             )
-        svc.paths.download.mkdir(parents=True, exist_ok=True)
-        destination = svc.paths.download / "cookies.txt"
-        staging = svc.paths.download / "cookies.txt.part"
+        svc.paths.download_cookies.mkdir(parents=True, exist_ok=True)
+        destination = svc.paths.download_cookie_file(platform)
+        staging = destination.parent / (destination.name + ".part")
         try:
             with staging.open("wb") as target:
                 target.write(content)
@@ -324,10 +387,15 @@ def create_app(root: str | Path | None = None, *, acquire_lock: bool = True) -> 
             staging.unlink(missing_ok=True)
         return Response(status_code=204)
 
-    @app.delete(f"{api}/settings/download-cookie", status_code=204, tags=["settings"])
-    def delete_download_cookie(svc: ApplicationServices = Depends(get_services)) -> Response:
+    @app.delete(f"{api}/settings/download-cookies/{{platform}}", status_code=204, tags=["settings"])
+    def delete_download_cookie(platform: str, svc: ApplicationServices = Depends(get_services)) -> Response:
         # 幂等删除：不存在也返回 204。
-        (svc.paths.download / "cookies.txt").unlink(missing_ok=True)
+        if platform not in DOWNLOAD_PLATFORMS:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "unsupported_platform", "message": "不支持的视频平台"},
+            )
+        svc.paths.download_cookie_file(platform).unlink(missing_ok=True)
         return Response(status_code=204)
 
     @app.post(f"{api}/imports/paste", status_code=201, tags=["imports"])
@@ -364,6 +432,78 @@ def create_app(root: str | Path | None = None, *, acquire_lock: bool = True) -> 
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         finally:
             await file.close()
+
+    @app.post(f"{api}/imports/image", status_code=201, tags=["imports"])
+    async def import_image(
+        file: Annotated[UploadFile, File(...)],
+        rights: Annotated[RightsCategory, Form(...)],
+        title: Annotated[str, Form()] = "",
+        author: Annotated[str | None, Form()] = None,
+        language: Annotated[str, Form()] = "zh",
+        notes: Annotated[str | None, Form()] = None,
+        source_date: Annotated[str | None, Form()] = None,
+        categories: Annotated[str, Form()] = "[]",
+        tags: Annotated[str, Form()] = "[]",
+        svc: ApplicationServices = Depends(get_services),
+    ) -> dict[str, Any]:
+        try:
+            category_values = json.loads(categories)
+            tag_values = json.loads(tags)
+            if not isinstance(category_values, list) or not isinstance(tag_values, list):
+                raise ValueError("分类和标签必须是 JSON 数组")
+            from app.domain.models import PasteImportRequest
+
+            validated = PasteImportRequest(
+                title=title or (Path(file.filename).stem if file.filename else "") or "未命名图片", text="x",
+                rights=rights, language=language,
+                source_date=source_date, categories=category_values, tags=tag_values,
+            )
+            expected_bytes = file.size if isinstance(file.size, int) and file.size >= 0 else None
+            return svc.imports.image(
+                file.file, file.filename or "upload.bin", validated.title, rights.value, author, language,
+                notes, validated.categories, validated.tags, expected_bytes,
+                validated.source_date.isoformat() if validated.source_date else None,
+            )
+        except (ValueError, StorageLimitError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        finally:
+            await file.close()
+
+    @app.post(f"{api}/imports/prefill", tags=["imports"])
+    async def import_prefill(
+        file: Annotated[UploadFile | None, File()] = None,
+        text: Annotated[str | None, Form()] = None,
+    ) -> dict[str, Any]:
+        # 导入预填（REQ-049）：只读识别元数据，不持久化、不联网、不触碰 data root。
+        if file is not None:
+            try:
+                filename = file.filename or ""
+                suffix = Path(filename).suffix.lower()
+                if suffix not in PREFILL_SUFFIXES:
+                    raise HTTPException(
+                        status_code=422,
+                        detail={"code": "unsupported_prefill_suffix", "message": "不支持的文件类型"},
+                    )
+                content = await file.read(20 * 1024 * 1024 + 1)
+                if len(content) > 20 * 1024 * 1024:
+                    raise HTTPException(
+                        status_code=413,
+                        detail={"code": "prefill_file_too_large", "message": "文件超过 20MB 限制"},
+                    )
+                return suggest_document(filename, content)
+            finally:
+                await file.close()
+        if text is not None and len(text.encode("utf-8")) > 1024 * 1024:
+            raise HTTPException(
+                status_code=413,
+                detail={"code": "prefill_text_too_large", "message": "文本超过 1MB 限制"},
+            )
+        if text:
+            return suggest_text(text)
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "prefill_input_required", "message": "需要提供文件或文本"},
+        )
 
     @app.post(f"{api}/videos/local", status_code=201, tags=["videos"])
     async def import_local_video(
@@ -418,10 +558,10 @@ def create_app(root: str | Path | None = None, *, acquire_lock: bool = True) -> 
                 status_code=503,
                 detail={"code": "downloader_unavailable", "message": "链接下载工具不可用：需要 yt-dlp 与 FFmpeg/ffprobe"},
             )
-        if request.use_cookie and not capability.get("cookie_file_available"):
+        if request.use_cookie and not capability.get("cookies", {}).get(request.platform):
             raise HTTPException(
                 status_code=422,
-                detail={"code": "cookie_file_unavailable", "message": "尚未导入 cookies.txt，无法使用 Cookie 下载"},
+                detail={"code": "cookie_file_unavailable", "message": "尚未导入该平台 cookies.txt，无法使用 Cookie 下载"},
             )
         # payload_json 只存脱敏链接（scheme://host/path），绝不存原文 URL 参数。
         job = svc.repository.create_job(
@@ -442,6 +582,50 @@ def create_app(root: str | Path | None = None, *, acquire_lock: bool = True) -> 
             priority=100,
         )
         return job
+
+    @app.post(f"{api}/videos/link/probe", tags=["videos"])
+    def probe_video_link(request: LinkProbeRequest, svc: ApplicationServices = Depends(get_services)) -> dict[str, Any]:
+        # REQ-047b 只读元数据探测：与 /videos/link 同一受限通道，不入队、不写表。
+        if request.platform not in DOWNLOAD_PLATFORMS:
+            raise HTTPException(status_code=422, detail={"code": "unsupported_platform", "message": "不支持的视频平台"})
+        try:
+            validate_download_url(request.url, request.platform)
+        except ValueError as exc:
+            # 拒绝消息不含 URL 内容（REQ-047.1）。
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "invalid_url", "message": "链接无效：仅支持哔哩哔哩或抖音的 HTTPS 链接，且不含登录凭据"},
+            ) from exc
+        capability = svc.downloader.capability()
+        if not capability.get("enabled"):
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "downloader_unavailable", "message": "链接下载工具不可用：需要 yt-dlp 与 FFmpeg/ffprobe"},
+            )
+        if request.use_cookie and not capability.get("cookies", {}).get(request.platform):
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "cookie_file_unavailable", "message": "尚未导入该平台 cookies.txt，无法使用 Cookie 识别链接"},
+            )
+        try:
+            return svc.downloader.probe_metadata(request.url, request.platform, request.use_cookie)
+        except DownloadUnavailable as exc:
+            # 工具/代理启动失败：与 /videos/link 同语义 503，绝不直连回退。
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "downloader_unavailable", "message": "链接下载工具不可用：需要 yt-dlp 与 FFmpeg/ffprobe"},
+            ) from exc
+        except DownloadInputInvalid as exc:
+            if exc.args and exc.args[0] == "cookie":
+                raise HTTPException(
+                    status_code=422,
+                    detail={"code": "cookie_file_unavailable", "message": "尚未导入该平台 cookies.txt，无法使用 Cookie 识别链接"},
+                ) from exc
+            # 反爬、链接失效、平台拒绝、超时：通用脱敏消息，不含 URL 内容。
+            raise HTTPException(
+                status_code=502,
+                detail={"code": "probe_failed", "message": "链接失效、平台拒绝或探测超时，请重新复制分享链接或稍后重试"},
+            ) from exc
 
     @app.get(f"{api}/videos/{{source_id}}", tags=["videos"])
     def video_detail(
@@ -838,6 +1022,15 @@ def create_app(root: str | Path | None = None, *, acquire_lock: bool = True) -> 
             return FileResponse(
                 path,
                 media_type="application/pdf",
+                headers=headers,
+                filename=Path(version["original_name"]).name,
+                content_disposition_type="inline",
+            )
+        if version["media_type"] in {"image/jpeg", "image/png", "image/webp"}:
+            # 图片原件 inline 返回，供 <img> 直接预览；安全头与其他分支一致。
+            return FileResponse(
+                path,
+                media_type=version["media_type"],
                 headers=headers,
                 filename=Path(version["original_name"]).name,
                 content_disposition_type="inline",

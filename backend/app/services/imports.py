@@ -13,6 +13,7 @@ from app.domain.models import PasteImportRequest, SourceType
 
 ALLOWED_SUFFIXES = {".pdf", ".docx", ".md", ".markdown", ".txt"}
 VIDEO_SUFFIXES = {".mp4", ".webm"}
+IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
 CANONICAL_MEDIA_TYPES = {
     ".pdf": "application/pdf",
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -21,6 +22,10 @@ CANONICAL_MEDIA_TYPES = {
     ".txt": "text/plain",
     ".mp4": "video/mp4",
     ".webm": "video/webm",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".webp": "image/webp",
 }
 
 
@@ -122,6 +127,37 @@ class ImportService:
             audit_event="video_import",
             source_date=source_date,
             job_kind="video_analyze",
+        )
+
+    def image(
+        self, stream: BinaryIO, filename: str, title: str, rights: str, author: str | None,
+        language: str, notes: str | None, categories: list[str], tags: list[str], expected_bytes: int | None,
+        source_date: str | None = None,
+    ) -> dict:
+        suffix = Path(filename).suffix.lower()
+        if suffix not in IMAGE_SUFFIXES:
+            raise ValueError("仅支持 JPG、PNG 和 WebP 图片")
+        if expected_bytes is not None:
+            self.artifacts.check_capacity(expected_bytes)
+        if not title.strip():
+            title = Path(filename).stem or "未命名图片"
+        return self._persist_ingest(
+            encoded=None,
+            stream=stream,
+            expected_bytes=expected_bytes,
+            source_type=SourceType.FILE.value,
+            title=title.strip(),
+            author=author,
+            language=language,
+            notes=notes,
+            rights=rights,
+            categories=categories,
+            tags=tags,
+            original_name=Path(filename).name,
+            media_type=CANONICAL_MEDIA_TYPES[suffix],
+            audit_event="image_import",
+            source_date=source_date,
+            job_kind="image_analyze",
         )
 
     def downloaded_video(

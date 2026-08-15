@@ -5,7 +5,12 @@
 outbound connection travels through a job-scoped loopback filtering proxy that
 validates each new target host against the registered domain list before a
 single outbound byte is sent (decision 7). Cookies are accepted only through an
-explicit staging copy of the imported cookies.txt file (decision 8).
+explicit staging copy of the platform's imported cookie file (decision 8,
+REQ-047a per-platform cookie library).
+
+REQ-047b adds the read-only metadata probe sub-capability (``--skip-download``)
+on the same restricted channel: same whitelist, same request-scoped proxy, same
+shell-less subprocess constraints; it never downloads or persists anything.
 
 The proxy and the registry live in this module with no dependencies beyond the
 standard library and the ports/domain contracts.
@@ -15,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import ipaddress
+import json
 import os
 import shutil
 import socket
@@ -23,8 +29,10 @@ import sys
 import tempfile
 import threading
 import time
+from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterator
 from urllib.parse import urlsplit
 
 from app.adapters.media import LocalFfmpegMediaAnalyzer
@@ -42,7 +50,11 @@ MAX_COOKIE_BYTES = 1024 * 1024
 # 出站注册域清单（7.2.1，决策 7）：平台主域 + 显式登记的 CDN/API 域。
 # 清单变更属于安全边界变更，必须附实测证据并经独立审核门禁；未实证域一律不登记。
 DOWNLOAD_REGISTRY: dict[str, tuple[str, ...]] = {
-    "bilibili": ("bilibili.com", "bilivideo.com", "hdslb.com", "b23.tv"),
+    "bilibili": (
+        "bilibili.com", "bilivideo.com", "hdslb.com", "b23.tv",
+        # 决策 13：2026-08-15 真实链接实测登记（xy119x188x120x16xy.mcdn.bilivideo.cn:8082）
+        "bilivideo.cn",
+    ),
     "douyin": (
         "douyin.com", "iesdouyin.com", "snssdk.com", "douyinvod.com",
         # 决策 11：2026-08-14 真实链接实测登记（v95-aw-default.365yg.com）
@@ -405,8 +417,11 @@ class LoopbackFilterProxy:
         downstream = threading.Thread(target=pump, args=(remote, client), daemon=True)
         upstream.start()
         downstream.start()
-        upstream.join(timeout=self.IO_TIMEOUT_SECONDS * 2)
-        downstream.join(timeout=self.IO_TIMEOUT_SECONDS * 2)
+        # join 绝不带超时：固定时长上限会把进行中的长传输拦腰切断（大文件
+        # 下载必然超过）。pump 由两端套接字自身的 IO 超时（空闲连接收敛）与
+        # EOF/对端关闭驱动结束，活跃传输不受绝对时长限制。
+        upstream.join()
+        downstream.join()
         try:
             remote.close()
         except OSError:
@@ -423,15 +438,19 @@ class YtDlpDownloader(MediaDownloaderPort):
         self,
         ffprobe: str | None = None,
         ffmpeg: str | None = None,
-        cookie_file_path: Path | None = None,
+        cookie_resolver: Callable[[str], Path] | None = None,
         proxy_factory: Callable[[str], LoopbackFilterProxy] | None = None,
     ) -> None:
         self.ffprobe = ffprobe or os.environ.get("YUANZHIKU_FFPROBE_BIN", "ffprobe")
         self.ffmpeg = ffmpeg or os.environ.get("YUANZHIKU_FFMPEG_BIN", "ffmpeg")
-        self.cookie_file_path = cookie_file_path
+        # 按平台 Cookie 库（REQ-047a 修订）：platform → 该平台 Cookie 文件路径。
+        self.cookie_resolver = cookie_resolver
         self._proxy_factory = proxy_factory or self._default_proxy_factory
         # 无进展断路器观察窗口间隔：由作业按设置注入（单 worker，无并发竞争）。
         self.no_progress_seconds = 10.0
+        # 元数据探测（REQ-047b）：整体超时与 stdout 有界上限（%()j 单行 JSON）。
+        self.probe_timeout_seconds = 30.0
+        self.probe_output_limit_bytes = 2 * 1024 * 1024
 
     @staticmethod
     def _default_proxy_factory(platform: str) -> LoopbackFilterProxy:
@@ -447,6 +466,12 @@ class YtDlpDownloader(MediaDownloaderPort):
             return "unavailable"
 
     @staticmethod
+    def _clean_metadata_text(text: str, limit: int) -> str:
+        """去除控制字符与换行并截断至 limit；清洗后为空退化为空串。"""
+        cleaned = "".join(character for character in text if character.isprintable() or character == " ")
+        return cleaned.strip()[:limit].strip()
+
+    @staticmethod
     def _extract_title(output: bytes) -> str:
         """Clean the --print captured platform title for durable storage.
 
@@ -454,17 +479,35 @@ class YtDlpDownloader(MediaDownloaderPort):
         DownloadLinkRequest/PasteImportRequest 一致为 max_length=500）；
         空或捕获失败退化为空串，由落库侧回退"未命名视频"。
         """
-        text = output.decode("utf-8", "replace")
-        cleaned = "".join(character for character in text if character.isprintable() or character == " ")
-        return cleaned.strip()[:500].strip()
+        return YtDlpDownloader._clean_metadata_text(output.decode("utf-8", "replace"), 500)
 
-    def _cookie_file_available(self) -> bool:
-        if self.cookie_file_path is None:
-            return False
+    @staticmethod
+    def _normalize_upload_date(value: object) -> str | None:
+        """yt-dlp ``upload_date``（YYYYMMDD）→ ISO 日期；缺失或格式非法一律 None。"""
+        if not isinstance(value, str) or len(value) != 8 or not value.isdigit():
+            return None
         try:
-            return self.cookie_file_path.is_file() and self.cookie_file_path.stat().st_size <= MAX_COOKIE_BYTES
+            return datetime.strptime(value, "%Y%m%d").date().isoformat()
+        except ValueError:
+            return None
+
+    def _resolve_cookie_file(self, platform: str) -> Path | None:
+        """该平台已导入且未超上限的 Cookie 文件路径；不可用一律 None。"""
+        if self.cookie_resolver is None:
+            return None
+        try:
+            path = self.cookie_resolver(platform)
+        except ValueError:
+            return None
+        try:
+            if path.is_file() and path.stat().st_size <= MAX_COOKIE_BYTES:
+                return path
         except OSError:
-            return False
+            pass
+        return None
+
+    def _cookie_file_available(self, platform: str) -> bool:
+        return self._resolve_cookie_file(platform) is not None
 
     def _ffmpeg_available(self) -> bool:
         """Whether the configured ffmpeg binary is resolvable right now."""
@@ -489,7 +532,7 @@ class YtDlpDownloader(MediaDownloaderPort):
             "adapter": "yt-dlp",
             "version": self._yt_dlp_version(),
             "supported_platforms": ["bilibili", "douyin"],
-            "cookie_file_available": self._cookie_file_available(),
+            "cookies": {platform: self._cookie_file_available(platform) for platform in DOWNLOAD_REGISTRY},
             "network": True,
         }
 
@@ -553,6 +596,56 @@ class YtDlpDownloader(MediaDownloaderPort):
             process.kill()
             process.wait(timeout=2)
 
+    @contextmanager
+    def _scoped_proxy(self, platform: str) -> Iterator[int]:
+        """作业/请求级回环过滤代理；启动失败 fail-closed，绝不直连回退。
+
+        下载（REQ-047）与元数据探测（REQ-047b）共用同一生死周期：代理仅
+        监听 127.0.0.1 随机端口、逐连接校验注册域，退出 with 块即销毁，
+        不留存端口。
+        """
+        proxy = self._proxy_factory(platform)
+        try:
+            try:
+                port = proxy.start()
+            except OSError as exc:
+                raise DownloadUnavailable("proxy") from exc
+            yield port
+        finally:
+            proxy.close()
+
+    @staticmethod
+    def _base_command(port: int) -> list[str]:
+        """下载与探测共用的 yt-dlp 子进程骨架（REQ-047.2）。
+
+        显式 ``--proxy`` 指向回环过滤代理、忽略用户级配置与缓存、有界重试
+        与 socket 超时；配合 ``_subprocess_environment`` 清空代理环境变量。
+        """
+        return [
+            sys.executable,
+            "-m", "yt_dlp",
+            "--proxy", f"http://127.0.0.1:{port}",
+            "--no-playlist",
+            "--ignore-config",
+            "--no-cache-dir",
+            "--retries", "1",
+            "--socket-timeout", "30",
+        ]
+
+    def _spawn(self, command: list[str], stdout_file, stderr_file) -> subprocess.Popen:
+        """启动无 shell 子进程（shell=False、stdin 关闭、代理环境已清空）。"""
+        try:
+            return subprocess.Popen(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=stdout_file,
+                stderr=stderr_file,
+                shell=False,
+                env=self._subprocess_environment(),
+            )
+        except FileNotFoundError as exc:
+            raise DownloadUnavailable("yt_dlp_missing") from exc
+
     def download(
         self,
         *,
@@ -576,17 +669,10 @@ class YtDlpDownloader(MediaDownloaderPort):
             # 无 ffmpeg 只能产出纯视频文件，必须 blocked（fail-closed）。
             raise DownloadUnavailable("ffmpeg_missing")
         # 启动回环过滤代理；启动失败 fail-closed → blocked，绝不直连回退。
-        proxy = self._proxy_factory(platform)
-        try:
-            try:
-                port = proxy.start()
-            except OSError as exc:
-                raise DownloadUnavailable("proxy") from exc
+        with self._scoped_proxy(platform) as port:
             return self._run_download(
                 url, port, use_cookie, cookie_path, workspace, limits, cancelled, heartbeat, progress
             )
-        finally:
-            proxy.close()
 
     def _run_download(
         self,
@@ -600,16 +686,8 @@ class YtDlpDownloader(MediaDownloaderPort):
         heartbeat: Callable[[], None],
         progress: Callable[[int, str], None],
     ) -> DownloadedVideo:
-        command = [
-            sys.executable,
-            "-m", "yt_dlp",
-            "--proxy", f"http://127.0.0.1:{port}",
-            "--no-playlist",
+        command = self._base_command(port) + [
             "--no-simulate",
-            "--ignore-config",
-            "--no-cache-dir",
-            "--retries", "1",
-            "--socket-timeout", "30",
             "--merge-output-format", "mp4",
             "--remux-video", "mp4",
         ]
@@ -634,17 +712,7 @@ class YtDlpDownloader(MediaDownloaderPort):
         stderr_file = tempfile.TemporaryFile()
         stdout_file = tempfile.TemporaryFile()
         try:
-            try:
-                process = subprocess.Popen(
-                    command,
-                    stdin=subprocess.DEVNULL,
-                    stdout=stdout_file,
-                    stderr=stderr_file,
-                    shell=False,
-                    env=self._subprocess_environment(),
-                )
-            except FileNotFoundError as exc:
-                raise DownloadUnavailable("yt_dlp_missing") from exc
+            process = self._spawn(command, stdout_file, stderr_file)
         except Exception:
             stderr_file.close()
             stdout_file.close()
@@ -736,3 +804,77 @@ class YtDlpDownloader(MediaDownloaderPort):
             byte_size=product.stat().st_size,
             title=title,
         )
+
+    def probe_metadata(self, url: str, platform: str, use_cookie: bool) -> dict[str, str | None]:
+        """REQ-047b 只读元数据探测：与下载同一受限通道，只取元数据不下载。
+
+        同平台白名单、同回环过滤代理（仅本次请求生命周期存活）、同无 shell
+        子进程约束；yt-dlp ``--skip-download``，整体超时 30 秒。失败一律抛
+        与下载同族的脱敏异常（不含 URL 内容），由端点映射为 502/422。
+        """
+        if not registered_domains(platform):
+            raise DownloadInputInvalid("platform")
+        cookie_path: Path | None = None
+        if use_cookie:
+            cookie_path = self._resolve_cookie_file(platform)
+            if cookie_path is None:
+                # 与下载一致（REQ-047a.2）：该平台未导入或超上限绝不静默回退。
+                raise DownloadInputInvalid("cookie")
+        with self._scoped_proxy(platform) as port:
+            return self._run_probe(url, port, cookie_path)
+
+    def _run_probe(self, url: str, port: int, cookie_path: Path | None) -> dict[str, str | None]:
+        command = self._base_command(port) + [
+            # 只读：只取元数据，绝不下载媒体字节。
+            "--skip-download",
+            # 单行 JSON（%()j）：避免逐字段 --print 被字段值内换行错位。
+            "--print", "%()j",
+        ]
+        if cookie_path is not None:
+            command.extend(["--cookies", str(cookie_path)])
+        command.append(url)
+        # stdout/stderr 只入临时文件（有界上限），绝不落日志/数据库正文。
+        stderr_file = tempfile.TemporaryFile()
+        stdout_file = tempfile.TemporaryFile()
+        try:
+            process = self._spawn(command, stdout_file, stderr_file)
+        except Exception:
+            stderr_file.close()
+            stdout_file.close()
+            raise
+        try:
+            try:
+                process.wait(timeout=self.probe_timeout_seconds)
+            except subprocess.TimeoutExpired:
+                raise DownloadInputInvalid("timeout")
+            if process.returncode != 0:
+                raise DownloadInputInvalid("failed")
+            stdout_file.seek(0, os.SEEK_END)
+            if stdout_file.tell() > self.probe_output_limit_bytes:
+                raise DownloadInputInvalid("output_limit")
+            stdout_file.seek(0)
+            return self._parse_probe_metadata(stdout_file.read())
+        finally:
+            if process.poll() is None:
+                self._terminate_process_tree(process)
+            stderr_file.close()
+            stdout_file.close()
+
+    def _parse_probe_metadata(self, raw: bytes) -> dict[str, str | None]:
+        """解析 yt-dlp ``%()j`` 单行 JSON；解析失败按探测失败处理（脱敏）。"""
+        try:
+            info = json.loads(raw.decode("utf-8", "replace"))
+        except ValueError as exc:
+            raise DownloadInputInvalid("failed") from exc
+        if not isinstance(info, dict):
+            raise DownloadInputInvalid("failed")
+        # title 复用下载的清洗纪律（控制字符/换行去除，截断 500）。
+        title = self._extract_title(str(info.get("title") or "").encode("utf-8")) or None
+        # 作者取 uploader，缺省回退 channel（yt-dlp 字段习惯），截断 300。
+        uploader = self._clean_metadata_text(str(info.get("uploader") or ""), 300)
+        channel = self._clean_metadata_text(str(info.get("channel") or ""), 300)
+        return {
+            "title": title,
+            "author": uploader or channel or None,
+            "source_date": self._normalize_upload_date(info.get("upload_date")),
+        }

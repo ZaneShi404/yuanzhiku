@@ -22,6 +22,7 @@ from app.ports.media import (
     DownloadInputInvalid,
     DownloadProcessingCancelled,
     DownloadUnavailable,
+    ImageInputInvalid,
     MediaAiUnavailable,
     MediaDownloaderPort,
     MediaInputInvalid,
@@ -31,6 +32,7 @@ from app.ports.media import (
 from app.ports.repository import RepositoryPort
 from app.ports.storage import ArtifactStoragePort
 from app.services.documents import DocumentService
+from app.services.images import ImageService
 from app.services.imports import ImportService
 from app.services.videos import VideoService
 
@@ -131,6 +133,7 @@ class JobService:
         videos: VideoService | None = None,
         imports: ImportService | None = None,
         downloader: MediaDownloaderPort | None = None,
+        images: ImageService | None = None,
     ) -> None:
         self.repository = repository
         self.artifacts = artifacts
@@ -138,6 +141,7 @@ class JobService:
         self.videos = videos
         self.imports = imports
         self.downloader = downloader
+        self.images = images
         if parser is None:
             from app.adapters.parsers import LocalDocumentParser
 
@@ -162,6 +166,8 @@ class JobService:
                 self._parse(job)
             elif job["kind"] == "video_analyze":
                 self._video_analyze(job)
+            elif job["kind"] == "image_analyze":
+                self._image_analyze(job)
             elif job["kind"] == "video_download":
                 self._video_download(job)
             elif job["kind"] in {"video_transcribe", "video_summarize"}:
@@ -209,7 +215,8 @@ class JobService:
                 pass
         except MediaProcessingCancelled:
             try:
-                if self._finish(job, "cancelled", "视频分析已取消"):
+                message = "图片分析已取消" if job["kind"] == "image_analyze" else "视频分析已取消"
+                if self._finish(job, "cancelled", message):
                     self.repository.set_version_completeness(job["content_version_id"], "incomplete")
                     self.repository.update_processing(job["source_id"], "cancelled")
             except JobLeaseLost:
@@ -224,6 +231,13 @@ class JobService:
         except MediaInputInvalid:
             try:
                 self._finish(job, "failed", "本地视频无法分析")
+                self.repository.set_version_completeness(job["content_version_id"], "incomplete")
+                self.repository.update_processing(job["source_id"], "failed")
+            except JobLeaseLost:
+                pass
+        except ImageInputInvalid:
+            try:
+                self._finish(job, "failed", "本地图片无法分析")
                 self.repository.set_version_completeness(job["content_version_id"], "incomplete")
                 self.repository.update_processing(job["source_id"], "failed")
             except JobLeaseLost:
@@ -435,6 +449,41 @@ class JobService:
         if not self.repository.update_job(job["id"], job["lease_token"], progress=progress, message=message):
             raise JobLeaseLost()
 
+    def _image_analyze(self, job: dict) -> None:
+        if self.images is None:
+            if self._finish(job, "blocked", "本地图片分析服务不可用", progress=100):
+                self.repository.set_version_completeness(job["content_version_id"], "incomplete")
+                self.repository.update_processing(job["source_id"], "blocked")
+            return
+        settings = self.repository.get_settings()
+        try:
+            timeout_seconds = max(60.0, min(86_400.0, float(settings.get("video_timeout_seconds", "3600"))))
+            memory_limit_mb = max(64, min(32_768, int(settings.get("video_memory_limit_mb", "2048"))))
+            disk_limit_mb = max(64, min(32_768, int(settings.get("video_disk_limit_mb", "1024"))))
+        except (TypeError, ValueError):
+            timeout_seconds = 3600.0
+            memory_limit_mb = 2048
+            disk_limit_mb = 1024
+        limits = MediaProcessingLimits(
+            timeout_seconds=timeout_seconds,
+            maximum_memory_bytes=memory_limit_mb * 1024 * 1024,
+            maximum_workspace_bytes=disk_limit_mb * 1024 * 1024,
+        )
+        self.images.analyze(
+            version_id=job["content_version_id"],
+            artifact_sha256=job["artifact_sha256"],
+            limits=limits,
+            cancelled=lambda: self.repository.job_cancel_requested(job["id"]),
+            heartbeat=lambda: self._heartbeat(job),
+            progress=lambda value, message: self._update_video_progress(job, value, message),
+        )
+        if self.repository.job_cancel_requested(job["id"]):
+            self._finish(job, "cancelled", "图片分析已取消")
+            return
+        if self._finish(job, "succeeded", "本地图片分析完成", progress=100):
+            self.repository.set_version_completeness(job["content_version_id"], "complete")
+            self.repository.update_processing(job["source_id"], "succeeded")
+
     def _video_download(self, job: dict) -> None:
         """Restricted link download flow (REQ-047): payload 校验 → 工具可用性 →
         per-job staging + Cookie 拷贝 → 回环过滤代理 → download → probe（含分辨率
@@ -485,8 +534,8 @@ class JobService:
         try:
             cookie_copy: Path | None = None
             if use_cookie:
-                # 作业内只读取导入的 cookies.txt 并拷贝进 staging；原文件不被修改。
-                cookie_source = self.artifacts.paths.download / "cookies.txt"
+                # 作业内只读取该平台已导入的 Cookie 文件并拷贝进 staging；原文件不被修改。
+                cookie_source = self.artifacts.paths.download_cookie_file(platform)
                 try:
                     available = cookie_source.is_file() and cookie_source.stat().st_size <= 1024 * 1024
                 except OSError:

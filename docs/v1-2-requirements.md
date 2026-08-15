@@ -89,11 +89,13 @@
 
 ### 4.4 新增 REQ-047a（Cookie 生命周期，仅 cookies.txt 单通道，5 条）
 
-1. **cookies.txt 通道（唯一）**：用户可显式导入浏览器导出的 cookies.txt（Netscape 格式），大小上限 1MB，仅存于 `data/state/download/cookies.txt`；重复导入覆盖旧文件；支持一键删除（幂等）。
-2. 提交下载时用户显式选择"使用已导入 Cookie"（`use_cookie: true`），仅用于该次下载；未导入 Cookie 文件却选择使用 → `422`，绝不静默回退到无 Cookie 下载。
+> 2026-08-15 修订为**按平台 Cookie 库**（见变更日志）：单文件 `cookies.txt` → `cookies/<platform>.txt`，下载/探测按链接平台自动选用；安全不变量不变。以下为现行文本：
+
+1. **按平台 cookies 文件**：用户可显式导入浏览器导出的 cookies.txt（Netscape 格式），按平台分别保存于 `data/state/download/cookies/<platform>.txt`（platform 限白名单平台 bilibili/douyin），每个文件大小上限 1MB；同平台重复导入覆盖旧文件；支持按平台一键删除（幂等）。遗留单文件 `cookies.txt` 在启动时按注册域标签边界匹配自动分拣迁移到对应平台文件并删除旧文件，分拣不打印、不落日志任何 Cookie 内容。
+2. 提交下载时用户显式选择"使用已导入 Cookie"（`use_cookie: true`），仅用于该次下载；后端按链接平台自动选用该平台已导入的 Cookie 文件，无需用户切换；该平台未导入 Cookie 文件却选择使用 → `422`，绝不静默回退到无 Cookie 下载、绝不改用其他平台的 Cookie。
 3. Cookie 内容绝不进入数据库、日志正文、API 响应、备份（`REQ-040`）、导出 ZIP 与 reimport（`REQ-041`）、审计事件；备份/导出/再导入规则显式排除 `data/state/download` 路径。
-4. 使用 Cookie 时把 Cookie 文件**拷贝**注入该作业 staging，作业结束（无论成败）立即删除拷贝；作业运行期间不触碰、不修改原文件。
-5. 能力接口暴露 `cookie_file_available` 状态；不可用时前端禁用该开关并给出导入引导。
+4. 使用 Cookie 时把该平台的 Cookie 文件**拷贝**注入该作业 staging，作业结束（无论成败）立即删除拷贝；作业运行期间不触碰、不修改原文件。
+5. 能力接口暴露按平台的 `cookies` 状态映射；某平台不可用时前端在该平台的开关上禁用并给出导入引导。
 
 ### 4.5 REQ-043 修订
 
@@ -253,6 +255,7 @@ class MediaDownloaderPort(Protocol):
 |---|---|---|
 | bilibili | `bilibili.com` | 主站/API（含 `api.bilibili.com` 等子域） |
 | bilibili | `bilivideo.com` | 视频媒体 CDN |
+| bilibili | `bilivideo.cn` | B站 MCDN 镜像媒体域（2026-08-15 实测登记：真实链接出站命中 `xy119x188x120x16xy.mcdn.bilivideo.cn:8082`；决策 13） |
 | bilibili | `hdslb.com` | 接口/媒体镜像域 |
 | bilibili | `b23.tv` | 入口短链（仅作跳转入口，其重定向终点由代理限制在 bilibili 组内注册域） |
 | douyin | `douyin.com` | 主站（含 `v.douyin.com` 分享短链） |
@@ -485,3 +488,5 @@ class MediaDownloaderPort(Protocol):
 - 2026-08-13（真实链接验收环境发现）：B站/抖音真实下载在 fake-IP 网络环境被代理的保留段拒绝阻断（`b23.tv`→`198.18.0.55` 等，公共 DNS 查询同样被网络层接管）。裁定新增**隧道段例外**（决策 10）——注册域主机名校验通过时放行 `198.18.0.0/15` 与 `28.0.0.0/8`，其余保留段仍无条件拒绝；REQ-047.2、7.2.1、T-VID-003 用例 10 同步修订，属安全边界变更、经独立审核门禁。
 - 2026-08-14（抖音真实下载实测）：douyin 组注册域清单增补 `365yg.com`（媒体 CDN，实测 `v95-aw-default.365yg.com`；决策 11），7.2.1 表格同步。
 - 2026-08-14（抖音竖屏实测）：分辨率档位语义修正（决策 12）——"高度 ≤1080"后置断言改为"短边 ≤1080 且长边 ≤1920"，竖屏 1080×1920 放行；REQ-047.3、7.2、7.3、威胁模型行、T-VID-003 用例 5、假设 4 同步。
+- 2026-08-15（B站真实链接排障）：bilibili 组注册域清单增补 `bilivideo.cn`（MCDN 镜像媒体域，实测 `xy119x188x120x16xy.mcdn.bilivideo.cn:8082`；决策 13），7.2.1 表格同步；修复回环代理 `_bidirectional_relay` 的固定时长强拆缺陷（join 带超时导致活跃传输在 ~2×IO 超时后被拦腰切断，大文件下载必现）——转发时长改由套接字 IO 超时与对端关闭驱动，无绝对上限。
+- 2026-08-15（按平台 Cookie 库）：REQ-047a 修订——单文件 `cookies.txt` 改为按平台 `cookies/<platform>.txt`（bilibili/douyin 各一份、每平台 1MB、覆盖导入、按平台幂等删除）；下载与探测按链接平台自动选用对应文件，该平台未导入却勾选 → 422，绝不静默回退或跨平台借用；能力接口 `cookie_file_available` 改为按平台 `cookies` 映射；设置端点改为 `POST/DELETE /settings/download-cookies/{platform}`；遗留单文件启动时按注册域分拣迁移（内容不打印不落日志）。安全不变量（不进 DB/日志/备份/导出/reimport、作业 staging 拷贝即删）全部保留；§4.4 与 T-VID-003 同步。

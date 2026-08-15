@@ -211,11 +211,11 @@ def test_manual_representation_and_reimport(client: TestClient, runtime_root: Pa
 def test_download_link_endpoints_in_openapi_and_capabilities(client: TestClient) -> None:
     schema = client.get("/openapi.json").json()
     assert "/api/v1/videos/link" in schema["paths"]
-    assert "/api/v1/settings/download-cookie" in schema["paths"]
-    assert "delete" in schema["paths"]["/api/v1/settings/download-cookie"]
+    assert "/api/v1/settings/download-cookies/{platform}" in schema["paths"]
+    assert "delete" in schema["paths"]["/api/v1/settings/download-cookies/{platform}"]
     capabilities = client.get("/api/v1/capabilities").json()
     downloader = capabilities["downloader"]
-    assert set(downloader) == {"enabled", "adapter", "version", "supported_platforms", "cookie_file_available", "network"}
+    assert set(downloader) == {"enabled", "adapter", "version", "supported_platforms", "cookies", "network"}
     assert downloader["adapter"] == "yt-dlp"
     assert downloader["supported_platforms"] == ["bilibili", "douyin"]
     # enabled 与探测结果一致（不硬编码测试机无 FFmpeg）：如实报告，不伪装可用
@@ -225,7 +225,7 @@ def test_download_link_endpoints_in_openapi_and_capabilities(client: TestClient)
     ffprobe_bin = os.environ.get("YUANZHIKU_FFPROBE_BIN", "ffprobe")
     tools_available = bool(shutil.which(ffmpeg_bin) and shutil.which(ffprobe_bin))
     assert downloader["enabled"] is tools_available
-    assert downloader["cookie_file_available"] is False
+    assert downloader["cookies"] == {"bilibili": False, "douyin": False}
 
 
 def test_download_link_error_codes_stable(client: TestClient) -> None:
@@ -268,7 +268,7 @@ def test_download_link_error_codes_stable(client: TestClient) -> None:
 
 def test_download_cookie_delete_cors_preflight_and_idempotent_delete(client: TestClient) -> None:
     preflight = client.options(
-        "/api/v1/settings/download-cookie",
+        "/api/v1/settings/download-cookies/bilibili",
         headers={
             "Origin": "http://localhost:5173",
             "Access-Control-Request-Method": "DELETE",
@@ -277,5 +277,5 @@ def test_download_cookie_delete_cors_preflight_and_idempotent_delete(client: Tes
     )
     assert preflight.status_code == 200
     assert "DELETE" in preflight.headers.get("access-control-allow-methods", "")
-    assert client.delete("/api/v1/settings/download-cookie").status_code == 204
-    assert client.delete("/api/v1/settings/download-cookie").status_code == 204
+    assert client.delete("/api/v1/settings/download-cookies/bilibili").status_code == 204
+    assert client.delete("/api/v1/settings/download-cookies/bilibili").status_code == 204

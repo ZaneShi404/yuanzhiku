@@ -11,3 +11,4 @@ pytest==8.3.5
 httpx==0.28.1
 yt-dlp==2026.7.4
 docling==2.120.1
+pillow==12.3.0

@@ -236,6 +236,14 @@ class DownloadLinkRequest(BaseModel):
         return sorted(set(value))
 
 
+class LinkProbeRequest(BaseModel):
+    """REQ-047b 链接元数据探测请求：只读子能力，不含 rights 等落库字段。"""
+
+    url: str = Field(min_length=1, max_length=4096)
+    platform: str = Field(min_length=1, max_length=32)
+    use_cookie: bool = False
+
+
 class ExportCreate(BaseModel):
     confirmed: bool
 

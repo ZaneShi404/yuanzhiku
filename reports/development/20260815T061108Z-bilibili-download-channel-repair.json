@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "report_id": "RPT-BILIBILI-DOWNLOAD-CHANNEL-REPAIR-20260815T061108Z-001",
+  "recorded_at_utc": "2026-08-15T06:11:08Z",
+  "report_kind": "development",
+  "author_role": "development",
+  "independence": "non_independent",
+  "product_version": "v1.3.0",
+  "decision_scope": "archive_local",
+  "verdict": "accepted",
+  "requirements": ["REQ-047"],
+  "defects": [],
+  "evidence_refs": [
+    "reports/development/20260815T061108Z-bilibili-download-channel-repair.md"
+  ],
+  "release_gates": [
+    {"gate_id": "GATE-UNIT-INTEGRATION-REGRESSION", "status": "passed", "requirements": ["REQ-047"]},
+    {"gate_id": "GATE-FRONTEND-BUILD", "status": "not_applicable", "requirements": []},
+    {"gate_id": "GATE-BROWSER-BLACKBOX", "status": "blocked", "requirements": ["REQ-047"]},
+    {"gate_id": "GATE-COMPOSE-PHYSICAL", "status": "blocked", "requirements": ["REQ-045"]},
+    {"gate_id": "GATE-RELEASE-READINESS", "status": "blocked", "requirements": ["REQ-046"]}
+  ],
+  "summary": "Root-caused bilibili download failures to the registered-domain list missing bilivideo.cn (MCDN stream hosts), fixed per decision 13 with real-link evidence; also removed the filtering proxy relay's fixed-lifetime teardown that would have cut transfers longer than about 60 seconds. Download-channel regression: 93 passed; user-confirmed bilibili download succeeded afterwards."
+}

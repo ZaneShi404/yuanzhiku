@@ -17,6 +17,12 @@ class MediaInputInvalid(ValueError):
     pass
 
 
+class ImageInputInvalid(ValueError):
+    """本地图片无法识别或解码（损坏/越界），消息一律脱敏。"""
+
+    pass
+
+
 class MediaProcessingCancelled(RuntimeError):
     pass
 
@@ -93,8 +99,13 @@ class MediaDownloaderPort(Protocol):
     def capability(self) -> dict[str, object]: ...
 
     # {"enabled", "adapter": "yt-dlp", "version", "supported_platforms",
-    #  "cookie_file_available", "network": True}
+    #  "cookies": {platform: bool}, "network": True}
     def config_hash(self, platform: str, format_profile: str) -> str: ...
+
+    # REQ-047b 只读元数据探测（--skip-download，不下载、不持久化）；
+    # 与 download 同白名单、同回环代理、同无 shell 子进程约束；
+    # 返回 {"title", "author", "source_date"}（均可为 None）。
+    def probe_metadata(self, url: str, platform: str, use_cookie: bool) -> dict[str, str | None]: ...
 
     def download(
         self,
@@ -103,7 +114,7 @@ class MediaDownloaderPort(Protocol):
         platform: str,
         workspace: Path,
         limits: MediaProcessingLimits,
-        use_cookie: bool,               # 是否使用已导入 cookies.txt
+        use_cookie: bool,               # 是否使用该平台已导入的 Cookie 文件
         cookie_path: Path | None,       # use_cookie=True 时指向 staging 内 Cookie 拷贝
         cancelled: Callable[[], bool],
         heartbeat: Callable[[], None],
