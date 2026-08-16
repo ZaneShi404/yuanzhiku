@@ -253,7 +253,7 @@ function representationKindLabel(kind: string) {
   const map: Record<string, string> = { extraction: '提取', manual: '人工修订', transcription: '转写', summary: '摘要' }
   return map[kind] || kind
 }
-type SummarySuggestions = { domains: string[]; genres: string[]; tags: string[]; tier: number; visual_gap: boolean }
+type SummarySuggestions = { domains: string[]; genres: string[]; tags: string[]; tier: number; visual_gap: boolean; applied: boolean }
 function parseSummaryMarker(text: string): { body: string; suggestions: SummarySuggestions } | null {
   const match = text.match(/\s*<!--yuanzhiku:suggestions (\{[\s\S]*?\}) -->\s*$/)
   if (!match) return null
@@ -268,6 +268,7 @@ function parseSummaryMarker(text: string): { body: string; suggestions: SummaryS
         tags: strings(raw.tags),
         tier: raw.tier === 2 ? 2 : 1,
         visual_gap: raw.visual_gap === true,
+        applied: raw.applied === true,
       },
     }
   } catch {
@@ -1093,7 +1094,7 @@ function VideoDetailPanel({
   }
 
   return <section className="video-panel">
-    <header><div><h2>本地视频</h2><span>{detail?.analysis ? '已完成本地分析' : loading ? '正在读取视频状态' : '等待本地分析结果'}</span></div><Status value={version.completeness}/></header>
+    <header><div><h2>本地视频</h2><span>{detail?.analysis ? '已提取本地媒体信息（不含 AI 理解）' : loading ? '正在读取视频状态' : '等待本地分析结果'}</span></div><Status value={version.completeness}/></header>
     {detail && detail.analyses.length > 1 && <p className="muted">本结果基于 {detail.analyses.length} 份分析中的最新一份</p>}
     {!disabled && <div className="video-player-wrap"><video ref={playerRef} controls preload="metadata" src={streamPath}>当前浏览器无法播放此本地视频。</video></div>}
     {metadata ? <div className="video-metadata-grid">
@@ -1105,7 +1106,7 @@ function VideoDetailPanel({
     </div> : <p className="muted video-waiting">{detail?.media_capability.enabled === false ? '本机未检测到可用的 FFmpeg/ffprobe，视频分析作业会被阻止。' : '视频原件已保存，分析作业完成后会在这里显示媒体参数和时间采样帧。'}</p>}
     {frames.length > 0 && <section className="video-frames"><header><h3>时间采样关键帧</h3><span>{frames.length} 帧</span><span className="muted">场景切换 + 等间隔抽样，帧内容未经理解</span></header><div className="frame-strip">{frames.map(frame => <button type="button" className={selectedFrameId === frame.id ? 'video-frame selected' : 'video-frame'} key={frame.id} onClick={() => seek(frame)} title={`${frame.reason === 'scene' ? '场景切换' : '等距'} · 定位到 ${formatDuration(frame.time_ms)}`}><img src={`${API}/videos/${encodeURIComponent(sourceId)}/frames/${encodeURIComponent(frame.id)}${versionQuery}`} alt={`关键帧 ${frame.ordinal + 1}`} /><span>{formatDuration(frame.time_ms)}</span></button>)}</div></section>}
     <section className="video-ai-status"><header><h3>转写与摘要</h3><Status value={ai?.enabled ? 'succeeded' : 'blocked'}/></header><div><p>{ai?.enabled ? '媒体 AI 服务已配置；音频与文本将发送至你配置的云端服务处理。' : '媒体 AI 服务尚未配置；不会上传视频或发起外部请求。'}</p><div className="video-ai-actions"><button type="button" className="button secondary" disabled={disabled || !ai?.transcribe_enabled || Boolean(busy)} onClick={() => void queueAiJob('transcribe')}>{busy === 'transcribe' ? '正在提交' : '语音转写'}</button><button type="button" className="button secondary" disabled={disabled || !ai?.understand_enabled || Boolean(busy)} onClick={() => void queueAiJob('summarize')}>{busy === 'summarize' ? '正在提交' : '内容摘要'}</button></div></div>
-      {summary && suggestions && <div className="video-summary"><header><h4>内容摘要</h4><span className="tier-badge">{suggestions.tier === 2 ? '深度' : '标准'}</span>{suggestions.visual_gap && <span className="muted">可能缺少画面信息</span>}</header><p className="summary-text">{summary.body}</p>{hasSuggestions && <p className="muted">建议：领域 {suggestions.domains.map(value => taxonomyLabel(taxonomy.domains, value)).join('、') || '-'} · 体裁 {suggestions.genres.map(value => taxonomyLabel(taxonomy.genres, value)).join('、') || '-'} · 标签 {suggestions.tags.join('、') || '-'}</p>}<div className="video-ai-actions"><button type="button" className="button secondary" disabled={disabled || !ai?.tier2_enabled || Boolean(busy)} title={ai?.tier2_enabled ? '使用视觉模型理解关键帧后重新生成摘要' : '在设置中配置视觉模型后可用'} onClick={() => void queueAiJob('summarize', true)}>{busy === 'force-tier2' ? '正在提交' : '强制深度理解'}</button>{hasSuggestions && <button type="button" className="button secondary" disabled={disabled || Boolean(busy)} onClick={() => void adoptSuggestions()}>{busy === 'adopt' ? '正在采纳' : '采纳建议'}</button>}</div></div>}
+      {summary && suggestions && <div className="video-summary"><header><h4>内容摘要</h4><span className="tier-badge">{suggestions.tier === 2 ? '深度' : '标准'}</span>{suggestions.visual_gap && <span className="muted">可能缺少画面信息</span>}</header><p className="summary-text">{summary.body}</p>{hasSuggestions && <p className="muted">建议：领域 {suggestions.domains.map(value => taxonomyLabel(taxonomy.domains, value)).join('、') || '-'} · 体裁 {suggestions.genres.map(value => taxonomyLabel(taxonomy.genres, value)).join('、') || '-'} · 标签 {suggestions.tags.join('、') || '-'}</p>}<div className="video-ai-actions"><button type="button" className="button secondary" disabled={disabled || !ai?.tier2_enabled || Boolean(busy)} title={ai?.tier2_enabled ? '使用视觉模型理解关键帧后重新生成摘要' : '在设置中配置视觉模型后可用'} onClick={() => void queueAiJob('summarize', true)}>{busy === 'force-tier2' ? '正在提交' : '强制深度理解'}</button>{hasSuggestions && (suggestions.applied ? <span className="muted">建议已自动写入（仅填空缺），可在编辑元数据中修改</span> : <button type="button" className="button secondary" disabled={disabled || Boolean(busy)} onClick={() => void adoptSuggestions()}>{busy === 'adopt' ? '正在采纳' : '采纳建议'}</button>)}</div></div>}
     </section>
   </section>
 }
@@ -1138,10 +1139,12 @@ function extractUrl(text: string): string {
   return match[0].replace(/[，。！？；、）】」』"'<>.,;!?]+$/, '')
 }
 function shareNotesOf(text: string, url: string): string {
-  // 分享口令提取链接后的剩余文案作备注参考：去掉链接、首个中文字符前的口令前缀（字母/数字/符号段）与结尾引导语。
+  // 分享口令提取链接后的剩余文案作备注参考：去掉链接、首个中文字符前的口令前缀、开头引导语与结尾口令码段。
   return text.replace(url, ' ')
     .replace(/复制此链接.{0,20}$/g, '')
     .replace(/^[!-~\s]+(?=[一-鿿])/, '')
+    .replace(/^复制打开抖音[，,]?\s*/, '')
+    .replace(/(\s+[A-Za-z0-9@.:/_-]+){2,}\s*$/, '')
     .replace(/\s+/g, ' ').trim().slice(0, 4000)
 }
 
@@ -1163,6 +1166,7 @@ function ImportPage({ taxonomy, onDone, onDoneLink, onDoneCard, onMessage }: {
   const [tags, setTags] = useState('')
   const [selectedDomains, setSelectedDomains] = useState<string[]>([])
   const [selectedGenre, setSelectedGenre] = useState('')
+  const [taxonomyOpen, setTaxonomyOpen] = useState(false)
   const [busy, setBusy] = useState(false)
   const [uploadProgress, setUploadProgress] = useState<number | null>(null)
   const [asCard, setAsCard] = useState(false)
@@ -1351,8 +1355,11 @@ function ImportPage({ taxonomy, onDone, onDoneLink, onDoneCard, onMessage }: {
       <div className="form-row"><label>作者<input value={author} onChange={event => { markTouched('author'); setAuthor(event.target.value) }} /></label><label>语言<input required value={language} onChange={event => { markTouched('language'); setLanguage(event.target.value) }}/></label></div>
       <div className="form-row"><label>来源日期<input type="date" value={sourceDate} onChange={event => { markTouched('sourceDate'); setSourceDate(event.target.value) }}/></label><label>自由标签<input value={tags} onChange={event => setTags(event.target.value)} placeholder="用逗号分隔" /></label></div>
       <label>备注<textarea value={notes} onChange={event => setNotes(event.target.value)} /></label>
+      <div className="advanced"><button type="button" className="text-button" onClick={() => setTaxonomyOpen(value => !value)}><ChevronDown size={16} className={taxonomyOpen ? 'turned' : ''}/>手工分类（可跳过，AI 可自动分类）</button></div>
+      {taxonomyOpen && <>
       <fieldset><legend>领域（可多选）</legend><div className="check-grid">{taxonomy.domains.map(item => <label key={item.value}><input type="checkbox" checked={selectedDomains.includes(item.value)} onChange={() => setSelectedDomains(current => current.includes(item.value) ? current.filter(value => value !== item.value) : [...current, item.value])}/>{item.label}</label>)}</div></fieldset>
       <fieldset><legend>体裁（单选，可不选）</legend><div className="check-grid">{taxonomy.genres.map(item => <label key={item.value}><input type="radio" name="import-genre" checked={selectedGenre === item.value} onChange={() => setSelectedGenre(item.value)}/>{item.label}</label>)}</div>{selectedGenre && <button type="button" className="button text" onClick={() => setSelectedGenre('')}>清除体裁</button>}</fieldset>
+      </>}
       <label>权利确认<select required value={right} onChange={event => setRight(event.target.value)}><option value="" disabled>请选择</option>{rights.map(item => <option key={item[0]} value={item[0]}>{item[1]}</option>)}</select></label>
     </>}
     {uploadProgress !== null && <div className="upload-progress" aria-live="polite"><span style={{ width: `${uploadProgress}%` }}/><small>{uploadProgress}%</small></div>}
@@ -1441,10 +1448,11 @@ function jobLabel(kind: string) {
     parse: '本地解析',
     backup: '日常备份',
     integrity_sample: '完整性抽样校验',
-    video_analyze: '本地视频分析',
+    video_analyze: '本地媒体信息提取',
     video_transcribe: '视频语音转写',
     video_summarize: '视频内容摘要',
     video_download: '链接下载',
+    source_classify: 'AI 分类',
   }
   return labels[kind] || kind
 }
@@ -1543,12 +1551,14 @@ type AiSettings = {
   transcribe: { provider: string; base_url: string; model: string; has_key: boolean; key_hint: string | null }
   understand: { provider: string; base_url: string; chat_model: string; vision_model: string; has_key: boolean; key_hint: string | null }
   timeout_seconds: number
+  auto_pipeline: boolean
 }
 
 function AiSettingsSection({ onMessage }: { onMessage: (message: string) => void }) {
   const [transcribe, setTranscribe] = useState({ provider: 'off', base_url: '', model: '', api_key: '' })
   const [understand, setUnderstand] = useState({ provider: 'off', base_url: '', chat_model: '', vision_model: '', api_key: '' })
   const [timeoutSeconds, setTimeoutSeconds] = useState('300')
+  const [autoPipeline, setAutoPipeline] = useState(true)
   const [keyHints, setKeyHints] = useState<{ transcribe: string | null; understand: string | null }>({ transcribe: null, understand: null })
   const [testResult, setTestResult] = useState<Record<string, string>>({})
   const [busy, setBusy] = useState('')
@@ -1556,6 +1566,7 @@ function AiSettingsSection({ onMessage }: { onMessage: (message: string) => void
     setTranscribe({ provider: value.transcribe.provider, base_url: value.transcribe.base_url, model: value.transcribe.model, api_key: '' })
     setUnderstand({ provider: value.understand.provider, base_url: value.understand.base_url, chat_model: value.understand.chat_model, vision_model: value.understand.vision_model, api_key: '' })
     setTimeoutSeconds(String(value.timeout_seconds))
+    setAutoPipeline(value.auto_pipeline)
     setKeyHints({
       transcribe: value.transcribe.has_key ? value.transcribe.key_hint : null,
       understand: value.understand.has_key ? value.understand.key_hint : null,
@@ -1574,6 +1585,7 @@ function AiSettingsSection({ onMessage }: { onMessage: (message: string) => void
           transcribe: { provider: transcribe.provider, base_url: transcribe.base_url, model: transcribe.model, ...(transcribe.api_key ? { api_key: transcribe.api_key } : {}) },
           understand: { provider: understand.provider, base_url: understand.base_url, chat_model: understand.chat_model, vision_model: understand.vision_model, ...(understand.api_key ? { api_key: understand.api_key } : {}) },
           timeout_seconds: Number(timeoutSeconds) || 300,
+          auto_pipeline: autoPipeline,
         }),
       })
       apply(value)
@@ -1614,6 +1626,8 @@ function AiSettingsSection({ onMessage }: { onMessage: (message: string) => void
         <label>API 密钥<input type="password" autoComplete="off" value={understand.api_key} onChange={event => setUnderstand(current => ({ ...current, api_key: event.target.value }))} placeholder={keyHints.understand ? `已配置（${keyHints.understand}），输入以替换` : '未配置'}/></label>
       </div><div className="inline-actions"><button type="button" className="button secondary" disabled={Boolean(busy)} onClick={() => void test('understand')}>{busy === 'test-understand' ? '正在测试' : '测试连接'}</button>{testResult.understand && <span className="hint">{testResult.understand}</span>}</div></fieldset>
       <label>AI 调用超时（秒）<input type="number" min="60" max="86400" value={timeoutSeconds} onChange={event => setTimeoutSeconds(event.target.value)}/></label>
+      <label className="check-row"><input type="checkbox" checked={autoPipeline} onChange={event => setAutoPipeline(event.target.checked)}/>自动流水线</label>
+      <p className="hint">配置 AI 后，导入视频自动串联转写/摘要/分类；文档与粘贴导入后自动分类（内容将发送至所配置端点）。</p>
       <p className="hint">测试连接使用已保存的配置与密钥；修改后请先保存。</p>
       <div className="form-actions"><button className="button primary" disabled={Boolean(busy)}>{busy === 'save' ? '正在保存' : '保存媒体 AI 设置'}</button></div>
     </form>

@@ -121,9 +121,9 @@ class JobLeaseLost(RuntimeError):
     pass
 
 
-# REQ-033a：转写/摘要是 video_analyze 之后的附加产物，其成败绝不触碰
+# REQ-033a：转写/摘要/分类是分析或解析之后的附加产物，其成败绝不触碰
 # 版本完整性与来源处理状态。
-AI_JOB_KINDS = {"video_transcribe", "video_summarize"}
+AI_JOB_KINDS = {"video_transcribe", "video_summarize", "source_classify"}
 
 
 def _format_ms(milliseconds: int) -> str:
@@ -137,6 +137,7 @@ def _summary_text(
     frame_descriptions: list[dict[str, Any]] | None,
     tier: int,
     visual_gap: bool,
+    applied: bool,
 ) -> str:
     """摘要表示正文：摘要 + 完整性附录 + 画面理解附录 + 建议标记行（前端解析用）。"""
     lines = [str(result["summary"]).strip(), "", "---"]
@@ -165,6 +166,7 @@ def _summary_text(
             "tags": result.get("suggested_tags") or [],
             "tier": tier,
             "visual_gap": visual_gap,
+            "applied": applied,
         },
         ensure_ascii=False,
         separators=(",", ":"),
@@ -230,6 +232,8 @@ class JobService:
                 self._video_transcribe(job)
             elif job["kind"] == "video_summarize":
                 self._video_summarize(job)
+            elif job["kind"] == "source_classify":
+                self._source_classify(job)
             elif job["kind"] == "backup":
                 if self.backup_runner is None:
                     self._finish(job, "blocked", "备份服务不可用")
@@ -506,6 +510,14 @@ class JobService:
         if self._finish(job, "succeeded", "本地视频分析完成", progress=100):
             self.repository.set_version_completeness(job["content_version_id"], "complete")
             self.repository.update_processing(job["source_id"], "succeeded")
+            # 自动流水线（REQ-051 修订）：转写组已配置时分析完成自动串联转写；
+            # 未配置对应分组时不入队（也不产生 blocked 作业）。
+            if (
+                self.media_ai is not None
+                and self._auto_pipeline_enabled()
+                and self.media_ai.capability().get("transcribe_enabled")
+            ):
+                self._enqueue_chained("video_transcribe", job)
 
     def _update_video_progress(self, job: dict, progress: int, message: str) -> None:
         if not self.repository.update_job(job["id"], job["lease_token"], progress=progress, message=message):
@@ -517,6 +529,57 @@ class JobService:
             if item["kind"] == kind
         ]
         return matches[-1] if matches else None
+
+    def _auto_pipeline_enabled(self) -> bool:
+        return self.repository.get_settings().get("ai_auto_pipeline", "on") == "on"
+
+    def _enqueue_chained(self, kind: str, job: dict) -> None:
+        """自动流水线串联后继作业；同版本同 kind 已有排队/运行中作业时不重复入队。"""
+        for existing in self.repository.list_jobs():
+            if (
+                existing["kind"] == kind
+                and existing["content_version_id"] == job["content_version_id"]
+                and existing["state"] in {"queued", "running", "retry_wait"}
+            ):
+                return
+        operation = {"video_transcribe": "transcribe", "video_summarize": "summarize", "source_classify": "classify"}[kind]
+        self.repository.create_job(
+            kind, job["source_id"], job["content_version_id"], job["artifact_sha256"],
+            self.media_ai.config_hash(operation), {}, priority=100,
+        )
+
+    def _apply_classification(self, source_id: str, suggestions: dict[str, Any]) -> None:
+        """AI 分类建议自动写入来源元数据，只填空缺：领域/体裁仅在当前为空时写入，
+        标签取并集合并；用户已填字段绝不覆盖。无可填内容时不写库、不审计。
+        """
+        source = self.repository.get_source(source_id)
+        if source is None:
+            return
+        try:
+            current_domains = json.loads(source["domains_json"])
+            current_genres = json.loads(source["genres_json"])
+            current_tags = json.loads(source["tags_json"])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return
+        domains = sorted({item for item in suggestions.get("domains") or [] if isinstance(item, str)})
+        genres = sorted({item for item in suggestions.get("genres") or [] if isinstance(item, str)})[:1]
+        tags = sorted({item for item in suggestions.get("tags") or [] if isinstance(item, str)})
+        values: dict[str, str] = {}
+        if not current_domains and domains:
+            values["domains_json"] = json.dumps(domains, ensure_ascii=False)
+        if not current_genres and genres:
+            values["genres_json"] = json.dumps(genres, ensure_ascii=False)
+        merged_tags = sorted(set(current_tags) | set(tags))
+        if tags and merged_tags != sorted(set(current_tags)):
+            values["tags_json"] = json.dumps(merged_tags, ensure_ascii=False)
+        if not values:
+            return
+        self.repository.update_source_metadata(source_id, values)
+        # 审计只记写入字段与数量，绝不记建议内容本身。
+        self.repository.audit(
+            "ai_classify_applied", source_id,
+            " ".join(f"{key.removesuffix('_json')}={len(json.loads(value))}" for key, value in sorted(values.items())),
+        )
 
     def _video_transcribe(self, job: dict) -> None:
         """语音转写（REQ-017）：AI 附加产物，证据一律 video_time_range 定位（REQ-016）。
@@ -574,6 +637,9 @@ class JobService:
             evidence=evidence,
         )
         self._finish(job, "succeeded", "语音转写完成", progress=100)
+        # 自动流水线（REQ-051 修订）：理解组已配置时转写完成自动串联摘要。
+        if self._auto_pipeline_enabled() and self.media_ai.capability().get("understand_enabled"):
+            self._enqueue_chained("video_summarize", job)
 
     def _video_summarize(self, job: dict) -> None:
         """内容摘要（REQ-017）：转写 → 完整性判断 → 分层（tier1/tier2）→ 摘要表示。
@@ -677,7 +743,7 @@ class JobService:
         parser_name = f"ai-{settings.get('ai_understand_provider', 'off')}-{chat_model}"
         if tier2:
             parser_name += f"+{vision_model}"
-        text = _summary_text(result, assessment, frame_descriptions, tier, visual_gap)
+        text = _summary_text(result, assessment, frame_descriptions, tier, visual_gap, applied=True)
         # 摘要针对全片内容：证据以整段 video_time_range 定位（REQ-016 同转写纪律）。
         summary_end_ms = duration_ms or max((end for _, end in ranges), default=0) or 1000
         excerpt = str(result["summary"])[:300]
@@ -698,7 +764,50 @@ class JobService:
             chunks=self.documents.search_chunk_pairs(text),
             evidence=evidence,
         )
+        # AI 建议自动写入来源元数据（REQ-051 修订，只填空缺），用户可事后修改。
+        if job["source_id"]:
+            self._apply_classification(job["source_id"], {
+                "domains": result.get("suggested_domains") or [],
+                "genres": result.get("suggested_genres") or [],
+                "tags": result.get("suggested_tags") or [],
+            })
         self._finish(job, "succeeded", "内容摘要完成", progress=100)
+
+    def _source_classify(self, job: dict) -> None:
+        """文档/粘贴 AI 分类（REQ-051 修订）：正文发理解组产出领域/体裁/标签建议，
+        按只填空缺规则自动写入来源元数据。REQ-033a 同转写：成败/取消均不改
+        版本完整性与来源处理状态。
+        """
+        if self.media_ai is None or not self.media_ai.capability().get("understand_enabled"):
+            self._finish(job, "blocked", "未配置媒体 AI 服务", progress=100)
+            return
+        cancelled = lambda: self.repository.job_cancel_requested(job["id"])
+        version_id = job["content_version_id"]
+        extraction = self._latest_representation(version_id, "extraction")
+        if extraction is None or not str(extraction["text_content"] or "").strip():
+            self._finish(job, "failed", "没有可用于分类的正文", progress=100)
+            return
+        source = self.repository.get_source(job["source_id"]) if job["source_id"] else None
+        # 出网正文截断到前 8000 字符，控制发送体量（适配器侧同上限兜底）。
+        text = str(extraction["text_content"]).strip()[:8000]
+        self._update_video_progress(job, 20, "正在 AI 分类")
+        suggestions = self._run_with_lease_heartbeat(
+            job,
+            lambda: self.media_ai.classify(
+                text,
+                {
+                    "title": (source or {}).get("title") or "",
+                    "taxonomy_domains": list(TAXONOMY_DOMAIN_VALUES),
+                    "taxonomy_genres": list(TAXONOMY_GENRE_VALUES),
+                },
+            ),
+        )
+        if cancelled():
+            self._finish(job, "cancelled", "媒体 AI 处理已取消")
+            return
+        if job["source_id"]:
+            self._apply_classification(job["source_id"], suggestions)
+        self._finish(job, "succeeded", "AI 分类完成", progress=100)
 
     def _image_analyze(self, job: dict) -> None:
         if self.images is None:
@@ -940,3 +1049,11 @@ class JobService:
         if self._finish(job, "succeeded", "本地解析完成", progress=100):
             self.repository.set_version_completeness(job["content_version_id"], "complete")
             self.repository.update_processing(job["source_id"], "succeeded")
+            # 自动流水线（REQ-051 修订）：parse 仅覆盖文档/粘贴，理解组已配置时
+            # 自动串联 AI 分类；image_analyze 无正文文本，不参与自动分类。
+            if (
+                self.media_ai is not None
+                and self._auto_pipeline_enabled()
+                and self.media_ai.capability().get("understand_enabled")
+            ):
+                self._enqueue_chained("source_classify", job)

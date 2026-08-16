@@ -345,6 +345,7 @@ class AiSettingsUpdate(BaseModel):
     transcribe: AiTranscribeSettings | None = None
     understand: AiUnderstandSettings | None = None
     timeout_seconds: int | None = Field(default=None, ge=60, le=86_400)
+    auto_pipeline: bool | None = None
 
 
 class AiConnectionTestRequest(BaseModel):

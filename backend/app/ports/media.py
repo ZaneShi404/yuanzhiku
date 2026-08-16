@@ -81,6 +81,8 @@ class MediaAiPort(Protocol):
 
     def summarize(self, inputs: dict[str, Any], cancelled: Callable[[], bool]) -> dict[str, Any]: ...
 
+    def classify(self, text: str, context: dict[str, Any]) -> dict[str, Any]: ...
+
 
 class DownloadUnavailable(RuntimeError):
     """Downloader tools are missing or unconfigured; the job becomes blocked."""

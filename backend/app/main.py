@@ -226,6 +226,7 @@ def _ai_settings_view(services: "ApplicationServices") -> dict[str, Any]:
             "key_hint": _ai_key_hint(credentials.get("understand")),
         },
         "timeout_seconds": timeout_seconds,
+        "auto_pipeline": settings.get("ai_auto_pipeline", "on") == "on",
     }
 
 
@@ -458,6 +459,8 @@ def create_app(root: str | Path | None = None, *, acquire_lock: bool = True) -> 
             ) or credentials_changed
         if request.timeout_seconds is not None:
             updates["ai_timeout_seconds"] = str(request.timeout_seconds)
+        if request.auto_pipeline is not None:
+            updates["ai_auto_pipeline"] = "on" if request.auto_pipeline else "off"
         if updates:
             svc.repository.update_settings(updates)
         if credentials_changed:

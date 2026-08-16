@@ -38,6 +38,7 @@ AUDIO_SEGMENT_SECONDS = 1800
 AUDIO_BITRATE = "48k"
 VISION_BATCH_SIZE = 4
 MAX_TRANSCRIPT_PROMPT_CHARS = 60_000
+MAX_CLASSIFY_PROMPT_CHARS = 8_000
 COMPLETENESS_MIN_COVERAGE_CHARS_PER_SEC = 0.5
 COMPLETENESS_MAX_SILENCE_RATIO = 0.3
 COMPLETENESS_CONFIDENCE_THRESHOLD = 0.6
@@ -247,6 +248,7 @@ class ConfiguredMediaAi(MediaAiPort):
             "assess": settings.get("ai_chat_model", ""),
             "describe_frames": settings.get("ai_vision_model", ""),
             "summarize": f"{settings.get('ai_chat_model', '')}|{settings.get('ai_vision_model', '')}",
+            "classify": settings.get("ai_chat_model", ""),
         }.get(operation, "")
         value = (
             f"{settings.get(f'ai_{group}_provider', 'off')}:{settings.get(f'ai_{group}_base_url', '')}"
@@ -618,6 +620,46 @@ class ConfiguredMediaAi(MediaAiPort):
             "suggested_genres": suggested_genres,
             "suggested_tags": suggested_tags,
         }
+
+    def classify(self, text: str, context: dict[str, Any]) -> dict[str, Any]:
+        """文档/粘贴正文分类：约束 JSON 输出领域/体裁/标签，值域强制收敛到分类体系。"""
+        config = self._require_group("understand")
+        title = str(context.get("title") or "未命名")[:200]
+        raw_domains = context.get("taxonomy_domains")
+        raw_genres = context.get("taxonomy_genres")
+        domains = [str(value) for value in raw_domains if isinstance(value, str)] if isinstance(raw_domains, list) else list(TAXONOMY_DOMAIN_VALUES)
+        genres = [str(value) for value in raw_genres if isinstance(value, str)] if isinstance(raw_genres, list) else list(TAXONOMY_GENRE_VALUES)
+        system = (
+            "你是中文知识库分类助手。基于来源正文选择最合适的分类。"
+            '只输出 JSON：{"domains": ["领域"], "genres": ["体裁"], "tags": ["标签"]}。'
+            "domains 只能从给定领域清单取值（0到3个）；genres 只能从给定体裁清单取值（0到1个）；"
+            "tags 为自由短标签（0到8个，每个不超过20字）。"
+        )
+        user = (
+            f"标题：{title}\n"
+            f"领域清单：{'、'.join(domains)}\n"
+            f"体裁清单：{'、'.join(genres)}\n"
+            f"正文：\n{text[:MAX_CLASSIFY_PROMPT_CHARS]}"
+        )
+        payload = self._chat_json(config, system, user)
+        # 建议值域强制收敛到分类体系：清单外的一律丢弃，体裁最多保留一项。
+        raw_suggested_domains = payload.get("domains")
+        suggested_domains = sorted({
+            item for item in raw_suggested_domains if isinstance(item, str)
+        }.intersection(domains)) if isinstance(raw_suggested_domains, list) else []
+        raw_suggested_genres = payload.get("genres")
+        suggested_genres = (
+            [item for item in raw_suggested_genres if isinstance(item, str) and item in genres][:1]
+            if isinstance(raw_suggested_genres, list) else []
+        )
+        raw_suggested_tags = payload.get("tags")
+        suggested_tags = (
+            list(dict.fromkeys(
+                str(item).strip()[:20] for item in raw_suggested_tags if isinstance(item, str) and item.strip()
+            ))[:8]
+            if isinstance(raw_suggested_tags, list) else []
+        )
+        return {"domains": suggested_domains, "genres": suggested_genres, "tags": suggested_tags}
 
     def test_connection(self, part: str) -> tuple[bool, str]:
         """轻量连通性检查：理解分组一次最小 completion，转写分组 GET /models。"""

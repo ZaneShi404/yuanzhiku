@@ -314,10 +314,14 @@ def test_adapter_group_gating_raises_unavailable(tmp_path: Path) -> None:
     with pytest.raises(MediaAiUnavailable):
         off.summarize({"transcript_text": "x"}, lambda: False)
     with pytest.raises(MediaAiUnavailable):
+        off.classify("正文", {"title": "x"})
+    with pytest.raises(MediaAiUnavailable):
         off.assess_completeness("x", {"duration_ms": 1000, "coverage_chars_per_sec": 10, "max_silence_ms": 0})
     no_key = _adapter(tmp_path, _ai_settings(ai_understand_provider="openai_compatible"), {})
     with pytest.raises(MediaAiUnavailable):
         no_key.summarize({"transcript_text": "x"}, lambda: False)
+    with pytest.raises(MediaAiUnavailable):
+        no_key.classify("正文", {})
     no_vision = _adapter(
         tmp_path, _ai_settings(ai_understand_provider="openai_compatible"), {"understand": SECRET},
     )
@@ -502,6 +506,8 @@ def test_summarize_job_cascade_tiers_and_visual_gap(client_and_services, monkeyp
     client, services = client_and_services
     source_id, version_id = _analyzed_video(client, services)
     _configure_ai(client)
+    # 本用例手动逐步触发转写/摘要，关闭自动流水线避免串联作业干扰。
+    assert client.put("/api/v1/settings/ai", json={"auto_pipeline": False}).status_code == 200
     monkeypatch.setattr(services.media_ai, "_audio_extractor", _fake_audio_extractor)
     monkeypatch.setattr(services.media_ai, "_transcription_caller", _fake_transcription_calls([]))
     assert client.post(f"/api/v1/videos/{source_id}/transcribe").status_code == 201
@@ -537,7 +543,7 @@ def test_summarize_job_cascade_tiers_and_visual_gap(client_and_services, monkeyp
     marker = re.search(r"<!--yuanzhiku:suggestions (\{.*\}) -->", text)
     assert marker is not None
     suggestions = json.loads(marker.group(1))
-    assert suggestions == {"domains": ["technical"], "genres": ["lecture"], "tags": ["量子", "入门"], "tier": 1, "visual_gap": True}
+    assert suggestions == {"domains": ["technical"], "genres": ["lecture"], "tags": ["量子", "入门"], "tier": 1, "visual_gap": True, "applied": True}
     assert text.count("<!--yuanzhiku:suggestions") == 1
 
     # 配置视觉模型后强制深度理解 → tier2 表示与 tier1 共存，最新一条为 tier2。
@@ -618,3 +624,226 @@ def test_credentials_excluded_from_backup_and_export(client_and_services) -> Non
             assert "state/ai" in manifest["exclusions"]
             for name in names:
                 assert SECRET not in archive.read(name).decode("utf-8", errors="ignore")
+
+
+def _upload_video(client, **form: str) -> tuple[str, str]:
+    data = {"rights": "owned", "title": "AI 视频", "domains": "[]", "genres": "[]", "tags": "[]"}
+    data.update(form)
+    uploaded = client.post(
+        "/api/v1/videos/local",
+        data=data,
+        files={"file": ("sample.mp4", b"not-a-real-mp4", "video/mp4")},
+    )
+    assert uploaded.status_code == 201, uploaded.text
+    return uploaded.json()["source"]["id"], uploaded.json()["content_version"]["id"]
+
+
+def _queued_kinds(services) -> list[str]:
+    chained = {"video_transcribe", "video_summarize", "source_classify"}
+    return [job["kind"] for job in services.repository.list_jobs() if job["state"] == "queued" and job["kind"] in chained]
+
+
+def _classify_audit_results(services, source_id: str) -> list[str]:
+    with services.repository.connection() as connection:
+        rows = connection.execute(
+            "SELECT result FROM audit_events WHERE event_type='ai_classify_applied' AND entity_id=?",
+            (source_id,),
+        ).fetchall()
+    return [row["result"] for row in rows]
+
+
+def test_auto_pipeline_chains_video_jobs_and_applies_only_empty_fields(client_and_services, monkeypatch: pytest.MonkeyPatch) -> None:
+    client, services = client_and_services
+    _configure_ai(client)
+    # 用户已填领域与标签：领域绝不覆盖，标签并集合并，体裁空缺才填入。
+    source_id, _ = _upload_video(client, domains='["technical"]', tags='["已有"]')
+    monkeypatch.setattr(services.media_ai, "_audio_extractor", _fake_audio_extractor)
+    monkeypatch.setattr(services.media_ai, "_transcription_caller", _fake_transcription_calls([]))
+    monkeypatch.setattr(services.media_ai, "_completion_caller", lambda **kwargs: _completion_response(_summary_payload()))
+
+    analyzed = services.jobs.run_once()
+    assert analyzed is not None and analyzed["kind"] == "video_analyze" and analyzed["state"] == "succeeded"
+    assert _queued_kinds(services) == ["video_transcribe"]
+
+    transcribed = services.jobs.run_once()
+    assert transcribed is not None and transcribed["kind"] == "video_transcribe" and transcribed["state"] == "succeeded"
+    assert _queued_kinds(services) == ["video_summarize"]
+
+    summarized = services.jobs.run_once()
+    assert summarized is not None and summarized["kind"] == "video_summarize" and summarized["state"] == "succeeded"
+    source = services.repository.get_source(source_id)
+    assert json.loads(source["domains_json"]) == ["technical"]
+    assert json.loads(source["genres_json"]) == ["lecture"]
+    assert json.loads(source["tags_json"]) == sorted({"已有", "量子", "入门"})
+    # 审计只记字段与数量，不含建议内容；摘要标记 applied 供前端隐藏采纳按钮。
+    assert _classify_audit_results(services, source_id) == ["genres=1 tags=3"]
+
+
+def test_auto_pipeline_toggle_off_disables_chaining(client_and_services, monkeypatch: pytest.MonkeyPatch) -> None:
+    client, services = client_and_services
+    assert client.get("/api/v1/settings/ai").json()["auto_pipeline"] is True
+    _configure_ai(client)
+    switched = client.put("/api/v1/settings/ai", json={"auto_pipeline": False})
+    assert switched.status_code == 200 and switched.json()["auto_pipeline"] is False
+    assert client.get("/api/v1/settings/ai").json()["auto_pipeline"] is False
+
+    _upload_video(client)
+    analyzed = services.jobs.run_once()
+    assert analyzed is not None and analyzed["state"] == "succeeded"
+    assert "video_transcribe" not in {job["kind"] for job in services.repository.list_jobs()}
+
+
+def test_auto_pipeline_unconfigured_ai_creates_no_chained_jobs(client_and_services) -> None:
+    client, services = client_and_services
+    _upload_video(client)
+    analyzed = services.jobs.run_once()
+    assert analyzed is not None and analyzed["state"] == "succeeded"
+    kinds = {job["kind"] for job in services.repository.list_jobs()}
+    # 未配置分组时不入队，也不会因串联产生 blocked 作业。
+    assert not kinds.intersection({"video_transcribe", "video_summarize", "source_classify"})
+
+    imported = client.post("/api/v1/imports/paste", json={"title": "无 AI", "text": "正文", "rights": "owned"})
+    assert imported.status_code == 201, imported.text
+    parsed = services.jobs.run_once()
+    assert parsed is not None and parsed["kind"] == "parse" and parsed["state"] == "succeeded"
+    kinds = {job["kind"] for job in services.repository.list_jobs()}
+    assert not kinds.intersection({"video_transcribe", "video_summarize", "source_classify"})
+
+
+def test_auto_apply_noop_when_suggestions_empty(client_and_services, monkeypatch: pytest.MonkeyPatch) -> None:
+    client, services = client_and_services
+    _configure_ai(client)
+    source_id, _ = _upload_video(client)
+    monkeypatch.setattr(services.media_ai, "_audio_extractor", _fake_audio_extractor)
+    monkeypatch.setattr(services.media_ai, "_transcription_caller", _fake_transcription_calls([]))
+    monkeypatch.setattr(services.media_ai, "_completion_caller", lambda **kwargs: _completion_response({
+        "summary": "只有摘要，没有建议。",
+        "suggested_domains": [],
+        "suggested_genres": [],
+        "suggested_tags": [],
+    }))
+    for expected_kind in ("video_analyze", "video_transcribe", "video_summarize"):
+        finished = services.jobs.run_once()
+        assert finished is not None and finished["kind"] == expected_kind and finished["state"] == "succeeded"
+    source = services.repository.get_source(source_id)
+    assert source["domains_json"] == "[]" and source["genres_json"] == "[]" and source["tags_json"] == "[]"
+    # 无可填内容：除导入时的初始修订外不产生新元数据修订，也不写审计。
+    assert len(services.repository.metadata_revisions_for_source(source_id)) == 1
+    assert _classify_audit_results(services, source_id) == []
+
+
+def test_parse_chains_source_classify_and_applies(client_and_services, monkeypatch: pytest.MonkeyPatch) -> None:
+    client, services = client_and_services
+    _configure_ai(client)
+    imported = client.post("/api/v1/imports/paste", json={"title": "量子科普", "text": "量子计算入门正文", "rights": "owned"})
+    assert imported.status_code == 201, imported.text
+    source_id = imported.json()["source"]["id"]
+    version_id = imported.json()["content_version"]["id"]
+    captured: list[dict] = []
+
+    def fake_completion(**kwargs):
+        captured.append(kwargs)
+        return _completion_response({"domains": ["technical", "不存在的领域"], "genres": ["lecture", "podcast"], "tags": ["量子", "量子", "科普"]})
+
+    monkeypatch.setattr(services.media_ai, "_completion_caller", fake_completion)
+
+    parsed = services.jobs.run_once()
+    assert parsed is not None and parsed["kind"] == "parse" and parsed["state"] == "succeeded"
+    assert _queued_kinds(services) == ["source_classify"]
+
+    classified = services.jobs.run_once()
+    assert classified is not None and classified["kind"] == "source_classify"
+    assert classified["state"] == "succeeded", classified
+    assert classified["message"] == "AI 分类完成"
+    source = services.repository.get_source(source_id)
+    assert json.loads(source["domains_json"]) == ["technical"]
+    assert json.loads(source["genres_json"]) == ["lecture"]
+    assert json.loads(source["tags_json"]) == ["科普", "量子"]
+    assert _classify_audit_results(services, source_id) == ["domains=1 genres=1 tags=2"]
+    # 分类提示词含正文与分类清单。
+    prompt = captured[0]["messages"][-1]["content"]
+    assert "量子计算入门正文" in prompt and "technical" in prompt
+    # REQ-033a：分类是附加产物，版本完整性与处理状态保持解析结论。
+    assert services.repository.get_version(version_id)["completeness"] == "complete"
+    assert source["processing_state"] == "succeeded"
+
+
+def test_source_classify_blocked_without_understand_group(client_and_services) -> None:
+    client, services = client_and_services
+    imported = client.post("/api/v1/imports/paste", json={"title": "待分类", "text": "正文", "rights": "owned"})
+    assert imported.status_code == 201, imported.text
+    parsed = services.jobs.run_once()
+    assert parsed is not None and parsed["kind"] == "parse" and parsed["state"] == "succeeded"
+    assert "source_classify" not in _queued_kinds(services)
+
+    source = imported.json()["source"]
+    version = imported.json()["content_version"]
+    services.repository.create_job("source_classify", source["id"], version["id"], version["artifact_sha256"], None, {}, priority=100)
+    finished = services.jobs.run_once()
+    assert finished is not None and finished["kind"] == "source_classify"
+    assert finished["state"] == "blocked"
+    assert finished["message"] == "未配置媒体 AI 服务"
+
+
+def test_source_classify_failure_keeps_source_state(client_and_services, monkeypatch: pytest.MonkeyPatch) -> None:
+    client, services = client_and_services
+    _configure_ai(client)
+    imported = client.post("/api/v1/imports/paste", json={"title": "分类失败", "text": "正文", "rights": "owned"})
+    assert imported.status_code == 201, imported.text
+    source_id = imported.json()["source"]["id"]
+    version_id = imported.json()["content_version"]["id"]
+
+    def leaking_completion(**kwargs):
+        raise RuntimeError(f"upstream {BASE_URL} rejected key {SECRET}")
+
+    monkeypatch.setattr(services.media_ai, "_completion_caller", leaking_completion)
+    parsed = services.jobs.run_once()
+    assert parsed is not None and parsed["kind"] == "parse" and parsed["state"] == "succeeded"
+    assert _queued_kinds(services) == ["source_classify"]
+
+    job = None
+    for _ in range(5):
+        job = services.jobs.run_once()
+        if job is not None and job["state"] == "failed":
+            break
+    assert job is not None and job["kind"] == "source_classify"
+    assert job["state"] == "failed"
+    assert job["message"] == "本地处理失败"
+    assert SECRET not in json.dumps(job, ensure_ascii=False)
+    # REQ-033a：失败同样不触碰版本完整性与处理状态，元数据保持空缺。
+    assert services.repository.get_version(version_id)["completeness"] == "complete"
+    source = services.repository.get_source(source_id)
+    assert source["processing_state"] == "succeeded"
+    assert source["domains_json"] == "[]" and source["genres_json"] == "[]" and source["tags_json"] == "[]"
+    assert _classify_audit_results(services, source_id) == []
+
+
+def test_classify_clamps_values_to_taxonomy(tmp_path: Path) -> None:
+    settings = _ai_settings(ai_understand_provider="openai_compatible")
+
+    def fake_completion(**kwargs):
+        return _completion_response({
+            "domains": ["technical", "不存在的领域", 42],
+            "genres": ["lecture", "podcast"],
+            "tags": ["AI", "", "长" * 30, "AI"],
+        })
+
+    adapter = _adapter(tmp_path, settings, {"understand": SECRET}, completion_caller=fake_completion)
+    result = adapter.classify("正文内容", {"title": "标题"})
+    assert result == {"domains": ["technical"], "genres": ["lecture"], "tags": ["AI", "长" * 20]}
+
+
+def test_classify_prompt_truncates_long_text(tmp_path: Path) -> None:
+    settings = _ai_settings(ai_understand_provider="openai_compatible")
+    captured: list[dict] = []
+
+    def fake_completion(**kwargs):
+        captured.append(kwargs)
+        return _completion_response({"domains": [], "genres": [], "tags": []})
+
+    adapter = _adapter(tmp_path, settings, {"understand": SECRET}, completion_caller=fake_completion)
+    result = adapter.classify("正" * 20_000, {})
+    assert result == {"domains": [], "genres": [], "tags": []}
+    prompt = captured[0]["messages"][-1]["content"]
+    assert "正" * 8000 in prompt
+    assert "正" * 8001 not in prompt

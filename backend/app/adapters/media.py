@@ -400,3 +400,7 @@ class UnconfiguredMediaAi:
     @staticmethod
     def summarize(_: dict, __: Callable[[], bool]) -> dict:
         raise MediaAiUnavailable("not_configured")
+
+    @staticmethod
+    def classify(_: str, __: dict) -> dict:
+        raise MediaAiUnavailable("not_configured")

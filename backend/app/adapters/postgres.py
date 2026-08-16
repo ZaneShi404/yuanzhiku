@@ -268,6 +268,7 @@ class PostgresRepository(SqliteRepository):
             "ai_chat_model": "qwen-plus",
             "ai_vision_model": "",
             "ai_timeout_seconds": "300",
+            "ai_auto_pipeline": "on",
             "last_backup_date": "",
             "last_integrity_sample_date": "",
         }
