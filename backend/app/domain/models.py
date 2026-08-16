@@ -329,12 +329,11 @@ class AiTranscribeSettings(BaseModel):
 
 
 class AiUnderstandSettings(BaseModel):
-    """理解与摘要分组；视觉模型为空表示不做画面理解（tier-2 关闭）。"""
+    """理解与摘要分组：纯文本 chat 模型（用户裁定：不需要视觉模型，v1.5）。"""
 
     provider: str | None = None
     base_url: str | None = Field(default=None, max_length=2048)
     chat_model: str | None = Field(default=None, max_length=200)
-    vision_model: str | None = Field(default=None, max_length=200)
     api_key: str | None = Field(default=None, max_length=500)
 
     _provider = field_validator("provider")(_valid_ai_provider)

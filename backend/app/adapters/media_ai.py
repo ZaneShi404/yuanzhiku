@@ -193,7 +193,6 @@ def transcribe_config_hash(settings: dict[str, str]) -> str:
 class _AiGroupConfig:
     base_url: str
     model: str
-    vision_model: str
     api_key: str
     timeout_seconds: float
 
@@ -233,13 +232,11 @@ class ConfiguredMediaAi(MediaAiPort):
         understand_enabled = (
             settings.get("ai_understand_provider", "off") == "openai_compatible" and bool(credentials.get("understand"))
         )
-        tier2_enabled = understand_enabled and bool(settings.get("ai_vision_model", "").strip())
         enabled = transcribe_enabled or understand_enabled
         return {
             "enabled": enabled,
             "transcribe_enabled": transcribe_enabled,
             "understand_enabled": understand_enabled,
-            "tier2_enabled": tier2_enabled,
             "network": True,
             "provider": "openai_compatible" if enabled else None,
         }
@@ -252,8 +249,7 @@ class ConfiguredMediaAi(MediaAiPort):
         models = {
             "transcribe": settings.get("ai_transcribe_model", ""),
             "assess": settings.get("ai_chat_model", ""),
-            "describe_frames": settings.get("ai_vision_model", ""),
-            "summarize": f"{settings.get('ai_chat_model', '')}|{settings.get('ai_vision_model', '')}",
+            "summarize": settings.get("ai_chat_model", ""),
             "classify": settings.get("ai_chat_model", ""),
         }.get(operation, "")
         value = (
@@ -262,21 +258,18 @@ class ConfiguredMediaAi(MediaAiPort):
         )
         return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
-    def _require_group(self, group: str, *, vision: bool = False) -> _AiGroupConfig:
+    def _require_group(self, group: str) -> _AiGroupConfig:
         settings = self._settings_getter()
         if settings.get(f"ai_{group}_provider", "off") != "openai_compatible":
             raise MediaAiUnavailable("not_configured")
         api_key = self._credentials_reader().get(group, "")
         if not api_key:
             raise MediaAiUnavailable("not_configured")
-        if group == "transcribe":
-            model = settings.get("ai_transcribe_model", "").strip() or "whisper-1"
-            vision_model = ""
-        else:
-            model = settings.get("ai_chat_model", "").strip() or "qwen-plus"
-            vision_model = settings.get("ai_vision_model", "").strip()
-        if vision and not vision_model:
-            raise MediaAiUnavailable("vision_not_configured")
+        model = (
+            settings.get("ai_transcribe_model", "").strip() or "whisper-1"
+            if group == "transcribe"
+            else settings.get("ai_chat_model", "").strip() or "qwen-plus"
+        )
         try:
             timeout_seconds = max(60.0, min(86_400.0, float(settings.get("ai_timeout_seconds", "300"))))
         except (TypeError, ValueError):
@@ -284,7 +277,6 @@ class ConfiguredMediaAi(MediaAiPort):
         return _AiGroupConfig(
             base_url=settings.get(f"ai_{group}_base_url", "").strip(),
             model=model,
-            vision_model=vision_model,
             api_key=api_key,
             timeout_seconds=timeout_seconds,
         )
@@ -401,70 +393,6 @@ class ConfiguredMediaAi(MediaAiPort):
             "rule_triggered": False,
         }
 
-    def describe_frames(
-        self,
-        frame_inputs: list[dict[str, Any]],
-        focus: str,
-        cancelled: Callable[[], bool] | None = None,
-    ) -> list[dict[str, Any]]:
-        config = self._require_group("understand", vision=True)
-        system = (
-            "你是视频画面理解助手。逐帧输出 JSON："
-            '{"frames": [{"index": 序号, "description": "画面要点", "visible_text": "画面文字"}]}。'
-            "description 概括画面呈现的关键信息（产品名、演示、图表、人物动作）；"
-            "visible_text 逐字提取画面中可见的文字（标题、产品名、标注），没有可见文字时输出空字符串。"
-            "只输出 JSON。"
-        )
-        described: dict[int, dict[str, Any]] = {}
-        for batch_start in range(0, len(frame_inputs), VISION_BATCH_SIZE):
-            if cancelled is not None and cancelled():
-                raise MediaProcessingCancelled()
-            batch = frame_inputs[batch_start:batch_start + VISION_BATCH_SIZE]
-            content: list[dict[str, Any]] = [{
-                "type": "text",
-                "text": (
-                    f"视频主题：{focus[:200] or '未知'}\n"
-                    f"以下 {len(batch)} 张图片为按时间采样的关键帧，index 从 0 到 {len(batch) - 1}。"
-                    "请逐帧给出画面要点与画面文字。"
-                ),
-            }]
-            for item in batch:
-                try:
-                    encoded = base64.b64encode(Path(str(item["path"])).read_bytes()).decode("ascii")
-                except OSError as exc:
-                    raise RuntimeError("本地关键帧读取失败") from exc
-                content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encoded}"}})
-            try:
-                response = self._completion_caller(
-                    model=config.vision_model,
-                    messages=[{"role": "system", "content": system}, {"role": "user", "content": content}],
-                    response_format={"type": "json_object"},
-                    api_key=config.api_key,
-                    api_base=config.base_url or None,
-                    timeout=config.timeout_seconds,
-                )
-            except Exception as exc:
-                raise RuntimeError(sanitize_ai_error(exc)) from None
-            frames = _parse_json_dict(_message_content(response)).get("frames")
-            if not isinstance(frames, list):
-                raise RuntimeError("媒体 AI 服务返回结果无法解析")
-            for entry in frames:
-                if not isinstance(entry, dict):
-                    continue
-                index = entry.get("index")
-                if isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < len(batch):
-                    continue
-                described[batch_start + index] = {
-                    "time_ms": _as_int(batch[index].get("time_ms")),
-                    "description": str(entry.get("description") or "").strip()[:500],
-                    "visible_text": str(entry.get("visible_text") or "").strip()[:500],
-                }
-        # 未被模型覆盖的帧补空描述，保证输出与输入一一对应。
-        return [
-            described.get(ordinal, {"time_ms": _as_int(item.get("time_ms")), "description": "", "visible_text": ""})
-            for ordinal, item in enumerate(frame_inputs)
-        ]
-
     def summarize(self, inputs: dict[str, Any], cancelled: Callable[[], bool]) -> dict[str, Any]:
         config = self._require_group("understand")
         if cancelled():
@@ -475,19 +403,6 @@ class ConfiguredMediaAi(MediaAiPort):
         raw_genres = inputs.get("taxonomy_genres")
         domains = [str(value) for value in raw_domains if isinstance(value, str)] if isinstance(raw_domains, list) else list(TAXONOMY_DOMAIN_VALUES)
         genres = [str(value) for value in raw_genres if isinstance(value, str)] if isinstance(raw_genres, list) else list(TAXONOMY_GENRE_VALUES)
-        frame_lines: list[str] = []
-        raw_frames = inputs.get("frame_descriptions")
-        if isinstance(raw_frames, list):
-            for item in raw_frames:
-                if not isinstance(item, dict):
-                    continue
-                description = str(item.get("description") or "").strip()
-                visible_text = str(item.get("visible_text") or "").strip()
-                if description or visible_text:
-                    line = f"- [{_as_int(item.get('time_ms')) // 1000}s] {description}"
-                    if visible_text:
-                        line += f"（画面文字：{visible_text}）"
-                    frame_lines.append(line)
         system = (
             "你是中文知识库摘要助手。基于视频转写（可选画面理解）输出结构化摘要。"
             '只输出 JSON：{"summary": "200到600字中文摘要", "suggested_domains": ["领域"], '
@@ -500,9 +415,6 @@ class ConfiguredMediaAi(MediaAiPort):
             f"领域清单：{'、'.join(domains)}",
             f"体裁清单：{'、'.join(genres)}",
         ]
-        if frame_lines:
-            user_lines.append("画面理解：")
-            user_lines.extend(frame_lines)
         user_lines.append(f"转写内容：\n{transcript[:MAX_TRANSCRIPT_PROMPT_CHARS]}")
         payload = self._chat_json(config, system, "\n".join(user_lines))
         summary = str(payload.get("summary") or "").strip()
@@ -643,7 +555,6 @@ class ApiTranscriber(MediaTranscriberPort):
         return _AiGroupConfig(
             base_url=settings.get("ai_transcribe_base_url", "").strip(),
             model=model,
-            vision_model="",
             api_key=api_key,
             timeout_seconds=timeout_seconds,
         )

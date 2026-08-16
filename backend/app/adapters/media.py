@@ -394,10 +394,6 @@ class UnconfiguredMediaAi:
         raise MediaAiUnavailable("not_configured")
 
     @staticmethod
-    def describe_frames(_: list, __: str, ___: Callable[[], bool] | None = None) -> list:
-        raise MediaAiUnavailable("not_configured")
-
-    @staticmethod
     def summarize(_: dict, __: Callable[[], bool]) -> dict:
         raise MediaAiUnavailable("not_configured")
 

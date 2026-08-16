@@ -113,13 +113,6 @@ class MediaAiPort(Protocol):
 
     def assess_completeness(self, transcript_text: str, context: dict[str, Any]) -> dict[str, Any]: ...
 
-    def describe_frames(
-        self,
-        frame_inputs: list[dict[str, Any]],
-        focus: str,
-        cancelled: Callable[[], bool] | None = None,
-    ) -> list[dict[str, Any]]: ...
-
     def summarize(self, inputs: dict[str, Any], cancelled: Callable[[], bool]) -> dict[str, Any]: ...
 
     def classify(self, text: str, context: dict[str, Any]) -> dict[str, Any]: ...

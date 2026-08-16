@@ -626,7 +626,6 @@ class SqliteRepository:
                 "ai_understand_provider": "off",
                 "ai_understand_base_url": "",
                 "ai_chat_model": "qwen-plus",
-                "ai_vision_model": "",
                 "ai_timeout_seconds": "300",
                 "ai_auto_pipeline": "on",
                 "ai_transcriber_engine": "auto",

@@ -139,7 +139,6 @@ type VideoDetail = {
     enabled: boolean
     transcribe_enabled?: boolean
     understand_enabled?: boolean
-    tier2_enabled?: boolean
     provider?: string | null
     reason?: string
     local_stt?: { enabled?: boolean; model?: string }
@@ -1109,7 +1108,7 @@ function VideoDetailPanel({
     </div> : <p className="muted video-waiting">{detail?.media_capability.enabled === false ? '本机未检测到可用的 FFmpeg/ffprobe，视频分析作业会被阻止。' : '视频原件已保存，分析作业完成后会在这里显示媒体参数和时间采样帧。'}</p>}
     {frames.length > 0 && <section className="video-frames"><header><h3>时间采样关键帧</h3><span>{frames.length} 帧</span><span className="muted">场景切换 + 等间隔抽样，帧内容未经理解</span></header><div className="frame-strip">{frames.map(frame => <button type="button" className={selectedFrameId === frame.id ? 'video-frame selected' : 'video-frame'} key={frame.id} onClick={() => seek(frame)} title={`${frame.reason === 'scene' ? '场景切换' : '等距'} · 定位到 ${formatDuration(frame.time_ms)}`}><img src={`${API}/videos/${encodeURIComponent(sourceId)}/frames/${encodeURIComponent(frame.id)}${versionQuery}`} alt={`关键帧 ${frame.ordinal + 1}`} /><span>{formatDuration(frame.time_ms)}</span></button>)}</div></section>}
     <section className="video-ai-status"><header><h3>转写与摘要</h3><Status value={(ai?.enabled || ai?.local_stt?.enabled) ? 'succeeded' : 'blocked'}/></header><div><p>{ai?.enabled || ai?.local_stt?.enabled ? (ai?.local_stt?.enabled ? '本地转写模型已就绪；语音转写默认在本机完成，无需上传。' : '媒体 AI 服务已配置；音频与文本将发送至你配置的云端服务处理。') : '转写与摘要均未配置；不会上传视频或发起外部请求。'}</p><div className="video-ai-actions"><button type="button" className="button secondary" disabled={disabled || !(ai?.transcribe_enabled || ai?.local_stt?.enabled) || Boolean(busy)} onClick={() => void queueAiJob('transcribe')}>{busy === 'transcribe' ? '正在提交' : '语音转写'}</button><button type="button" className="button secondary" disabled={disabled || !ai?.understand_enabled || Boolean(busy)} onClick={() => void queueAiJob('summarize')}>{busy === 'summarize' ? '正在提交' : '内容摘要'}</button></div></div>
-      {summary && suggestions && <div className="video-summary"><header><h4>内容摘要</h4><span className="tier-badge">{suggestions.tier === 2 ? '深度' : '标准'}</span>{suggestions.visual_gap && <span className="muted">可能缺少画面信息</span>}{suggestions.video_direct && <span className="muted">已直送视频补充理解</span>}</header><p className="summary-text">{summary.body}</p>{hasSuggestions && <p className="muted">建议：领域 {suggestions.domains.map(value => taxonomyLabel(taxonomy.domains, value)).join('、') || '-'} · 体裁 {suggestions.genres.map(value => taxonomyLabel(taxonomy.genres, value)).join('、') || '-'} · 标签 {suggestions.tags.join('、') || '-'}</p>}<div className="video-ai-actions"><button type="button" className="button secondary" disabled={disabled || !(ai?.tier2_enabled || ai?.video_input?.video_input) || Boolean(busy)} title={(ai?.tier2_enabled || ai?.video_input?.video_input) ? '使用视觉/多模态模型补充理解后重新生成摘要' : '在设置中配置视觉模型或视频直送后可用'} onClick={() => void queueAiJob('summarize', true)}>{busy === 'force-tier2' ? '正在提交' : '强制深度理解'}</button>{hasSuggestions && (suggestions.applied ? <span className="muted">建议已自动写入（仅填空缺），可在编辑元数据中修改</span> : <button type="button" className="button secondary" disabled={disabled || Boolean(busy)} onClick={() => void adoptSuggestions()}>{busy === 'adopt' ? '正在采纳' : '采纳建议'}</button>)}</div></div>}
+      {summary && suggestions && <div className="video-summary"><header><h4>内容摘要</h4><span className="tier-badge">{suggestions.tier === 2 ? '深度' : '标准'}</span>{suggestions.visual_gap && <span className="muted">可能缺少画面信息</span>}{suggestions.video_direct && <span className="muted">已直送视频补充理解</span>}</header><p className="summary-text">{summary.body}</p>{hasSuggestions && <p className="muted">建议：领域 {suggestions.domains.map(value => taxonomyLabel(taxonomy.domains, value)).join('、') || '-'} · 体裁 {suggestions.genres.map(value => taxonomyLabel(taxonomy.genres, value)).join('、') || '-'} · 标签 {suggestions.tags.join('、') || '-'}</p>}<div className="video-ai-actions"><button type="button" className="button secondary" disabled={disabled || !ai?.video_input?.video_input || Boolean(busy)} title={ai?.video_input?.video_input ? '直送视频给多模态模型补充理解后重新生成摘要' : '在设置中配置视频直送后可用'} onClick={() => void queueAiJob('summarize', true)}>{busy === 'force-tier2' ? '正在提交' : '强制深度理解'}</button>{hasSuggestions && (suggestions.applied ? <span className="muted">建议已自动写入（仅填空缺），可在编辑元数据中修改</span> : <button type="button" className="button secondary" disabled={disabled || Boolean(busy)} onClick={() => void adoptSuggestions()}>{busy === 'adopt' ? '正在采纳' : '采纳建议'}</button>)}</div></div>}
     </section>
   </section>
 }
@@ -1552,7 +1551,7 @@ function TransfersPage({ onMessage }: { onMessage: (message: string) => void }) 
 
 type AiSettings = {
   transcribe: { provider: string; base_url: string; model: string; has_key: boolean; key_hint: string | null }
-  understand: { provider: string; base_url: string; chat_model: string; vision_model: string; has_key: boolean; key_hint: string | null }
+  understand: { provider: string; base_url: string; chat_model: string; has_key: boolean; key_hint: string | null }
   transcriber: { engine: string; local_stt_model: string; stt_timeout_seconds: number; stt_memory_limit_mb: number; stt_disk_limit_mb: number }
   local_stt: { model_name: string; model_available: boolean; downloaded_at: string | null }
   video: { provider: string; model: string; max_bytes: number; reencode: boolean; chunk_seconds: number; qwen: { has_key: boolean; key_hint: string | null }; mimo: { has_key: boolean; key_hint: string | null }; relay: { base_url: string; has_secret: boolean; secret_hint: string | null } }
@@ -1562,7 +1561,7 @@ type AiSettings = {
 
 function AiSettingsSection({ onMessage }: { onMessage: (message: string) => void }) {
   const [transcribe, setTranscribe] = useState({ provider: 'off', base_url: '', model: '', api_key: '' })
-  const [understand, setUnderstand] = useState({ provider: 'off', base_url: '', chat_model: '', vision_model: '', api_key: '' })
+  const [understand, setUnderstand] = useState({ provider: 'off', base_url: '', chat_model: '', api_key: '' })
   const [transcriber, setTranscriber] = useState({ engine: 'auto', local_stt_model: 'paraformer-zh', stt_timeout_seconds: '3600', stt_memory_limit_mb: '2048', stt_disk_limit_mb: '1024' })
   const [video, setVideo] = useState({ provider: 'off', model: '', max_bytes: '314572800', reencode: true, chunk_seconds: '600', relay_base_url: '', relay_secret: '', qwen_api_key: '', mimo_api_key: '' })
   const [localStt, setLocalStt] = useState<{ model_name: string; model_available: boolean }>({ model_name: 'paraformer-zh', model_available: false })
@@ -1574,7 +1573,7 @@ function AiSettingsSection({ onMessage }: { onMessage: (message: string) => void
   const [busy, setBusy] = useState('')
   const apply = useCallback((value: AiSettings) => {
     setTranscribe({ provider: value.transcribe.provider, base_url: value.transcribe.base_url, model: value.transcribe.model, api_key: '' })
-    setUnderstand({ provider: value.understand.provider, base_url: value.understand.base_url, chat_model: value.understand.chat_model, vision_model: value.understand.vision_model, api_key: '' })
+    setUnderstand({ provider: value.understand.provider, base_url: value.understand.base_url, chat_model: value.understand.chat_model, api_key: '' })
     setTranscriber({ engine: value.transcriber.engine, local_stt_model: value.transcriber.local_stt_model, stt_timeout_seconds: String(value.transcriber.stt_timeout_seconds), stt_memory_limit_mb: String(value.transcriber.stt_memory_limit_mb), stt_disk_limit_mb: String(value.transcriber.stt_disk_limit_mb) })
     setVideo({ provider: value.video.provider, model: value.video.model, max_bytes: String(value.video.max_bytes), reencode: value.video.reencode, chunk_seconds: String(value.video.chunk_seconds), relay_base_url: value.video.relay.base_url, relay_secret: '', qwen_api_key: '', mimo_api_key: '' })
     setLocalStt({ model_name: value.local_stt.model_name, model_available: value.local_stt.model_available })
@@ -1601,7 +1600,7 @@ function AiSettingsSection({ onMessage }: { onMessage: (message: string) => void
         method: 'PUT',
         body: JSON.stringify({
           transcribe: { provider: transcribe.provider, base_url: transcribe.base_url, model: transcribe.model, ...(transcribe.api_key ? { api_key: transcribe.api_key } : {}) },
-          understand: { provider: understand.provider, base_url: understand.base_url, chat_model: understand.chat_model, vision_model: understand.vision_model, ...(understand.api_key ? { api_key: understand.api_key } : {}) },
+          understand: { provider: understand.provider, base_url: understand.base_url, chat_model: understand.chat_model, ...(understand.api_key ? { api_key: understand.api_key } : {}) },
           transcriber: {
             engine: transcriber.engine,
             local_stt_model: transcriber.local_stt_model,
@@ -1661,7 +1660,7 @@ function AiSettingsSection({ onMessage }: { onMessage: (message: string) => void
   const transcriberEngines = [['auto', '自动（本地优先，失败降级 API）'], ['local', '仅本地'], ['api', '仅 API']] as const
   const videoProviders = [['off', '关闭'], ['qwen', '通义千问'], ['mimo', '小米 MiMo']] as const
   return <section className="form-stack media-ai"><h2>媒体 AI</h2>
-    <p className="hint">启用后，音频、关键帧、视频（直送时）与文本将发送至你配置的云端服务处理。API 密钥仅保存在本机凭据文件，不会进入备份、导出或日志。</p>
+    <p className="hint">启用后，音频、视频（直送时）与文本将发送至你配置的云端服务处理。API 密钥仅保存在本机凭据文件，不会进入备份、导出或日志。</p>
     <form className="form-stack" onSubmit={save}>
       <fieldset><legend>语音转写（API 路径）</legend><div className="settings-grid">
         <label>提供方<select value={transcribe.provider} onChange={event => setTranscribe(current => ({ ...current, provider: event.target.value }))}>{providers.map(item => <option key={item[0]} value={item[0]}>{item[1]}</option>)}</select></label>
@@ -1679,7 +1678,6 @@ function AiSettingsSection({ onMessage }: { onMessage: (message: string) => void
       <fieldset><legend>理解与摘要</legend><div className="settings-grid">
         <label>提供方<select value={understand.provider} onChange={event => setUnderstand(current => ({ ...current, provider: event.target.value }))}>{providers.map(item => <option key={item[0]} value={item[0]}>{item[1]}</option>)}</select></label>
         <label>摘要模型<input value={understand.chat_model} onChange={event => setUnderstand(current => ({ ...current, chat_model: event.target.value }))} placeholder="qwen-plus"/></label>
-        <label>视觉模型（可空）<input value={understand.vision_model} onChange={event => setUnderstand(current => ({ ...current, vision_model: event.target.value }))} placeholder="空则不做画面理解"/></label>
         <label>Base URL（可空，使用提供方默认端点）<input value={understand.base_url} onChange={event => setUnderstand(current => ({ ...current, base_url: event.target.value }))} placeholder="https://…"/></label>
         <label>API 密钥<input type="password" autoComplete="off" value={understand.api_key} onChange={event => setUnderstand(current => ({ ...current, api_key: event.target.value }))} placeholder={keyHints.understand ? `已配置（${keyHints.understand}），输入以替换` : '未配置'}/></label>
       </div><div className="inline-actions"><button type="button" className="button secondary" disabled={Boolean(busy)} onClick={() => void test('understand')}>{busy === 'test-understand' ? '正在测试' : '测试连接'}</button>{testResult.understand && <span className="hint">{testResult.understand}</span>}</div></fieldset>

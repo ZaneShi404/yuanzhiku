@@ -831,18 +831,19 @@ class JobService:
         if cancelled():
             self._finish(job, "cancelled", "媒体 AI 处理已取消")
             return
-        want_tier2 = force_tier2 or assessment.get("verdict") == "likely_incomplete"
-        tier2_enabled = bool(self.media_ai.capability().get("tier2_enabled"))
+        want_direct = force_tier2 or assessment.get("verdict") == "likely_incomplete"
         video_direct = False
         degraded_reason: str | None = None
-        frame_descriptions: list[dict] | None = None
-        if want_tier2:
-            # 三级补充理解（REQ-055）：视频直送 → 关键帧兜底 → visual_gap。
+        direct_result: dict[str, Any] | None = None
+        if want_direct:
+            # 两级补充理解（REQ-055 修订，用户裁定 2026-08-16）：视频直送时
+            # 多模态 API 直接产出补充转写/理解 + 摘要 + 建议分类（偏差 A）；
+            # 直送不可行/失败直接 visual_gap（偏差 B：关键帧视觉路径已移除）。
             adapter = self.video_adapter_provider() if self.video_adapter_provider else None
             if adapter is not None and adapter.capability().get("video_input"):
                 self._update_video_progress(job, 30, "正在直送视频给多模态模型")
                 try:
-                    frame_descriptions = self._run_with_lease_heartbeat(
+                    direct_result = self._run_with_lease_heartbeat(
                         job,
                         lambda: adapter.understand_video(
                             self.artifacts.artifact_path(job["artifact_sha256"]),
@@ -853,56 +854,49 @@ class JobService:
                     )
                     video_direct = True
                 except MediaAiUnavailable:
-                    degraded_reason = "视频直送不可行，已改用关键帧画面理解"
+                    degraded_reason = "视频直送不可行，画面信息未补充"
                 except RuntimeError:
                     if cancelled():
                         self._finish(job, "cancelled", "媒体 AI 处理已取消")
                         return
-                    degraded_reason = "视频直送失败，已改用关键帧画面理解"
-            if not video_direct and tier2_enabled:
-                self._update_video_progress(job, 35, "正在理解关键帧画面")
-                frame_inputs: list[dict] = []
-                if analysis is not None:
-                    for frame in self.repository.list_video_frames(analysis["id"]):
-                        path = self.artifacts.artifact_path(frame["artifact_sha256"])
-                        if path.is_file():
-                            frame_inputs.append({"path": path, "time_ms": int(frame["time_ms"])})
-                frame_descriptions = self._run_with_lease_heartbeat(
-                    job,
-                    lambda: self.media_ai.describe_frames(frame_inputs, (source or {}).get("title") or "", cancelled),
-                )
-                if cancelled():
-                    self._finish(job, "cancelled", "媒体 AI 处理已取消")
-                    return
-        tier2 = bool(want_tier2 and (tier2_enabled or video_direct))
-        visual_gap = bool(want_tier2 and not video_direct and frame_descriptions is None)
+                    degraded_reason = "视频直送失败，画面信息未补充"
+            else:
+                degraded_reason = "未配置视频直送，画面信息未补充"
+        visual_gap = bool(want_direct and not video_direct)
         self._update_video_progress(job, 65, "正在生成内容摘要")
-        result = self._run_with_lease_heartbeat(
-            job,
-            lambda: self.media_ai.summarize(
-                {
-                    "transcript_text": transcript_text,
-                    "frame_descriptions": frame_descriptions,
-                    "title": (source or {}).get("title") or "",
-                    "taxonomy_domains": list(TAXONOMY_DOMAIN_VALUES),
-                    "taxonomy_genres": list(TAXONOMY_GENRE_VALUES),
-                },
-                cancelled,
-            ),
-        )
+        if video_direct:
+            assert direct_result is not None
+            result = {
+                "summary": direct_result["summary"],
+                "suggested_domains": direct_result.get("suggested_domains") or [],
+                "suggested_genres": direct_result.get("suggested_genres") or [],
+                "suggested_tags": direct_result.get("suggested_tags") or [],
+            }
+            frame_descriptions = direct_result.get("supplements") or []
+        else:
+            result = self._run_with_lease_heartbeat(
+                job,
+                lambda: self.media_ai.summarize(
+                    {
+                        "transcript_text": transcript_text,
+                        "title": (source or {}).get("title") or "",
+                        "taxonomy_domains": list(TAXONOMY_DOMAIN_VALUES),
+                        "taxonomy_genres": list(TAXONOMY_GENRE_VALUES),
+                    },
+                    cancelled,
+                ),
+            )
+            frame_descriptions = None
         if cancelled():
             self._finish(job, "cancelled", "媒体 AI 处理已取消")
             return
         self._update_video_progress(job, 85, "正在写入摘要表示")
-        tier = 2 if tier2 else 1
+        tier = 2 if video_direct else 1
         settings = self.repository.get_settings()
         chat_model = settings.get("ai_chat_model", "").strip() or "qwen-plus"
-        vision_model = settings.get("ai_vision_model", "").strip()
         parser_name = f"ai-{settings.get('ai_understand_provider', 'off')}-{chat_model}"
         if video_direct:
             parser_name += f"+video-{settings.get('ai_video_provider', 'off')}-{settings.get('ai_video_model', '').strip() or 'default'}"
-        elif tier2:
-            parser_name += f"+{vision_model}"
         config_hash = self.media_ai.config_hash("summarize")
         if video_direct:
             adapter = self.video_adapter_provider() if self.video_adapter_provider else None

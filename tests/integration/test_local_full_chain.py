@@ -143,7 +143,6 @@ class _FakeMediaAi:
             "enabled": True,
             "transcribe_enabled": True,
             "understand_enabled": True,
-            "tier2_enabled": False,
             "network": True,
             "provider": "integration-fake",
         }
@@ -163,9 +162,6 @@ class _FakeMediaAi:
 
     def assess_completeness(self, transcript_text, context) -> dict:
         return {"verdict": "complete", "confidence": 0.9, "missing_aspects": [], "reason": "覆盖充分", "rule_triggered": False}
-
-    def describe_frames(self, frame_inputs, focus, cancelled=None) -> list[dict]:
-        return [{"time_ms": int(item.get("time_ms") or 0), "description": "画面", "visible_text": ""} for item in frame_inputs]
 
     def summarize(self, inputs, cancelled) -> dict:
         assert not cancelled()

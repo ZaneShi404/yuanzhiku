@@ -84,7 +84,7 @@
 
 `POST /videos/{source_id}/transcribe`（`201`）入队 `video_transcribe` 作业：转写分组未启用或无 key 时作业终态 `blocked`（消息“未配置媒体 AI 服务”），不产生任何外部网络请求，也不改变已完成视频的状态。已配置时本地提取音频分块调用所配置转写端点，成功后写入 kind=`transcription` representation 与逐段 `video_time_range` evidence（进入检索索引）。
 
-`POST /videos/{source_id}/summarize`（`201`）入队 `video_summarize` 作业，可选 JSON 请求体 `{"force_tier2": false}`。理解分组未配置时同样终态 `blocked`；无转写产物时终态 `failed`（“请先完成语音转写”，不进重试循环）。已配置时执行两层级联：完整性判断（确定性覆盖率/静音规则 + 约束 JSON 的 LLM 判定，阈值 0.6）→ tier1 纯文本摘要，或判定疑似不完整/`force_tier2` 时走 tier2（逐帧画面理解含画面文字提取后增强摘要）；tier2 需 vision_model 已配置，需要而不可用时摘要标记 `visual_gap`。摘要写入 kind=`summary` representation（parent 为转写表示），AI 建议的领域/体裁/标签在作业成功时按只填空缺规则自动写入来源元数据（领域/体裁仅在当前为空时写入、标签并集合并、已填字段不覆盖；实际写入记 `ai_classify_applied` 审计事件，只含字段与数量），同时以 `<!--yuanzhiku:suggestions ...-->` 标记（含 `applied: true`）嵌入摘要文本；无 `applied` 的旧摘要仍可由用户显式采纳（`PUT /sources/{id}/metadata` 合并，幂等）。
+`POST /videos/{source_id}/summarize`（`201`）入队 `video_summarize` 作业，可选 JSON 请求体 `{"force_tier2": false}`。理解分组未配置时同样终态 `blocked`；无转写产物时终态 `failed`（“请先完成语音转写”，不进重试循环）。已配置时执行两级（用户裁定 2026-08-16）：完整性判断（确定性覆盖率/静音规则 + 约束 JSON 的 LLM 判定，阈值 0.6）→ tier1 纯文本摘要；判定疑似不完整/`force_tier2` 且视频直送（`ai_video_provider`）已配置时，视频文件直送多模态模型、由其直接产出补充转写/理解+摘要+建议分类；直送不可行/失败时摘要仍按 tier1 产出并标记 `visual_gap`。摘要写入 kind=`summary` representation（parent 为转写表示），AI 建议的领域/体裁/标签在作业成功时按只填空缺规则自动写入来源元数据（领域/体裁仅在当前为空时写入、标签并集合并、已填字段不覆盖；实际写入记 `ai_classify_applied` 审计事件，只含字段与数量），同时以 `<!--yuanzhiku:suggestions ...-->` 标记（含 `applied: true`）嵌入摘要文本；无 `applied` 的旧摘要仍可由用户显式采纳（`PUT /sources/{id}/metadata` 合并，幂等）。
 
 `source_classify` 作业（REQ-051 修订）无独立入队端点：`ai_auto_pipeline` 开启且理解组已配置时，文档/粘贴的 parse 作业成功即自动入队（payload `{}`、priority 100；同版本同类作业已排队/运行中则不重复入队）；同一开关下 `video_analyze` 成功自动串联 `video_transcribe`，`video_transcribe` 成功自动串联 `video_summarize`。`source_classify` 取该版本最新 extraction 正文（截断至前 8000 字符）经理解组产出领域/体裁/标签，按同一只填空缺规则自动写入来源元数据；理解组未配置时终态 `blocked`（“未配置媒体 AI 服务”），无可分类正文时终态 `failed`（不进重试循环），失败/取消均不改变版本完整性与来源处理状态（REQ-033a）。图片不参与自动分类（无正文文本）。
 
@@ -94,7 +94,7 @@
 
 ## 媒体 AI 设置（REQ-051, REQ-052）
 
-`GET /settings/ai` 返回双组配置视图：`transcribe`（`provider`/`base_url`/`model`/`has_key`/`key_hint`）、`understand`（`provider`/`base_url`/`chat_model`/`vision_model`/`has_key`/`key_hint`）、`timeout_seconds` 与 `auto_pipeline`（自动流水线总开关，默认 `true`）。`provider` 取 `off` 或 `openai_compatible`；`key_hint` 为掩码提示（仅尾号），绝不回显完整密钥。
+`GET /settings/ai` 返回双组配置视图：`transcribe`（`provider`/`base_url`/`model`/`has_key`/`key_hint`）、`understand`（`provider`/`base_url`/`chat_model`/`has_key`/`key_hint`）、`timeout_seconds` 与 `auto_pipeline`（自动流水线总开关，默认 `true`）。`provider` 取 `off` 或 `openai_compatible`；`key_hint` 为掩码提示（仅尾号），绝不回显完整密钥。
 
 `PUT /settings/ai` 接受局部更新：省略的分组/字段保持不变；`api_key` 省略或空串不触碰既有凭据，非空则原子写入 `<data-root>/state/ai/credentials.json`。`auto_pipeline` 省略保持不变，为 `false` 时不再自动串联转写/摘要/分类作业（手动触发与摘要建议自动写入不受影响）。`base_url` 空串表示提供方默认端点，非空必须是 ≤2048 字符的 HTTPS 公网地址、无 userinfo，否则 `422 request_validation`；密钥绝不进入数据库、日志、备份、导出或任何 API 出参。两组均为 `off`（默认）时无任何出站流量，行为与未配置完全一致。
 

@@ -287,7 +287,6 @@ def _ai_settings_view(services: "ApplicationServices") -> dict[str, Any]:
             "provider": settings.get("ai_understand_provider", "off"),
             "base_url": settings.get("ai_understand_base_url", ""),
             "chat_model": settings.get("ai_chat_model", ""),
-            "vision_model": settings.get("ai_vision_model", ""),
             "has_key": bool(credentials.get("understand")),
             "key_hint": _ai_key_hint(credentials.get("understand")),
         },
@@ -550,7 +549,7 @@ def create_app(root: str | Path | None = None, *, acquire_lock: bool = True) -> 
         if request.understand is not None:
             credentials_changed = _apply_ai_group(
                 request.understand, "understand", "understand",
-                {"chat_model": "ai_chat_model", "vision_model": "ai_vision_model"}, settings, updates, credentials,
+                {"chat_model": "ai_chat_model"}, settings, updates, credentials,
             ) or credentials_changed
         if request.transcriber is not None:
             transcriber = request.transcriber

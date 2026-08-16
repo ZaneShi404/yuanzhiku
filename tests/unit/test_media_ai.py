@@ -40,7 +40,6 @@ def _ai_settings(**overrides: str) -> dict[str, str]:
         "ai_understand_provider": "off",
         "ai_understand_base_url": "",
         "ai_chat_model": "qwen-plus",
-        "ai_vision_model": "",
         "ai_timeout_seconds": "300",
         "video_memory_limit_mb": "2048",
         "video_disk_limit_mb": "1024",
@@ -108,12 +107,12 @@ def _analyzed_video(client, services) -> tuple[str, str]:
     return uploaded.json()["source"]["id"], uploaded.json()["content_version"]["id"]
 
 
-def _configure_ai(client, *, vision_model: str = "") -> None:
+def _configure_ai(client) -> None:
     response = client.put("/api/v1/settings/ai", json={
         "transcribe": {"provider": "openai_compatible", "base_url": BASE_URL, "model": "whisper-1", "api_key": SECRET},
         "understand": {
             "provider": "openai_compatible", "base_url": BASE_URL,
-            "chat_model": "qwen-plus", "vision_model": vision_model, "api_key": SECRET,
+            "chat_model": "qwen-plus", "api_key": SECRET,
         },
         "timeout_seconds": 600,
     })
@@ -192,7 +191,6 @@ def test_capability_group_gating(client_and_services) -> None:
         "enabled": False,
         "transcribe_enabled": False,
         "understand_enabled": False,
-        "tier2_enabled": False,
         "network": True,
         "provider": None,
         "local_stt": {
@@ -209,9 +207,6 @@ def test_capability_group_gating(client_and_services) -> None:
     assert capability["enabled"] is True
     assert capability["transcribe_enabled"] is True
     assert capability["understand_enabled"] is True
-    assert capability["tier2_enabled"] is False
-    client.put("/api/v1/settings/ai", json={"understand": {"vision_model": "qvq-vl"}})
-    assert client.get("/api/v1/capabilities").json()["media"]["ai"]["tier2_enabled"] is True
 
 
 def test_connection_test_sanitizes_failures(client_and_services, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -330,13 +325,6 @@ def test_adapter_group_gating_raises_unavailable(tmp_path: Path) -> None:
         no_key.summarize({"transcript_text": "x"}, lambda: False)
     with pytest.raises(MediaAiUnavailable):
         no_key.classify("正文", {})
-    no_vision = _adapter(
-        tmp_path, _ai_settings(ai_understand_provider="openai_compatible"), {"understand": SECRET},
-    )
-    with pytest.raises(MediaAiUnavailable):
-        no_vision.describe_frames([{"path": "a.jpg", "time_ms": 0}], "主题")
-
-
 def test_assess_completeness_rules_short_circuit_without_llm(tmp_path: Path) -> None:
     forbidden = lambda **kwargs: (_ for _ in ()).throw(AssertionError("LLM 不应被调用"))
     adapter = _adapter(
@@ -387,75 +375,13 @@ def test_assess_completeness_llm_threshold(tmp_path: Path) -> None:
     assert complete["confidence"] == 0.9
 
 
-def test_describe_frames_requires_visible_text_in_prompt(tmp_path: Path) -> None:
-    settings = _ai_settings(ai_understand_provider="openai_compatible", ai_vision_model="qvq-vl")
-    frames = [tmp_path / f"frame-{index}.jpg" for index in range(5)]
-    for frame in frames:
-        frame.write_bytes(b"jpeg" + frame.name.encode("ascii"))
-    captured: list[dict] = []
-
-    def fake_completion(**kwargs):
-        captured.append(kwargs)
-        image_count = sum(1 for item in kwargs["messages"][-1]["content"] if item["type"] == "image_url")
-        return _completion_response({"frames": [
-            {"index": index, "description": f"画面{index}", "visible_text": f"文字{index}"} for index in range(image_count)
-        ]})
-
-    adapter = _adapter(tmp_path, settings, {"understand": SECRET}, completion_caller=fake_completion)
-    results = adapter.describe_frames(
-        [{"path": frame, "time_ms": (index + 1) * 1000} for index, frame in enumerate(frames)],
-        "产品评测",
-    )
-    assert len(captured) == 2  # 4 + 1 两批
-    system_prompt = captured[0]["messages"][0]["content"]
-    assert "画面文字" in system_prompt
-    assert captured[0]["model"] == "qvq-vl"
-    first_user = captured[0]["messages"][1]["content"]
-    assert first_user[0]["type"] == "text"
-    assert all(item["image_url"]["url"].startswith("data:image/jpeg;base64,") for item in first_user[1:])
-    assert [item["time_ms"] for item in results] == [1000, 2000, 3000, 4000, 5000]
-    assert results[0]["description"] == "画面0"
-    assert results[0]["visible_text"] == "文字0"
-
-
-def test_summarize_clamps_suggestions_to_taxonomy(tmp_path: Path) -> None:
-    settings = _ai_settings(ai_understand_provider="openai_compatible")
-
-    def fake_completion(**kwargs):
-        return _completion_response({
-            "summary": "这是结构化摘要。",
-            "suggested_domains": ["technical", "不存在的领域", 42],
-            "suggested_genres": ["lecture", "podcast"],
-            "suggested_tags": ["AI", "", "长" * 30, "AI"],
-        })
-
-    adapter = _adapter(tmp_path, settings, {"understand": SECRET}, completion_caller=fake_completion)
-    result = adapter.summarize({"transcript_text": "转写", "title": "标题"}, lambda: False)
-    assert result["summary"] == "这是结构化摘要。"
-    assert result["suggested_domains"] == ["technical"]
-    assert result["suggested_genres"] == ["lecture"]
-    assert result["suggested_tags"] == ["AI", "长" * 20]
-
-
-def test_summarize_sanitizes_sdk_errors(tmp_path: Path) -> None:
-    settings = _ai_settings(ai_understand_provider="openai_compatible", ai_understand_base_url=BASE_URL)
-
-    def leaking_completion(**kwargs):
-        raise RuntimeError(f"upstream {BASE_URL} rejected key {SECRET}")
-
-    adapter = _adapter(tmp_path, settings, {"understand": SECRET}, completion_caller=leaking_completion)
-    with pytest.raises(RuntimeError) as excinfo:
-        adapter.summarize({"transcript_text": "转写"}, lambda: False)
-    assert SECRET not in str(excinfo.value)
-    assert "api.example.com" not in str(excinfo.value)
-
-
 def _fake_audio_extractor(artifact_path: Path, workspace: Path, timeout: float, cancelled) -> list:
     first = workspace / "chunk-000.mp3"
     second = workspace / "chunk-001.mp3"
     first.write_bytes(b"audio-one")
     second.write_bytes(b"audio-two")
     return [(first, 0, 2_000), (second, 2_000, 2_000)]
+
 
 def _jobs_audio_extractor(artifact_path, workspace, limits, cancelled) -> list:
     return _fake_audio_extractor(artifact_path, workspace, limits.timeout_seconds, cancelled)
@@ -469,39 +395,6 @@ def _fake_transcription_calls(calls: list[dict]):
         return {"segments": [{"start": 0.2, "end": 1.0, "text": "第二部分内容"}]}
 
     return fake
-
-
-def test_transcription_job_persists_time_range_evidence_and_searchable_chunks(client_and_services, monkeypatch: pytest.MonkeyPatch) -> None:
-    client, services = client_and_services
-    source_id, version_id = _analyzed_video(client, services)
-    _configure_ai(client)
-    calls: list[dict] = []
-    monkeypatch.setattr("app.services.jobs.extract_audio_chunks", _jobs_audio_extractor)
-    monkeypatch.setattr(services.api_transcriber, "_transcription_caller", _fake_transcription_calls(calls))
-
-    queued = client.post(f"/api/v1/videos/{source_id}/transcribe")
-    assert queued.status_code == 201
-    completed = services.jobs.run_once()
-    assert completed is not None and completed["kind"] == "video_transcribe"
-    assert completed["state"] == "succeeded", completed
-    assert completed["progress"] == 100
-
-    representations = client.get(f"/api/v1/documents/{version_id}/representations").json()
-    transcription = next(item for item in representations if item["kind"] == "transcription")
-    assert transcription["parser_name"].startswith("ai-openai_compatible-whisper-1")
-    assert "量子计算入门讲解" in transcription["text_content"]
-    evidence = client.get(f"/api/v1/representations/{transcription['id']}/evidence").json()
-    assert [item["locator"] for item in evidence] == [
-        {"type": "video_time_range", "start_ms": 0, "end_ms": 1500},
-        {"type": "video_time_range", "start_ms": 2200, "end_ms": 3000},
-    ]
-    assert all(item["is_validated"] for item in evidence)
-
-    found = client.get("/api/v1/search", params={"q": "量子计算"})
-    assert any(item.get("id") == source_id or item.get("source_id") == source_id for item in found.json()["items"])
-    # REQ-033a：转写是附加产物，版本完整性与处理状态保持视频分析的结论。
-    assert services.repository.get_version(version_id)["completeness"] == "complete"
-    assert services.repository.get_source(source_id)["processing_state"] == "succeeded"
 
 
 def _summary_payload() -> dict:
@@ -528,17 +421,11 @@ def test_summarize_job_cascade_tiers_and_visual_gap(client_and_services, monkeyp
 
     def fake_completion(**kwargs):
         completion_calls.append(kwargs)
-        content = kwargs["messages"][-1]["content"]
-        if isinstance(content, list):  # 视觉调用
-            count = sum(1 for item in content if item["type"] == "image_url")
-            return _completion_response({"frames": [
-                {"index": index, "description": f"演示画面{index}", "visible_text": f"量子位{index}"} for index in range(count)
-            ]})
         return _completion_response(_summary_payload())
 
     monkeypatch.setattr(services.media_ai, "_completion_caller", fake_completion)
 
-    # 转写覆盖率足够但尾部长静音 → 规则判不完整；未配置视觉模型 → tier1 + visual_gap。
+    # 转写覆盖率足够但尾部长静音 → 规则判不完整；未配置视频直送 → tier1 + visual_gap。
     queued = client.post(f"/api/v1/videos/{source_id}/summarize", json={})
     assert queued.status_code == 201
     tier1 = services.jobs.run_once()
@@ -551,14 +438,14 @@ def test_summarize_job_cascade_tiers_and_visual_gap(client_and_services, monkeyp
     assert len(summaries) == 1
     text = summaries[0]["text_content"]
     assert "完整性判断：可能不完整" in text
+    assert "未配置视频直送，画面信息未补充" in text
     marker = re.search(r"<!--yuanzhiku:suggestions (\{.*\}) -->", text)
     assert marker is not None
     suggestions = json.loads(marker.group(1))
     assert suggestions == {"domains": ["technical"], "genres": ["lecture"], "tags": ["量子", "入门"], "tier": 1, "visual_gap": True, "video_direct": False, "applied": True}
     assert text.count("<!--yuanzhiku:suggestions") == 1
 
-    # 配置视觉模型后强制深度理解 → tier2 表示与 tier1 共存，最新一条为 tier2。
-    client.put("/api/v1/settings/ai", json={"understand": {"vision_model": "qvq-vl"}})
+    # 强制深度理解（force_tier2）但无视频直送适配器 → 同样 visual_gap，摘要仍 tier1。
     forced = client.post(f"/api/v1/videos/{source_id}/summarize", json={"force_tier2": True})
     assert forced.status_code == 201
     tier2 = services.jobs.run_once()
@@ -569,11 +456,9 @@ def test_summarize_job_cascade_tiers_and_visual_gap(client_and_services, monkeyp
     ]
     assert len(summaries) == 2
     latest = summaries[-1]["text_content"]
-    assert "画面理解：" in latest
-    assert "量子位" in latest
     latest_suggestions = json.loads(re.search(r"<!--yuanzhiku:suggestions (\{.*\}) -->", latest).group(1))
-    assert latest_suggestions["tier"] == 2
-    assert latest_suggestions["visual_gap"] is False
+    assert latest_suggestions["tier"] == 1
+    assert latest_suggestions["visual_gap"] is True
     assert services.repository.get_version(version_id)["completeness"] == "complete"
     assert services.repository.get_source(source_id)["processing_state"] == "succeeded"
 

@@ -41,7 +41,7 @@
 - 新 `adapters/video_ai.py`：
   - `QwenVideoAdapter`：relay 优先 → getPolicy/OSS 临时上传（upload_host 经出站校验）→ `video_url` + 转写文本；超时长/体积按分块直送。
   - `MiMoVideoAdapter`：relay 优先 → base64 → 显式重编码（`ai_video_reencode`）→ 分块直送（`ai_video_chunk_seconds`）→ 单段兜底。
-- `jobs.py _video_summarize` 三级回退：视频直送 → 关键帧兜底（现状 `describe_frames`）→ visual_gap；证据 `video_time_range`（段偏移定位）；摘要标记注明降级原因。
+- `jobs.py _video_summarize` 两级回退（用户裁定 2026-08-16）：视频直送（多模态直接产出摘要+理解+建议分类）→ 直送不可行/失败时 tier1 摘要 + visual_gap；证据 `video_time_range`（段偏移定位）；摘要标记注明降级原因。
 - 设置/凭据：`ai_video_provider`/`ai_video_model`/`ai_video_max_bytes`（默认 300MB）/`ai_video_reencode`/`ai_video_chunk_seconds`（默认 600）；凭据文件新增 `video_qwen`/`video_mimo`。
 - `/capabilities` `media.ai.video_input` 节；出站校验覆盖 upload_host（`REQ-052` 修订）。
 - 先做最小真实调用冒烟（按 D-2/D-3 结论）再写完整适配器。

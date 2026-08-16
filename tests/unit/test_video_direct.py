@@ -70,8 +70,8 @@ class _NoRelay:
         return False
 
 
-def _completion(segments: list[dict]) -> dict:
-    return {"choices": [{"message": {"content": json.dumps({"segments": segments}, ensure_ascii=False)}}]}
+def _completion(payload) -> dict:
+    return {"choices": [{"message": {"content": json.dumps(payload, ensure_ascii=False)}}]}
 
 
 def _mimo(tmp_path: Path, relay=None, **caller) -> MiMoVideoAdapter:
@@ -110,11 +110,22 @@ def test_mimo_base64_direct_send_offsets_entries(tmp_path: Path) -> None:
 
     def fake_completion(**kwargs):
         captured.append(kwargs)
-        return _completion([{"time_offset_seconds": 3.5, "content": "画面演示步骤"}])
+        return _completion({
+            "summary": "多模态直送摘要：画面演示了操作步骤。",
+            "segments": [{"time_offset_seconds": 3.5, "content": "画面演示步骤"}],
+            "suggested_domains": ["technical", "不存在的领域"],
+            "suggested_genres": ["lecture", "podcast"],
+            "suggested_tags": ["演示", "步骤"],
+        })
 
     adapter = _mimo(tmp_path, completion=fake_completion)
-    entries = adapter.understand_video(video, "转写", "主题", lambda: False)
-    assert entries == [{"time_ms": 3500, "description": "画面演示步骤", "visible_text": ""}]
+    result = adapter.understand_video(video, "转写", "主题", lambda: False)
+    assert result["summary"] == "多模态直送摘要：画面演示了操作步骤。"
+    assert result["supplements"] == [{"time_ms": 3500, "description": "画面演示步骤", "visible_text": ""}]
+    # 建议分类强制收敛到分类体系（清单外丢弃、体裁最多一项）。
+    assert result["suggested_domains"] == ["technical"]
+    assert result["suggested_genres"] == ["lecture"]
+    assert result["suggested_tags"] == ["演示", "步骤"]
     user_content = captured[0]["messages"][1]["content"]
     video_url = user_content[0]["video_url"]["url"]
     assert video_url.startswith("data:video/mp4;base64,")
@@ -129,11 +140,12 @@ def test_mimo_relay_preferred_over_base64(tmp_path: Path) -> None:
 
     def fake_completion(**kwargs):
         captured.append(kwargs)
-        return _completion([{"time_offset_seconds": None, "content": "要点"}])
+        return _completion({"summary": "中转路径摘要。", "segments": [{"time_offset_seconds": None, "content": "要点"}]})
 
     adapter = _mimo(tmp_path, relay=_StaticRelay(), completion=fake_completion)
-    entries = adapter.understand_video(video, "转写", "主题", lambda: False)
-    assert entries[0]["description"] == "要点"
+    result = adapter.understand_video(video, "转写", "主题", lambda: False)
+    assert result["summary"] == "中转路径摘要。"
+    assert result["supplements"][0]["description"] == "要点"
     assert captured[0]["messages"][1]["content"][0]["video_url"]["url"].startswith("https://relay.example.com")
 
 
@@ -153,11 +165,12 @@ def test_qwen_dashscope_flow_uses_temp_url(tmp_path: Path) -> None:
 
     def fake_completion(**kwargs):
         captured.append(kwargs)
-        return _completion([{"time_offset_seconds": 1, "content": "图表信息"}])
+        return _completion({"summary": "千问直送摘要。", "segments": [{"time_offset_seconds": 1, "content": "图表信息"}]})
 
     adapter = _qwen(tmp_path, completion=fake_completion)
-    entries = adapter.understand_video(video, "转写", "主题", lambda: False)
-    assert entries == [{"time_ms": 1000, "description": "图表信息", "visible_text": ""}]
+    result = adapter.understand_video(video, "转写", "主题", lambda: False)
+    assert result["summary"] == "千问直送摘要。"
+    assert result["supplements"] == [{"time_ms": 1000, "description": "图表信息", "visible_text": ""}]
     url = captured[0]["messages"][1]["content"][0]["video_url"]["url"]
     assert url.startswith("https://dashscope-upload.example.com/uploads/")
 
@@ -235,7 +248,13 @@ class FakeVideoAdapter:
     def understand_video(self, video_path, transcript_text, focus, cancelled):
         if self.fail:
             raise RuntimeError("视频直送失败")
-        return [{"time_ms": 0, "description": "画面要点", "visible_text": "产品名"}]
+        return {
+            "summary": "多模态直送摘要：视频介绍了外贸网站。",
+            "supplements": [{"time_ms": 0, "description": "画面要点", "visible_text": "产品名"}],
+            "suggested_domains": ["business"],
+            "suggested_genres": ["lecture"],
+            "suggested_tags": ["外贸"],
+        }
 
 
 class FakeAnalyzer:
@@ -264,7 +283,7 @@ def client_and_services(runtime_root: Path, monkeypatch: pytest.MonkeyPatch):
         yield client, services
 
 
-def _analyzed(client, services, *, vision_model: str = "", force_direct: bool = False) -> tuple[str, str, str]:
+def _analyzed(client, services) -> tuple[str, str, str]:
     uploaded = client.post(
         "/api/v1/videos/local",
         data={"rights": "owned", "title": "视频", "domains": "[]", "genres": "[]", "tags": "[]"},
@@ -300,8 +319,6 @@ def _analyzed(client, services, *, vision_model: str = "", force_direct: bool = 
         "chat_model": "qwen-plus",
         "api_key": SECRET,
     }
-    if vision_model:
-        understand["vision_model"] = vision_model
     assert client.put("/api/v1/settings/ai", json={"understand": understand, "auto_pipeline": False}).status_code == 200
     return source_id, version_id, artifact_sha256
 
@@ -339,29 +356,28 @@ def test_summarize_video_direct_success(client_and_services, monkeypatch) -> Non
     assert job is not None and job["state"] == "succeeded", job
     summary = [r for r in services.repository.representations_for_version(version_id) if r["kind"] == "summary"][-1]
     assert "+video-mimo-default" in summary["parser_name"]
+    assert "多模态直送摘要" in summary["text_content"]
     assert "视频直送多模态模型" in summary["text_content"]
+    assert "画面要点" in summary["text_content"]
     assert '"video_direct":true' in summary["text_content"]
+    assert '"tier":2' in summary["text_content"]
 
 
-def test_summarize_video_direct_failure_falls_back_to_frames(client_and_services, monkeypatch) -> None:
+def test_summarize_video_direct_failure_marks_visual_gap(client_and_services, monkeypatch) -> None:
     client, services = client_and_services
-    source_id, version_id, _ = _analyzed(client, services, vision_model="qwen-vl-max")
+    source_id, version_id, _ = _analyzed(client, services)
     services.jobs.video_adapter_provider = lambda: FakeVideoAdapter(fail=True)
     _patch_completion(services, monkeypatch, _INCOMPLETE, _SUMMARY)
-    monkeypatch.setattr(
-        services.media_ai, "describe_frames",
-        lambda frame_inputs, focus, cancelled=None: [{"time_ms": 0, "description": "关键帧要点", "visible_text": ""}],
-    )
     assert client.post(f"/api/v1/videos/{source_id}/summarize", json={"force_tier2": True}).status_code == 201
     job = services.jobs.run_once()
     assert job is not None and job["state"] == "succeeded", job
     summary = [r for r in services.repository.representations_for_version(version_id) if r["kind"] == "summary"][-1]
-    assert "已改用关键帧画面理解" in summary["text_content"]
+    assert "视频直送失败，画面信息未补充" in summary["text_content"]
     assert '"video_direct":false' in summary["text_content"]
-    assert "关键帧要点" in summary["text_content"]
+    assert '"visual_gap":true' in summary["text_content"]
 
 
-def test_summarize_no_video_no_vision_marks_visual_gap(client_and_services, monkeypatch) -> None:
+def test_summarize_no_video_adapter_marks_visual_gap(client_and_services, monkeypatch) -> None:
     client, services = client_and_services
     source_id, version_id, _ = _analyzed(client, services)
     services.jobs.video_adapter_provider = lambda: None
@@ -370,4 +386,5 @@ def test_summarize_no_video_no_vision_marks_visual_gap(client_and_services, monk
     job = services.jobs.run_once()
     assert job is not None and job["state"] == "succeeded", job
     summary = [r for r in services.repository.representations_for_version(version_id) if r["kind"] == "summary"][-1]
+    assert "未配置视频直送，画面信息未补充" in summary["text_content"]
     assert '"visual_gap":true' in summary["text_content"]
