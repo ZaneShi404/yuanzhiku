@@ -1,0 +1,17 @@
+services:
+  video-relay:
+    build: .
+    restart: unless-stopped
+    environment:
+      # 必填：应用侧 ai_video_relay_secret 与本值一致
+      VIDEO_RELAY_SECRET: ${VIDEO_RELAY_SECRET:?请设置中转密钥}
+      VIDEO_RELAY_MAX_BYTES: "314572800"
+      VIDEO_RELAY_TTL_SECONDS: "1800"
+    volumes:
+      - relay-tokens:/data/tokens
+    # 仅回环：公网 HTTPS 由前置 OpenResty/nginx 反向代理提供
+    ports:
+      - "127.0.0.1:8000:8000"
+
+volumes:
+  relay-tokens:

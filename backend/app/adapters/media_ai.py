@@ -19,23 +19,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from app.adapters.media import LocalFfmpegMediaAnalyzer
 from app.domain.media import MediaProcessingLimits, MediaTranscript, MediaTranscriptSegment
 from app.domain.models import TAXONOMY_DOMAIN_VALUES, TAXONOMY_GENRE_VALUES
 from app.ports.media import (
     MediaAiPort,
     MediaAiUnavailable,
-    MediaInputInvalid,
     MediaProcessingCancelled,
-    MediaToolUnavailable,
+    MediaTranscriberPort,
 )
+from app.services.audio import extract_audio_chunks
 
 # 提示词与判定阈值版本：任何变更都会改变 config_hash，使新旧输出成为不同身份。
 AI_PROMPT_VERSION = "1"
-# 转写分块：48kbps 下 1800 秒约 10.8MB，远低于 24MB 块上限。
-AUDIO_CHUNK_MAX_BYTES = 24 * 1024 * 1024
-AUDIO_SEGMENT_SECONDS = 1800
-AUDIO_BITRATE = "48k"
 VISION_BATCH_SIZE = 4
 MAX_TRANSCRIPT_PROMPT_CHARS = 60_000
 MAX_CLASSIFY_PROMPT_CHARS = 8_000
@@ -185,6 +180,15 @@ def _clamp_confidence(value: Any) -> float:
         return 0.0
 
 
+def transcribe_config_hash(settings: dict[str, str]) -> str:
+    """远程转写路径的配置身份（与 ConfiguredMediaAi.config_hash("transcribe") 一致）。"""
+    value = (
+        f"{settings.get('ai_transcribe_provider', 'off')}:{settings.get('ai_transcribe_base_url', '')}"
+        f":{settings.get('ai_transcribe_model', '')}:{AI_PROMPT_VERSION}:transcribe"
+    )
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
 @dataclass(frozen=True)
 class _AiGroupConfig:
     base_url: str
@@ -216,7 +220,7 @@ class ConfiguredMediaAi(MediaAiPort):
         self._transcription_caller = transcription_caller
         self._completion_caller = completion_caller
         self._models_prober = models_prober
-        self._audio_extractor = audio_extractor or self._ffmpeg_audio_chunks
+        self._audio_extractor = audio_extractor or self._default_audio_extractor
         self._ffmpeg = ffmpeg or os.environ.get("YUANZHIKU_FFMPEG_BIN", "ffmpeg")
         self._ffprobe = ffprobe or os.environ.get("YUANZHIKU_FFPROBE_BIN", "ffprobe")
 
@@ -242,6 +246,8 @@ class ConfiguredMediaAi(MediaAiPort):
 
     def config_hash(self, operation: str) -> str:
         settings = self._settings_getter()
+        if operation == "transcribe":
+            return transcribe_config_hash(settings)
         group = "transcribe" if operation == "transcribe" else "understand"
         models = {
             "transcribe": settings.get("ai_transcribe_model", ""),
@@ -297,129 +303,34 @@ class ConfiguredMediaAi(MediaAiPort):
             deadline_monotonic=time.monotonic() + timeout_seconds,
         )
 
-    def _probe_duration_ms(
-        self,
-        path: Path,
-        limits: MediaProcessingLimits,
-        cancelled: Callable[[], bool],
-    ) -> int:
-        output = LocalFfmpegMediaAnalyzer._run(
-            [self._ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "json", str(path)],
-            limits,
-            cancelled,
-            lambda: None,
-            capture_stdout=True,
-        )
-        try:
-            duration = float(json.loads(output.decode("utf-8"))["format"]["duration"])
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-            raise MediaInputInvalid("invalid_duration") from exc
-        return max(1, round(duration * 1000))
-
-    def _ffmpeg_audio_chunks(
+    def _default_audio_extractor(
         self,
         artifact_path: Path,
         workspace: Path,
         timeout_seconds: float,
         cancelled: Callable[[], bool],
     ) -> list[tuple[Path, int, int]]:
-        """提取 16kHz 单声道音频并按需分段；返回 (块路径, 偏移毫秒, 时长毫秒)。"""
-        limits = self._limits(timeout_seconds)
-        heartbeat = lambda: None
-        audio = workspace / "audio.mp3"
-        try:
-            LocalFfmpegMediaAnalyzer._run(
-                [
-                    self._ffmpeg, "-nostdin", "-v", "error",
-                    "-i", str(artifact_path),
-                    "-vn", "-ac", "1", "-ar", "16000", "-b:a", AUDIO_BITRATE,
-                    "-codec:a", "libmp3lame", "-f", "mp3", "-y", str(audio),
-                ],
-                limits,
-                cancelled,
-                heartbeat,
-                workspace=workspace,
-            )
-            if not audio.is_file() or audio.stat().st_size == 0:
-                raise MediaInputInvalid("audio_missing")
-            if audio.stat().st_size <= AUDIO_CHUNK_MAX_BYTES:
-                return [(audio, 0, self._probe_duration_ms(audio, limits, cancelled))]
-            pattern = workspace / "chunk-%03d.mp3"
-            LocalFfmpegMediaAnalyzer._run(
-                [
-                    self._ffmpeg, "-nostdin", "-v", "error",
-                    "-i", str(audio), "-c", "copy",
-                    "-f", "segment", "-segment_time", str(AUDIO_SEGMENT_SECONDS),
-                    "-reset_timestamps", "1", "-y", str(pattern),
-                ],
-                limits,
-                cancelled,
-                heartbeat,
-                workspace=workspace,
-            )
-        except (MediaInputInvalid, MediaToolUnavailable) as exc:
-            raise RuntimeError("本地音频提取失败") from exc
-        audio.unlink(missing_ok=True)
-        chunks: list[tuple[Path, int, int]] = []
-        offset_ms = 0
-        for chunk in sorted(workspace.glob("chunk-*.mp3")):
-            if cancelled():
-                raise MediaProcessingCancelled()
-            duration_ms = self._probe_duration_ms(chunk, limits, cancelled)
-            chunks.append((chunk, offset_ms, duration_ms))
-            offset_ms += duration_ms
-        if not chunks:
-            raise RuntimeError("本地音频提取失败")
-        return chunks
+        """默认音轨提取（决策 18）：共享助手 + 视频组资源上限。"""
+        return extract_audio_chunks(
+            artifact_path,
+            workspace,
+            self._limits(timeout_seconds),
+            cancelled,
+            ffmpeg=self._ffmpeg,
+            ffprobe=self._ffprobe,
+        )
 
     def transcribe(self, artifact_path: Path, media_type: str | None, cancelled: Callable[[], bool]) -> MediaTranscript:
+        """远程转写（REQ-017 现状语义；音轨提取上移后委托 ApiTranscriber，决策 18）。"""
         config = self._require_group("transcribe")
         self._staging_dir.mkdir(parents=True, exist_ok=True)
         workspace = Path(tempfile.mkdtemp(prefix="ai-audio-", dir=self._staging_dir))
         try:
             chunks = self._audio_extractor(artifact_path, workspace, config.timeout_seconds, cancelled)
-            segments: list[MediaTranscriptSegment] = []
-            texts: list[str] = []
-            for chunk_path, offset_ms, duration_ms in chunks:
-                if cancelled():
-                    raise MediaProcessingCancelled()
-                try:
-                    with chunk_path.open("rb") as audio_file:
-                        response = self._transcription_caller(
-                            model=config.model,
-                            file=audio_file,
-                            response_format="verbose_json",
-                            timestamp_granularities=["segment"],
-                            api_key=config.api_key,
-                            api_base=config.base_url or None,
-                            timeout=config.timeout_seconds,
-                        )
-                except Exception as exc:
-                    raise RuntimeError(sanitize_ai_error(exc)) from None
-                payload = _coerce_json(response)
-                chunk_segments = _transcription_segments(payload)
-                if not chunk_segments:
-                    # 无分段时间戳时以整块为一条，保证证据总能定位到时间范围。
-                    fallback = str(payload.get("text") or "").strip()
-                    if fallback:
-                        segments.append(MediaTranscriptSegment(
-                            fallback, offset_ms, max(offset_ms + 1, offset_ms + duration_ms),
-                        ))
-                        texts.append(fallback)
-                    continue
-                for start_seconds, end_seconds, text in chunk_segments:
-                    cleaned = text.strip()
-                    if not cleaned:
-                        continue
-                    start_ms = offset_ms + max(0, round(start_seconds * 1000))
-                    end_ms = offset_ms + max(0, round(end_seconds * 1000))
-                    if end_ms <= start_ms:
-                        end_ms = start_ms + 1
-                    segments.append(MediaTranscriptSegment(cleaned, start_ms, end_ms))
-                    texts.append(cleaned)
-            if not segments:
-                raise RuntimeError("语音转写未返回可用文本")
-            return MediaTranscript("\n".join(texts), tuple(segments))
+            return ApiTranscriber(
+                self._settings_getter, self._credentials_reader,
+                transcription_caller=self._transcription_caller,
+            ).transcribe(chunks, cancelled)
         finally:
             shutil.rmtree(workspace, ignore_errors=True)
 
@@ -684,3 +595,104 @@ class ConfiguredMediaAi(MediaAiPort):
         except Exception as exc:
             return False, sanitize_ai_error(exc)
         return True, ""
+
+
+class ApiTranscriber(MediaTranscriberPort):
+    """远程转写端点适配器（REQ-054 路径 2）：OpenAI 兼容转写端点，经 litellm。
+
+    输入为作业统一提取的音轨分块（决策 18）；逐块调用并把分段映射回
+    视频时间轴（块偏移 + 段内偏移）；无分段时间戳时整块退化为一条。
+    与 ConfiguredMediaAi 共用同一转写配置求解（转写组设置 + 凭据）。
+    """
+
+    def __init__(
+        self,
+        settings_getter: Callable[[], dict[str, str]],
+        credentials_reader: Callable[[], dict[str, str]],
+        *,
+        transcription_caller: Callable[..., Any] | None = None,
+    ) -> None:
+        self._settings_getter = settings_getter
+        self._credentials_reader = credentials_reader
+        self._transcription_caller = transcription_caller or _litellm_transcription
+
+    def capability(self) -> dict[str, object]:
+        settings = self._settings_getter()
+        credentials = self._credentials_reader()
+        enabled = (
+            settings.get("ai_transcribe_provider", "off") == "openai_compatible"
+            and bool(credentials.get("transcribe"))
+        )
+        return {"enabled": enabled, "engine": "api", "network": True}
+
+    def config_hash(self) -> str:
+        return transcribe_config_hash(self._settings_getter())
+
+    def _config(self) -> _AiGroupConfig:
+        settings = self._settings_getter()
+        if settings.get("ai_transcribe_provider", "off") != "openai_compatible":
+            raise MediaAiUnavailable("not_configured")
+        api_key = self._credentials_reader().get("transcribe", "")
+        if not api_key:
+            raise MediaAiUnavailable("not_configured")
+        model = settings.get("ai_transcribe_model", "").strip() or "whisper-1"
+        try:
+            timeout_seconds = max(60.0, min(86_400.0, float(settings.get("ai_timeout_seconds", "300"))))
+        except (TypeError, ValueError):
+            timeout_seconds = 300.0
+        return _AiGroupConfig(
+            base_url=settings.get("ai_transcribe_base_url", "").strip(),
+            model=model,
+            vision_model="",
+            api_key=api_key,
+            timeout_seconds=timeout_seconds,
+        )
+
+    def transcribe(
+        self,
+        audio_chunks: list[tuple[Path, int, int]],
+        cancelled: Callable[[], bool],
+    ) -> MediaTranscript:
+        config = self._config()
+        segments: list[MediaTranscriptSegment] = []
+        texts: list[str] = []
+        for chunk_path, offset_ms, duration_ms in audio_chunks:
+            if cancelled():
+                raise MediaProcessingCancelled()
+            try:
+                with chunk_path.open("rb") as audio_file:
+                    response = self._transcription_caller(
+                        model=config.model,
+                        file=audio_file,
+                        response_format="verbose_json",
+                        timestamp_granularities=["segment"],
+                        api_key=config.api_key,
+                        api_base=config.base_url or None,
+                        timeout=config.timeout_seconds,
+                    )
+            except Exception as exc:
+                raise RuntimeError(sanitize_ai_error(exc)) from None
+            payload = _coerce_json(response)
+            chunk_segments = _transcription_segments(payload)
+            if not chunk_segments:
+                # 无分段时间戳时以整块为一条，保证证据总能定位到时间范围。
+                fallback = str(payload.get("text") or "").strip()
+                if fallback:
+                    segments.append(MediaTranscriptSegment(
+                        fallback, offset_ms, max(offset_ms + 1, offset_ms + duration_ms),
+                    ))
+                    texts.append(fallback)
+                continue
+            for start_seconds, end_seconds, text in chunk_segments:
+                cleaned = text.strip()
+                if not cleaned:
+                    continue
+                start_ms = offset_ms + max(0, round(start_seconds * 1000))
+                end_ms = offset_ms + max(0, round(end_seconds * 1000))
+                if end_ms <= start_ms:
+                    end_ms = start_ms + 1
+                segments.append(MediaTranscriptSegment(cleaned, start_ms, end_ms))
+                texts.append(cleaned)
+        if not segments:
+            raise RuntimeError("语音转写未返回可用文本")
+        return MediaTranscript("\n".join(texts), tuple(segments))

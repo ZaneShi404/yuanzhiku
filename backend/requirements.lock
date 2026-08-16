@@ -13,3 +13,7 @@ yt-dlp==2026.7.4
 docling==2.120.1
 pillow==12.3.0
 litellm==1.96.2
+funasr==1.4.2
+modelscope==1.39.1
+torch==2.9.1
+torchaudio==2.9.1

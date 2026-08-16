@@ -122,7 +122,7 @@ def test_local_video_analysis_stream_and_disabled_ai(client_and_services) -> Non
     blocked = services.jobs.run_once()
     assert blocked is not None and blocked["kind"] == "video_transcribe"
     assert blocked["state"] == "blocked"
-    assert blocked["message"] == "未配置媒体 AI 服务"
+    assert blocked["message"] == "未配置任何可用转写路径：请下载本地转写模型或配置转写 API"
     assert services.repository.get_version(uploaded.json()["content_version"]["id"])["completeness"] == "complete"
 
 

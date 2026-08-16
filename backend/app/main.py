@@ -28,7 +28,9 @@ from app.adapters.downloader import (
     host_matches_registered_domain,
 )
 from app.adapters.media import LocalFfmpegMediaAnalyzer
-from app.adapters.media_ai import ConfiguredMediaAi
+from app.adapters.media_ai import ApiTranscriber, ConfiguredMediaAi
+from app.adapters.local_stt import LocalFunasrTranscriber
+from app.adapters.video_ai import MiMoVideoAdapter, QwenVideoAdapter, RelayClient
 from app.core.config import DataPaths, InstanceLock, data_paths, database_backend, database_url
 from app.core.operations import OperationalLog
 from app.ports.media import DownloadInputInvalid, DownloadUnavailable
@@ -50,6 +52,7 @@ from app.domain.models import (
     RightsCategory,
     SettingsUpdate,
     SourceMetadataUpdate,
+    SttModelActionRequest,
     TopicCreate,
     TopicRename,
     VerifyRequest,
@@ -70,6 +73,7 @@ from app.services.jobs import JobService
 from app.services.prefill import ALLOWED_SUFFIXES as PREFILL_SUFFIXES
 from app.services.prefill import suggest_document, suggest_text
 from app.services.lifecycle import LifecycleService
+from app.services.stt_models import SttModelManager
 from app.services.videos import VideoService
 from app.services.search import SearchService
 from app.services.transfers import ReimportConflict, TransferService
@@ -104,6 +108,34 @@ class ApplicationServices:
             credentials_reader=lambda: read_ai_credentials(paths.ai_credentials_file),
             staging_dir=paths.staging,
         )
+        # 转写双路径（REQ-054）：本地 FunASR（默认）与远程转写端点同端口；
+        # 模型经 SttModelManager 显式下载管理（锁文件 + 哈希校验），
+        # 路径策略由 jobs._video_transcribe 按 ai_transcriber_engine 决定。
+        self.stt_manager = SttModelManager(paths.models)
+        self.local_transcriber = LocalFunasrTranscriber(self.stt_manager, self.repository.get_settings)
+        self.api_transcriber = ApiTranscriber(
+            self.repository.get_settings,
+            lambda: read_ai_credentials(paths.ai_credentials_file),
+        )
+        # 与 JobService 共享同一字典引用：测试与作业侧替换互见。
+        self.transcribers: dict[str, Any] = {"local": self.local_transcriber, "api": self.api_transcriber}
+        # 视频直送双适配（REQ-055，决策 17/22）：relay 优先路径共用同一客户端。
+        self.video_relay = RelayClient(
+            self.repository.get_settings,
+            lambda: read_ai_credentials(paths.ai_credentials_file),
+        )
+        self.video_adapters: dict[str, Any] = {
+            "qwen": QwenVideoAdapter(
+                self.repository.get_settings,
+                lambda: read_ai_credentials(paths.ai_credentials_file),
+                self.video_relay,
+            ),
+            "mimo": MiMoVideoAdapter(
+                self.repository.get_settings,
+                lambda: read_ai_credentials(paths.ai_credentials_file),
+                self.video_relay,
+            ),
+        }
         self.downloader = YtDlpDownloader(cookie_resolver=paths.download_cookie_file)
         self.documents = DocumentService(self.repository)
         self.videos = VideoService(self.repository, self.artifacts, self.documents, self.media_analyzer)
@@ -122,6 +154,11 @@ class ApplicationServices:
             downloader=self.downloader,
             images=self.images,
             media_ai=self.media_ai,
+            stt_manager=self.stt_manager,
+            transcribers=self.transcribers,
+            video_adapter_provider=lambda: self.video_adapters.get(
+                self.repository.get_settings().get("ai_video_provider", "off")
+            ),
         )
         self.external_cards = ExternalCardService(self.repository)
         self.lifecycle = LifecycleService(self.repository, self.artifacts)
@@ -202,6 +239,15 @@ def _ai_key_hint(value: str | None) -> str | None:
     return f"…{value[-4:]}" if value else None
 
 
+def _video_input_capability(services: "ApplicationServices") -> dict[str, Any]:
+    """按 ai_video_provider 回显所选视频直送适配器能力（REQ-055.5）。"""
+    provider = services.repository.get_settings().get("ai_video_provider", "off")
+    adapter = services.video_adapters.get(provider)
+    if adapter is None:
+        return {"video_input": False, "provider": provider}
+    return adapter.capability()
+
+
 def _ai_settings_view(services: "ApplicationServices") -> dict[str, Any]:
     settings = services.repository.get_settings()
     credentials = read_ai_credentials(services.paths.ai_credentials_file)
@@ -209,6 +255,26 @@ def _ai_settings_view(services: "ApplicationServices") -> dict[str, Any]:
         timeout_seconds = int(settings.get("ai_timeout_seconds", "300"))
     except (TypeError, ValueError):
         timeout_seconds = 300
+    try:
+        stt_timeout = int(settings.get("stt_timeout_seconds", "3600"))
+    except (TypeError, ValueError):
+        stt_timeout = 3600
+    try:
+        stt_memory = int(settings.get("stt_memory_limit_mb", "2048"))
+    except (TypeError, ValueError):
+        stt_memory = 2048
+    try:
+        stt_disk = int(settings.get("stt_disk_limit_mb", "1024"))
+    except (TypeError, ValueError):
+        stt_disk = 1024
+    try:
+        video_max_bytes = int(settings.get("ai_video_max_bytes", "314572800"))
+    except (TypeError, ValueError):
+        video_max_bytes = 314572800
+    try:
+        video_chunk_seconds = int(settings.get("ai_video_chunk_seconds", "600"))
+    except (TypeError, ValueError):
+        video_chunk_seconds = 600
     return {
         "transcribe": {
             "provider": settings.get("ai_transcribe_provider", "off"),
@@ -225,6 +291,28 @@ def _ai_settings_view(services: "ApplicationServices") -> dict[str, Any]:
             "has_key": bool(credentials.get("understand")),
             "key_hint": _ai_key_hint(credentials.get("understand")),
         },
+        "transcriber": {
+            "engine": settings.get("ai_transcriber_engine", "auto"),
+            "local_stt_model": settings.get("ai_local_stt_model", "paraformer-zh"),
+            "stt_timeout_seconds": stt_timeout,
+            "stt_memory_limit_mb": stt_memory,
+            "stt_disk_limit_mb": stt_disk,
+        },
+        "video": {
+            "provider": settings.get("ai_video_provider", "off"),
+            "model": settings.get("ai_video_model", ""),
+            "max_bytes": video_max_bytes,
+            "reencode": settings.get("ai_video_reencode", "on") == "on",
+            "chunk_seconds": video_chunk_seconds,
+            "qwen": {"has_key": bool(credentials.get("video_qwen")), "key_hint": _ai_key_hint(credentials.get("video_qwen"))},
+            "mimo": {"has_key": bool(credentials.get("video_mimo")), "key_hint": _ai_key_hint(credentials.get("video_mimo"))},
+            "relay": {
+                "base_url": settings.get("ai_video_relay_base_url", ""),
+                "has_secret": bool(credentials.get("video_relay")),
+                "secret_hint": _ai_key_hint(credentials.get("video_relay")),
+            },
+        },
+        "local_stt": services.stt_manager.status(),
         "timeout_seconds": timeout_seconds,
         "auto_pipeline": settings.get("ai_auto_pipeline", "on") == "on",
     }
@@ -424,7 +512,14 @@ def create_app(root: str | Path | None = None, *, acquire_lock: bool = True) -> 
             "parser": svc.parser.capability(),
             "search": {"mode": "phrase_keyword_substring", "semantic": False},
             "external_cards": {"fetch": False, "douyin_literal_only": True},
-            "media": {"local": svc.media_analyzer.capability(), "ai": svc.media_ai.capability()},
+            "media": {
+                "local": svc.media_analyzer.capability(),
+                "ai": {
+                    **svc.media_ai.capability(),
+                    "local_stt": svc.local_transcriber.capability(),
+                    "video_input": _video_input_capability(svc),
+                },
+            },
             "downloader": svc.downloader.capability(),
             "network": {"bind": "127.0.0.1", "https": False, "telemetry": False},
         }
@@ -457,6 +552,45 @@ def create_app(root: str | Path | None = None, *, acquire_lock: bool = True) -> 
                 request.understand, "understand", "understand",
                 {"chat_model": "ai_chat_model", "vision_model": "ai_vision_model"}, settings, updates, credentials,
             ) or credentials_changed
+        if request.transcriber is not None:
+            transcriber = request.transcriber
+            if transcriber.engine is not None:
+                updates["ai_transcriber_engine"] = transcriber.engine
+            if transcriber.local_stt_model is not None:
+                updates["ai_local_stt_model"] = transcriber.local_stt_model
+            if transcriber.stt_timeout_seconds is not None:
+                updates["stt_timeout_seconds"] = str(transcriber.stt_timeout_seconds)
+            if transcriber.stt_memory_limit_mb is not None:
+                updates["stt_memory_limit_mb"] = str(transcriber.stt_memory_limit_mb)
+            if transcriber.stt_disk_limit_mb is not None:
+                updates["stt_disk_limit_mb"] = str(transcriber.stt_disk_limit_mb)
+        if request.video is not None:
+            video = request.video
+            if video.provider is not None:
+                updates["ai_video_provider"] = video.provider
+            if video.model is not None:
+                updates["ai_video_model"] = video.model
+            if video.max_bytes is not None:
+                updates["ai_video_max_bytes"] = str(video.max_bytes)
+            if video.reencode is not None:
+                updates["ai_video_reencode"] = video.reencode
+            if video.chunk_seconds is not None:
+                updates["ai_video_chunk_seconds"] = str(video.chunk_seconds)
+            if video.relay_base_url is not None:
+                updates["ai_video_relay_base_url"] = video.relay_base_url
+            if video.qwen_api_key:
+                credentials["video_qwen"] = video.qwen_api_key
+                credentials_changed = True
+            if video.mimo_api_key:
+                credentials["video_mimo"] = video.mimo_api_key
+                credentials_changed = True
+            if video.relay_secret:
+                credentials["video_relay"] = video.relay_secret
+                credentials_changed = True
+            if video.provider == "off":
+                for key in ("video_qwen", "video_mimo"):
+                    if credentials.pop(key, None) is not None:
+                        credentials_changed = True
         if request.timeout_seconds is not None:
             updates["ai_timeout_seconds"] = str(request.timeout_seconds)
         if request.auto_pipeline is not None:
@@ -472,6 +606,26 @@ def create_app(root: str | Path | None = None, *, acquire_lock: bool = True) -> 
         # 轻量连通性检查：使用已保存的配置与凭据；失败消息已脱敏，不回显 URL/密钥/响应。
         ok, message = svc.media_ai.test_connection(request.part)
         return {"ok": True} if ok else {"ok": False, "message": message}
+
+    @app.post(f"{api}/settings/ai/stt-model", status_code=201, tags=["settings"])
+    def stt_model_action(request: SttModelActionRequest, svc: ApplicationServices = Depends(get_services)) -> dict[str, Any]:
+        # 本地转写模型管理（REQ-054.3）：delete 同步幂等；download 经
+        # stt_model_download 作业异步执行（单 worker 串行、租约心跳、失败
+        # 可重试），已有排队/运行中下载时 409。
+        if request.action == "delete":
+            svc.stt_manager.delete()
+            svc.repository.audit("stt_model_delete", None, "succeeded")
+            return {"action": "delete", "status": svc.stt_manager.status()}
+        for job in svc.repository.list_jobs():
+            if job["kind"] == "stt_model_download" and job["state"] in {"queued", "running", "retry_wait"}:
+                raise HTTPException(
+                    status_code=409,
+                    detail={"code": "model_download_busy", "message": "本地转写模型下载进行中"},
+                )
+        job = svc.repository.create_job(
+            "stt_model_download", None, None, None, None, {"action": "download"}, priority=50,
+        )
+        return {"action": "download", "job_id": job["id"]}
 
     @app.post(f"{api}/settings/download-cookies/{{platform}}", status_code=204, tags=["settings"])
     async def upload_download_cookie(

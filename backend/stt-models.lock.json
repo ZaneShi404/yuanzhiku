@@ -1,0 +1,22 @@
+{
+  "engine": "funasr",
+  "model_name": "paraformer-zh",
+  "models": {
+    "paraformer": {
+      "model_id": "iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
+      "license": "Apache-2.0",
+      "source": "https://modelscope.cn/models/iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch"
+    },
+    "vad": {
+      "model_id": "iic/speech_fsmn_vad_zh-cn-16k-common-pytorch",
+      "license": "Apache-2.0",
+      "source": "https://modelscope.cn/models/iic/speech_fsmn_vad_zh-cn-16k-common-pytorch"
+    },
+    "punc": {
+      "model_id": "iic/punc_ct-transformer_zh-cn-common-vocab272727-pytorch",
+      "license": "Apache-2.0",
+      "source": "https://modelscope.cn/models/iic/punc_ct-transformer_zh-cn-common-vocab272727-pytorch"
+    }
+  },
+  "note": "E1 实测结论（2026-08-16）：funasr-onnx 锁死 numpy<=1.26.4，与 Python 3.13 无轮子不兼容，故默认引擎为 funasr（torch 完整版）。文件级 SHA-256 与 revision 于首次下载校验后自钉在 data/models/stt/manifest.state.json（REQ-054.3）；模型包变更须走 REQ-013 手动评估流程，绝不自动升级。"
+}

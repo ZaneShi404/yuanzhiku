@@ -177,7 +177,24 @@ class _FakeMediaAi:
         }
 
 
-def test_local_full_chain_with_media_ai(runtime_root: Path) -> None:
+class _FakeTranscriber:
+    """集成用假转写适配器（REQ-054 新边界）：本地确定性返回，绝不触网。"""
+
+    def __init__(self, transcript: MediaTranscript) -> None:
+        self._transcript = transcript
+
+    def capability(self) -> dict[str, object]:
+        return {"enabled": True, "model": "fake"}
+
+    def config_hash(self) -> str:
+        return "integration-fake-transcriber"
+
+    def transcribe(self, audio_chunks, cancelled) -> MediaTranscript:
+        assert not cancelled()
+        return self._transcript
+
+
+def test_local_full_chain_with_media_ai(runtime_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """视频导入 → 本地分析 → AI 转写 → AI 摘要 → 检索命中转写术语（假 AI 端口）。"""
     os.environ["YUANZHIKU_EMBEDDED_WORKER"] = "false"
     try:
@@ -186,7 +203,12 @@ def test_local_full_chain_with_media_ai(runtime_root: Path) -> None:
         services.videos.analyzer = _FakeMediaAnalyzer()
         services.media_ai = _FakeMediaAi()
         services.jobs.media_ai = services.media_ai
+        fake_ai = _FakeMediaAi()
+        services.transcribers["local"] = _FakeTranscriber(fake_ai.transcribe(None, None, lambda: False))
+        monkeypatch.setattr("app.services.jobs.extract_audio_chunks", lambda *_: [])
         with TestClient(app) as client:
+            # 关闭自动串联，手动逐作业驱动（本用例按固定顺序断言每个回合的作业）。
+            assert client.put("/api/v1/settings/ai", json={"auto_pipeline": False}).status_code == 200
             uploaded = client.post(
                 "/api/v1/videos/local",
                 data={"rights": "owned", "title": "整链路视频", "domains": "[]", "genres": "[]", "tags": "[]"},

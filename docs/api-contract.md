@@ -5,7 +5,7 @@
 | 区域 | 端点 | 方法 | 要点 |
 |---|---|---|---|
 | health | `/health`, `/capabilities` | GET | 运行状态、功能与本地限制 |
-| settings | `/settings`, `/settings/ai`, `/settings/ai/test`, `/settings/download-cookies/{platform}` | GET, PUT, POST, DELETE | 非敏感设置、端口和断路器；双组媒体 AI 配置与连通性检查（密钥仅存凭据文件，回显掩码）；按平台 cookies.txt 导入/删除（每平台 ≤1MB） |
+| settings | `/settings`, `/settings/ai`, `/settings/ai/test`, `/settings/ai/stt-model`, `/settings/download-cookies/{platform}` | GET, PUT, POST, DELETE | 非敏感设置、端口和断路器；双组媒体 AI 配置与连通性检查（密钥仅存凭据文件，回显掩码）；本地转写模型下载/删除（REQ-054）；按平台 cookies.txt 导入/删除（每平台 ≤1MB） |
 | imports | `/imports/file`, `/imports/image`, `/imports/paste`, `/imports/prefill` | POST | rights 必填；文件/图片 multipart、文本 JSON；分类字段为 `domains`/`genres`（`categories` 已移除）；prefill 只读识别元数据，返回可空建议，不持久化、不联网 |
 | videos | `/videos/local`, `/videos/link`, `/videos/link/probe`, `/videos/{source_id}`, `/videos/{source_id}/stream`, `/videos/{source_id}/frames/{frame_id}`, `/videos/{source_id}/transcribe`, `/videos/{source_id}/summarize` | GET/POST | 本地 MP4/WebM artifact 与受限白名单链接下载；链接元数据只读探测（REQ-047b）；本地播放、关键帧；transcribe/summarize 入队媒体 AI 作业（未配置时终态 blocked，REQ-051） |
 | sources | `/sources`, `/sources/{id}`, `/sources/{id}/metadata`, `/sources/{id}/rights`, `/sources/{id}/relations`, `/sources/{id}/relations/{relation_id}` | GET/PUT/POST/DELETE | 不返回本地原路径；来源详情含 `same_work_candidates`；关系可创建与删除 |
@@ -99,6 +99,16 @@
 `PUT /settings/ai` 接受局部更新：省略的分组/字段保持不变；`api_key` 省略或空串不触碰既有凭据，非空则原子写入 `<data-root>/state/ai/credentials.json`。`auto_pipeline` 省略保持不变，为 `false` 时不再自动串联转写/摘要/分类作业（手动触发与摘要建议自动写入不受影响）。`base_url` 空串表示提供方默认端点，非空必须是 ≤2048 字符的 HTTPS 公网地址、无 userinfo，否则 `422 request_validation`；密钥绝不进入数据库、日志、备份、导出或任何 API 出参。两组均为 `off`（默认）时无任何出站流量，行为与未配置完全一致。
 
 `POST /settings/ai/test` 请求体 `{"part": "transcribe" | "understand"}`，使用已保存配置做轻量连通性检查（转写分组 GET `/models`，理解分组一次最小 completion），返回 `{"ok": true}` 或 `{"ok": false, "message": "<脱敏中文原因>"}`；失败消息不含 URL、密钥或响应正文。
+
+## 本地转写与视频直送（REQ-054, REQ-055，v1.5）
+
+`GET /settings/ai` 扩展三节：`transcriber`（`engine`=auto|local|api、`local_stt_model`=paraformer-zh|paraformer-zh-quant、`stt_timeout_seconds`/`stt_memory_limit_mb`/`stt_disk_limit_mb`）、`local_stt`（模型状态：`model_name`/`model_configured`/`model_available`/`downloaded_at`/`revisions`）、`video`（`provider`=off|qwen|mimo、`model`、`max_bytes`（默认 314572800）、`reencode`、`chunk_seconds`、`qwen`/`mimo` 密钥掩码、`relay`（`base_url`/`has_secret`/`secret_hint`））。
+
+`PUT /settings/ai` 新增局部分组：`transcriber`（引擎/模型/三个 stt 断路器）与 `video`（供应商/模型/上限/重编码开关/分块秒数/中转地址 + `qwen_api_key`/`mimo_api_key`/`relay_secret` 凭据，同分组密钥纪律仅入凭据文件、掩码回显；`provider: "off"` 时移除 qwen/mimo 凭据）。`relay_base_url` 非空必须是 HTTPS 公网地址、无 userinfo、≤2048 字符，否则 `422 request_validation`。凭据文件新增可选键 `video_qwen`/`video_mimo`/`video_relay`（同一原子写入纪律）。
+
+`POST /settings/ai/stt-model` 请求体 `{"action": "download" | "delete"}`：`download` 入 `stt_model_download` 作业异步执行（返回 201 + `job_id`；已有排队/运行中下载时 `409 model_download_busy`；下载失败作业 failed 且消息脱敏，可重试）；`delete` 同步幂等（201），两者均写审计事件。
+
+`/capabilities` 的 `media.ai` 扩展：`local_stt`（`enabled`/`engine`/`model`/`model_available`/`network:false`）与 `video_input`（按 `ai_video_provider` 回显所选适配器能力：`video_input`/`max_bytes`/`audio_in_video`/`duration_limits`/`reencode`/`relay_configured`）。
 
 ## 检索过滤（REQ-024）
 

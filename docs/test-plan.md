@@ -28,3 +28,9 @@
 | T-ARCH-001 | v2 过程档案报告 | 构建 schema v2 目录与 ZIP；核对 Markdown + JSON 同 stem、`report_id`、UTC/枚举、REQ/DEF、来源/证据/manifest 交叉引用、`legacy_inferred` 最小字段、冻结 legacy 路径/哈希全集、冻结 snapshot 有序链、版本汇总逐项一致及 release blocked 门禁；验证已发布目录 ACL 拒绝写入，篡改仅在隔离副本进行；重算 manifest 后仍拒绝 schema、登记、验收身份、运行输出或候选链篡改，v1 fixture 继续验证 | REQ-001, REQ-044, REQ-045, REQ-046 |
 
 测试数据只能位于 `tests/fixtures` 与 `tests/runtime/<run-id>`。开发自测不构成独立测试或验收结论。
+| T-STT-001 | 本地转写适配器 | 分段偏移映射与时间戳退化；断路器与取消；config_hash 随引擎/模型变化；模型不可用异常语义 | REQ-054 |
+| T-STT-002 | 转写路径策略 | auto/local/api × 模型可用/失败/API 可用降级矩阵；降级事实写入 parser_name/config_hash 与作业消息；REQ-033a 失败不降完整性 | REQ-054, REQ-051 |
+| T-MDL-001 | 本地转写模型管理 | 下载成功/校验/重试/删除后策略；stt-model 端点错误码逐条命中；审计事件不含内容 | REQ-054 |
+| T-VDIR-001 | 视频直送单元 | 三级回退选择；min(设置, 供应商上限) 判定；音频能力分支；重编码+分块组合（段偏移、段级兜底）；config_hash 含供应商/模型 | REQ-055 |
+| T-VDIR-002 | 视频直送集成 | 全链路 fake 转写/直送器：完整→tier1、缺失→直送成功/失败→关键帧兜底→visual_gap 三支路 | REQ-055, REQ-051 |
+| T-RLY-001 | 自备中转 | fake relay 服务器（上传/取 URL/TTL）；relay 优先与上传失败回退；未配置行为不变；URL 不落库不落日志 | REQ-055, 决策 22 |

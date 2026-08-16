@@ -341,9 +341,70 @@ class AiUnderstandSettings(BaseModel):
     _base_url = field_validator("base_url")(_valid_ai_base_url)
 
 
+class AiTranscriberSettings(BaseModel):
+    """转写路径策略（REQ-054）；字段缺省表示保持不变。"""
+
+    engine: str | None = None
+    local_stt_model: str | None = None
+    stt_timeout_seconds: int | None = Field(default=None, ge=60, le=86_400)
+    stt_memory_limit_mb: int | None = Field(default=None, ge=64, le=32_768)
+    stt_disk_limit_mb: int | None = Field(default=None, ge=64, le=32_768)
+
+    @field_validator("engine")
+    @classmethod
+    def valid_engine(cls, value: str | None) -> str | None:
+        if value is not None and value not in ("auto", "local", "api"):
+            raise ValueError("不支持的转写路径策略")
+        return value
+
+    @field_validator("local_stt_model")
+    @classmethod
+    def valid_local_model(cls, value: str | None) -> str | None:
+        if value is not None and value not in ("paraformer-zh", "paraformer-zh-quant"):
+            raise ValueError("不支持的本地转写模型")
+        return value
+
+
+class AiVideoSettings(BaseModel):
+    """视频直送与自备中转配置（REQ-055，决策 17/20/21/22）；字段缺省表示保持不变。"""
+
+    provider: str | None = None
+    model: str | None = Field(default=None, max_length=100)
+    max_bytes: int | None = Field(default=None, ge=1_048_576, le=536_870_912)
+    reencode: str | None = None
+    chunk_seconds: int | None = Field(default=None, ge=60, le=3600)
+    relay_base_url: str | None = Field(default=None, max_length=2048)
+    qwen_api_key: str | None = Field(default=None, max_length=500)
+    mimo_api_key: str | None = Field(default=None, max_length=500)
+    relay_secret: str | None = Field(default=None, max_length=500)
+
+    @field_validator("provider")
+    @classmethod
+    def valid_provider(cls, value: str | None) -> str | None:
+        if value is not None and value not in ("off", "qwen", "mimo"):
+            raise ValueError("不支持的视频直送供应商")
+        return value
+
+    @field_validator("reencode")
+    @classmethod
+    def valid_reencode(cls, value: str | None) -> str | None:
+        if value is not None and value not in ("on", "off"):
+            raise ValueError("不支持的重编码开关")
+        return value
+
+    @field_validator("relay_base_url")
+    @classmethod
+    def valid_relay_base_url(cls, value: str | None) -> str | None:
+        if value:
+            return _valid_ai_base_url(value)
+        return value
+
+
 class AiSettingsUpdate(BaseModel):
     transcribe: AiTranscribeSettings | None = None
     understand: AiUnderstandSettings | None = None
+    transcriber: AiTranscriberSettings | None = None
+    video: AiVideoSettings | None = None
     timeout_seconds: int | None = Field(default=None, ge=60, le=86_400)
     auto_pipeline: bool | None = None
 
@@ -356,6 +417,19 @@ class AiConnectionTestRequest(BaseModel):
     def valid_part(cls, value: str) -> str:
         if value not in ("transcribe", "understand"):
             raise ValueError("不支持的测试分组")
+        return value
+
+
+class SttModelActionRequest(BaseModel):
+    """本地转写模型管理操作（REQ-054.3）：download 经作业异步执行，delete 同步幂等。"""
+
+    action: str
+
+    @field_validator("action")
+    @classmethod
+    def valid_action(cls, value: str) -> str:
+        if value not in ("download", "delete"):
+            raise ValueError("不支持的模型操作")
         return value
 
 

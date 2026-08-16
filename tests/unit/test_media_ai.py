@@ -195,6 +195,14 @@ def test_capability_group_gating(client_and_services) -> None:
         "tier2_enabled": False,
         "network": True,
         "provider": None,
+        "local_stt": {
+            "enabled": False,
+            "engine": "funasr",
+            "model": "paraformer-zh",
+            "model_available": False,
+            "network": False,
+        },
+        "video_input": {"provider": "off", "video_input": False},
     }
     _configure_ai(client)
     capability = client.get("/api/v1/capabilities").json()["media"]["ai"]
@@ -449,6 +457,9 @@ def _fake_audio_extractor(artifact_path: Path, workspace: Path, timeout: float, 
     second.write_bytes(b"audio-two")
     return [(first, 0, 2_000), (second, 2_000, 2_000)]
 
+def _jobs_audio_extractor(artifact_path, workspace, limits, cancelled) -> list:
+    return _fake_audio_extractor(artifact_path, workspace, limits.timeout_seconds, cancelled)
+
 
 def _fake_transcription_calls(calls: list[dict]):
     def fake(**kwargs):
@@ -465,8 +476,8 @@ def test_transcription_job_persists_time_range_evidence_and_searchable_chunks(cl
     source_id, version_id = _analyzed_video(client, services)
     _configure_ai(client)
     calls: list[dict] = []
-    monkeypatch.setattr(services.media_ai, "_audio_extractor", _fake_audio_extractor)
-    monkeypatch.setattr(services.media_ai, "_transcription_caller", _fake_transcription_calls(calls))
+    monkeypatch.setattr("app.services.jobs.extract_audio_chunks", _jobs_audio_extractor)
+    monkeypatch.setattr(services.api_transcriber, "_transcription_caller", _fake_transcription_calls(calls))
 
     queued = client.post(f"/api/v1/videos/{source_id}/transcribe")
     assert queued.status_code == 201
@@ -508,8 +519,8 @@ def test_summarize_job_cascade_tiers_and_visual_gap(client_and_services, monkeyp
     _configure_ai(client)
     # 本用例手动逐步触发转写/摘要，关闭自动流水线避免串联作业干扰。
     assert client.put("/api/v1/settings/ai", json={"auto_pipeline": False}).status_code == 200
-    monkeypatch.setattr(services.media_ai, "_audio_extractor", _fake_audio_extractor)
-    monkeypatch.setattr(services.media_ai, "_transcription_caller", _fake_transcription_calls([]))
+    monkeypatch.setattr("app.services.jobs.extract_audio_chunks", _jobs_audio_extractor)
+    monkeypatch.setattr(services.api_transcriber, "_transcription_caller", _fake_transcription_calls([]))
     assert client.post(f"/api/v1/videos/{source_id}/transcribe").status_code == 201
     assert services.jobs.run_once()["state"] == "succeeded"
 
@@ -543,7 +554,7 @@ def test_summarize_job_cascade_tiers_and_visual_gap(client_and_services, monkeyp
     marker = re.search(r"<!--yuanzhiku:suggestions (\{.*\}) -->", text)
     assert marker is not None
     suggestions = json.loads(marker.group(1))
-    assert suggestions == {"domains": ["technical"], "genres": ["lecture"], "tags": ["量子", "入门"], "tier": 1, "visual_gap": True, "applied": True}
+    assert suggestions == {"domains": ["technical"], "genres": ["lecture"], "tags": ["量子", "入门"], "tier": 1, "visual_gap": True, "video_direct": False, "applied": True}
     assert text.count("<!--yuanzhiku:suggestions") == 1
 
     # 配置视觉模型后强制深度理解 → tier2 表示与 tier1 共存，最新一条为 tier2。
@@ -582,12 +593,12 @@ def test_transcription_failure_keeps_version_state(client_and_services, monkeypa
     client, services = client_and_services
     source_id, version_id = _analyzed_video(client, services)
     _configure_ai(client)
-    monkeypatch.setattr(services.media_ai, "_audio_extractor", _fake_audio_extractor)
+    monkeypatch.setattr("app.services.jobs.extract_audio_chunks", _jobs_audio_extractor)
 
     def leaking_transcription(**kwargs):
         raise RuntimeError(f"upstream {BASE_URL} rejected key {SECRET}")
 
-    monkeypatch.setattr(services.media_ai, "_transcription_caller", leaking_transcription)
+    monkeypatch.setattr(services.api_transcriber, "_transcription_caller", leaking_transcription)
     assert client.post(f"/api/v1/videos/{source_id}/transcribe").status_code == 201
     job = None
     for _ in range(5):
@@ -657,8 +668,8 @@ def test_auto_pipeline_chains_video_jobs_and_applies_only_empty_fields(client_an
     _configure_ai(client)
     # 用户已填领域与标签：领域绝不覆盖，标签并集合并，体裁空缺才填入。
     source_id, _ = _upload_video(client, domains='["technical"]', tags='["已有"]')
-    monkeypatch.setattr(services.media_ai, "_audio_extractor", _fake_audio_extractor)
-    monkeypatch.setattr(services.media_ai, "_transcription_caller", _fake_transcription_calls([]))
+    monkeypatch.setattr("app.services.jobs.extract_audio_chunks", _jobs_audio_extractor)
+    monkeypatch.setattr(services.api_transcriber, "_transcription_caller", _fake_transcription_calls([]))
     monkeypatch.setattr(services.media_ai, "_completion_caller", lambda **kwargs: _completion_response(_summary_payload()))
 
     analyzed = services.jobs.run_once()
@@ -714,8 +725,8 @@ def test_auto_apply_noop_when_suggestions_empty(client_and_services, monkeypatch
     client, services = client_and_services
     _configure_ai(client)
     source_id, _ = _upload_video(client)
-    monkeypatch.setattr(services.media_ai, "_audio_extractor", _fake_audio_extractor)
-    monkeypatch.setattr(services.media_ai, "_transcription_caller", _fake_transcription_calls([]))
+    monkeypatch.setattr("app.services.jobs.extract_audio_chunks", _jobs_audio_extractor)
+    monkeypatch.setattr(services.api_transcriber, "_transcription_caller", _fake_transcription_calls([]))
     monkeypatch.setattr(services.media_ai, "_completion_caller", lambda **kwargs: _completion_response({
         "summary": "只有摘要，没有建议。",
         "suggested_domains": [],

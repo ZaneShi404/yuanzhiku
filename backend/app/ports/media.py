@@ -56,6 +56,47 @@ class MediaAnalyzerPort(Protocol):
     ) -> tuple[ExtractedVideoFrame, ...]: ...
 
 
+class MediaTranscriberPort(Protocol):
+    """语音转写适配器边界（REQ-054）：本地引擎与远程端点同一接口。
+
+    输入为作业统一提取的音轨分块（决策 18，``app.services.audio`` 的
+    ``extract_audio_chunks``，元素为 (块路径, 偏移毫秒, 时长毫秒)）；
+    输出的 MediaTranscript 分段必须映射回视频时间轴（块偏移 + 段内偏移）。
+    """
+
+    def capability(self) -> dict[str, object]: ...
+
+    def config_hash(self) -> str: ...
+
+    def transcribe(
+        self,
+        audio_chunks: list[tuple[Path, int, int]],
+        cancelled: Callable[[], bool],
+    ) -> MediaTranscript: ...
+
+
+class VideoUnderstandingPort(Protocol):
+    """视频直送补充理解边界（REQ-055，决策 16/17）：可替换供应商适配器。
+
+    输出与关键帧画面理解同一契约：list of {"time_ms": int, "description":
+    str, "visible_text": str}，作业层据此写入摘要附录与证据；不可行时抛
+    ``MediaAiUnavailable("video_input")`` → 作业层转关键帧兜底。
+    """
+
+    def capability(self) -> dict[str, object]: ...
+
+    # {"video_input", "max_bytes", "audio_in_video", "duration_limits", "reencode"}
+    def config_hash(self) -> str: ...
+
+    def understand_video(
+        self,
+        video_path: Path,
+        transcript_text: str,
+        focus: str,
+        cancelled: Callable[[], bool],
+    ) -> list[dict[str, Any]]: ...
+
+
 class MediaAiPort(Protocol):
     """可选媒体 AI 提供方边界（REQ-017）。
 
