@@ -18,7 +18,7 @@ from typing import Any, Iterator
 from app.adapters.sqlite import BACKUP_TABLES, EXPORT_TABLES, SqliteRepository, identifier, now, redact_url_userinfo
 
 
-_JSON_COLUMNS = {"categories_json", "tags_json", "snapshot_json", "locator_json", "payload_json", "metadata_json"}
+_JSON_COLUMNS = {"domains_json", "genres_json", "tags_json", "snapshot_json", "locator_json", "payload_json", "metadata_json"}
 _MIGRATION_ADVISORY_LOCK = 902807281
 
 
@@ -252,11 +252,22 @@ class PostgresRepository(SqliteRepository):
             "video_memory_limit_mb": "2048",
             "video_disk_limit_mb": "1024",
             "video_max_frames": "12",
+            "image_timeout_seconds": "3600",
+            "image_memory_limit_mb": "2048",
+            "image_disk_limit_mb": "1024",
             "job_lease_seconds": "300",
             "max_retry_attempts": "2",
             "download_timeout_seconds": "3600",
             "download_no_progress_seconds": "10",
             "download_disk_limit_mb": "2048",
+            "ai_transcribe_provider": "off",
+            "ai_transcribe_base_url": "",
+            "ai_transcribe_model": "whisper-1",
+            "ai_understand_provider": "off",
+            "ai_understand_base_url": "",
+            "ai_chat_model": "qwen-plus",
+            "ai_vision_model": "",
+            "ai_timeout_seconds": "300",
             "last_backup_date": "",
             "last_integrity_sample_date": "",
         }

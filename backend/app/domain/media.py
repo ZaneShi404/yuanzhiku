@@ -31,6 +31,8 @@ class ExtractedVideoFrame:
     path: Path
     width: int | None
     height: int | None
+    # 抽样来源："scene" 场景切换点 / "even" 等间隔槽位。
+    reason: str = "even"
 
 
 @dataclass(frozen=True)

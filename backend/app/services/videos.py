@@ -9,6 +9,13 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Callable
 
+from app.adapters.media import (
+    SAMPLING_DENSITY_SECONDS,
+    SAMPLING_JPEG_QUALITY,
+    SAMPLING_PLACEMENT,
+    SAMPLING_SCALE_MAX_WIDTH,
+    SAMPLING_STRATEGY,
+)
 from app.domain.media import MediaProcessingLimits, VideoMetadata
 from app.ports.media import MediaAnalyzerPort, MediaProcessingCancelled
 from app.ports.repository import RepositoryPort
@@ -30,7 +37,7 @@ class VideoService:
         self.analyzer = analyzer
 
     @staticmethod
-    def _metadata_payload(metadata: VideoMetadata) -> dict[str, object]:
+    def _metadata_payload(metadata: VideoMetadata, maximum_frames: int) -> dict[str, object]:
         return {
             "container_name": metadata.container_name,
             "duration_ms": metadata.duration_ms,
@@ -38,6 +45,14 @@ class VideoService:
             "height": metadata.height,
             "video_codec": metadata.video_codec,
             "audio_codec": metadata.audio_codec,
+            "sampling": {
+                "strategy": SAMPLING_STRATEGY,
+                "density_seconds": SAMPLING_DENSITY_SECONDS,
+                "placement": SAMPLING_PLACEMENT,
+                "scale_max_width": SAMPLING_SCALE_MAX_WIDTH,
+                "jpeg_quality": SAMPLING_JPEG_QUALITY,
+                "requested_max_frames": maximum_frames,
+            },
         }
 
     @staticmethod
@@ -105,9 +120,15 @@ class VideoService:
                     "time_ms": frame.time_ms,
                     "width": frame.width,
                     "height": frame.height,
+                    "reason": frame.reason,
                 })
                 progress(30 + round(index / max(total, 1) * 45), "正在保存关键帧")
-            payload = self._metadata_payload(metadata)
+            progress(78, "正在校验本地视频与关键帧")
+            if not self.artifacts.verify(artifact_sha256) or not all(
+                self.artifacts.verify(str(frame["artifact_sha256"])) for frame in stored_frames
+            ):
+                raise RuntimeError("artifact_verification_failed")
+            payload = self._metadata_payload(metadata, maximum_frames)
             progress(80, "正在生成可引用的视频元数据")
             text = self._metadata_text(metadata)
             excerpt = text[:300]
@@ -137,11 +158,6 @@ class VideoService:
                 metadata=payload,
                 frames=stored_frames,
             )
-            progress(95, "正在校验本地视频与关键帧")
-            if not self.artifacts.verify(artifact_sha256) or not all(
-                self.artifacts.verify(str(frame["artifact_sha256"])) for frame in stored_frames
-            ):
-                raise RuntimeError("artifact_verification_failed")
             return {"metadata": payload, **output}
         finally:
             for frame in stored_frames:
@@ -164,7 +180,25 @@ class VideoService:
         version = next((item for item in versions if item["id"] == version_id), None) if version_id else versions[0]
         if version is None or version.get("media_type") not in {"video/mp4", "video/webm"}:
             return None
-        analysis = self.repository.video_analysis_for_version(version["id"])
-        if analysis is not None:
-            analysis["metadata"] = json.loads(analysis.pop("metadata_json"))
-        return {"source_id": source_id, "version": version, "analysis": analysis}
+        analyses = self.repository.list_video_analyses(version["id"])
+        analysis = None
+        if version["completeness"] == "complete":
+            analysis = self.repository.video_analysis_for_version(version["id"])
+            if analysis is not None:
+                analysis["metadata"] = json.loads(analysis.pop("metadata_json"))
+        return {
+            "source_id": source_id,
+            "version": version,
+            "analysis": analysis,
+            "analyses": [
+                {
+                    "id": item["id"],
+                    "created_at": item["created_at"],
+                    "analyzer_name": item["analyzer_name"],
+                    "config_hash": item["config_hash"],
+                    "frame_count": len(item["frames"]),
+                }
+                for item in analyses
+            ],
+            "current_analysis_id": analysis["id"] if analysis is not None else None,
+        }

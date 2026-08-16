@@ -17,8 +17,11 @@
 - `REQ-013`：Docling 是首选解析器。其模型只可按预批准、锁定版本/来源/许可证/哈希且无需登录或附加条款的官方默认模型锁文件直接公开下载，缓存于 `data\models`；禁止静默云回退。
 - `REQ-014`：Docling 缺失/不可用时记录原因并本地回退 pypdf、python-docx 或原生 Markdown/TXT；扫描/无文本 PDF 保留并标记 awaiting_ocr；加密、损坏、不可解析 PDF/DOCX 在权利确认后保留，作业 blocked/failed，绝不询问、猜测或储存密码。
 - `REQ-015`：视频支持本地 MP4/WebM 导入（同样受 2GB、容量预检、权利声明、不可变 SHA-256 artifact、备份和永久清理规则约束）与受限链接获取（`REQ-047`）；不保存原始本地完整路径。链接获取仅接受白名单平台、仅由用户显式提交，下载经无 shell 受限子进程完成并进入同一 artifact/分析/证据链生命周期；本地导入与视频分析仍禁止 shell、网络、URL 获取和静默云回退。视频通过本机显式安装的 FFmpeg/ffprobe 探测元数据并在独立 staging 中有限时间采样 JPEG 关键帧。
-- `REQ-016`：视频分析使用可配置的总超时、内存、工作目录磁盘及最大关键帧数断路器；仅在原视频和所有接受的派生帧完成 hash 校验后成功。视频元数据以 `video_metadata` locator 写入可引用 extraction/evidence；未来转写仅可使用带毫秒起止范围的 `video_time_range` locator。
-- `REQ-017`：视频转写和内容摘要只定义可插拔端口与作业接口；默认 AI 未配置、无网络流量，作业明确 blocked，不伪造文本、摘要或 evidence。外部提供方只能经日后明确配置的适配器接入，凭据、原路径、媒体内容和原始响应不得进入数据库、API、导出或日志。
+- `REQ-016`：视频分析使用可配置的总超时、内存、工作目录磁盘及最大关键帧数断路器；关键帧采样为场景感知混合策略（`REQ-053`），采样配置身份 `config_hash` 全参数化（`ffmpeg-local:2:<策略>:<密度秒>:<锚点>:<缩放宽>:<JPEG 质量>:<帧数上限>` 的 SHA-256），任一采样参数变更即构成新分析身份；分析结果先完成原视频与全部接受派生帧的 hash 校验再持久化（verify-before-persist），多份历史分析按版本列出并显式标记当前项，detail 仅对 complete 版本返回当前 analysis。视频元数据以 `video_metadata` locator 写入可引用 extraction/evidence；转写与摘要产物仅可使用带毫秒起止范围的 `video_time_range` locator。
+- `REQ-017`：视频转写和内容摘要经可插拔媒体 AI 端口与作业接口提供，提供方由用户显式配置（双组模型与级联见 `REQ-051`，出站校验与凭据隔离见 `REQ-052`）；默认两组均关闭、无网络流量，作业明确 blocked，不伪造文本、摘要或 evidence。凭据、原路径、媒体内容和 AI 原始响应不得进入数据库、API、导出或日志；AI 调用错误一律脱敏为不含 URL、密钥或响应正文的中文短消息。
+- `REQ-051`：媒体 AI 为两个相互独立的显式配置分组：语音转写（provider/base_url/model/key）与理解摘要（provider/base_url/chat_model/vision_model（可选）/key），经 `GET/PUT /settings/ai` 管理、`POST /settings/ai/test` 做连通性检查；分组未启用或无 key 时对应作业 blocked，两组全关时行为与未配置完全一致。转写经本地 ffmpeg 提取 16kHz 单声道音频并按 ≤24MB 分块调用转写端点，产出 kind=transcription representation 与逐段 `video_time_range` 证据（可检索）；摘要为两层级联——先按确定性规则（覆盖率/静音阈值）加约束 JSON 的 LLM 判定（置信阈值 0.6）评估转写完整性，完整走 tier1 纯文本摘要，疑似不完整或 `force_tier2` 走 tier2（逐帧画面理解、强制画面文字提取后增强摘要）；tier2 未配置但被判需要时在摘要中标记 visual_gap；AI 建议（领域/体裁强制收敛到分类清单、标签自由）仅以标记嵌入摘要文本，经用户显式动作才可采纳；AI 作业失败/取消不降低已完成视频版本状态（`REQ-033a`）。
+- `REQ-052`：AI 端点 base_url 经统一校验：仅 HTTPS、仅公网主机、无 userinfo、不超过 2048 字符，拒绝消息不含 URL 内容；API key 只保存在 `<data-root>/state/ai/credentials.json`（原子写入），绝不进入数据库、备份、导出、日志或任何 API 出参（仅回显 has_key 与掩码提示）；音频分块、关键帧图片与转写文本仅在用户逐视频显式触发作业时发往所配置端点，默认关闭即零出站流量；AI 调用错误一律脱敏为不含 URL、密钥或响应正文的中文短消息。
+- `REQ-053`：关键帧采样为场景感知混合策略：ffmpeg 场景检测（阈值 0.3）输出候选点，等间隔槽位在半个槽距容差内吸附最近未使用场景点，吸不到保留等间隔位置；首末槽锚定约 5%/95%，短视频（<120s）至少 3 帧，长视频按 120 秒密度并受 video_max_frames 封顶；黑帧（灰度均值 <16）拒绝并按候选序列（未使用场景点、±5% 平移）重试；每帧持久化采样来源 reason（scene/even，数据库 schema v8）与采样参数（随分析元数据），帧宽高为真实像素值。
 
 ## 证据、知识和检索
 
@@ -26,8 +29,9 @@
 - `REQ-021`：PDF locator 为页码和字符范围/可得坐标；DOCX 为结构/序号和字符范围；MD/TXT 为标题段落及 UTF-8 字节/行范围；检索块不是证据。
 - `REQ-022`：手工知识类型为 fact、opinion、instruction、case、citation、unverified；发布的实质事实陈述需有效证据，否则只能 draft/unverified。手工编辑创建新 manual representation，引用清楚显示人工修订及原始视图。
 - `REQ-023`：引用显示来源标题/状态、locator、可展开 300 字上下文和定位动作。
-- `REQ-024`：检索覆盖标题、作者、标签、备注、固定分类、全文、已发布知识、外部卡元数据；默认当前完整版本，历史/不完整须显式高级选项；仅中文短语/关键词/子串匹配，不宣称语义检索；排序 relevance、导入/更新、标题，过滤来源类型、分类、标签、作者、来源/导入日期、语言、处理状态。
-- `REQ-025`：固定分类可多选 technical、business、education、news、interview、podcast、document；自由标签；手工主题可关联多来源，不复制或取得所有权。
+- `REQ-024`：检索覆盖标题、作者、备注、全文、已发布知识、外部卡元数据；分类（领域/体裁）与标签 token 不进入全文语料，视频容器元数据模板（`ffmpeg-local` representation）不进入全文语料；默认当前完整版本，历史/不完整须显式高级选项；仅中文短语/关键词/子串匹配，不宣称语义检索；排序 relevance、导入/更新、标题，过滤来源类型、领域（重复参数、OR 语义、`_none` 哨兵匹配未分类）、体裁（单值、`_none` 匹配无体裁）、标签、作者、来源/导入日期、语言、处理状态与主题（`topic_id`，仅过滤来源分支）。
+- `REQ-025`：分类为领域×体裁双字段（`REQ-050`），取代旧固定分类清单；旧值按映射迁移（technical/business/education/news→领域，interview/podcast/document→体裁，未知值忽略；多体裁遗留行全部保留，下次编辑时强制单选）；自由标签；手工主题可关联多来源、可重命名、删除与移除成员，不复制或取得所有权；来源关系可创建与删除，检索与库支持按主题过滤；用户可显式声明 user_declared_same_work，系统按相同 artifact 哈希或规范化标题给出确定性候选。
+- `REQ-050`：分类体系为两个独立字段：领域（technical、business、education、news、entertainment、life、other）多选、可空；体裁（document、lecture、interview、podcast、review、recording、other）写入时最多一项、可空。清单以后端为唯一来源，经 `GET /taxonomy` 下发中文标签，前后端不各自硬编码；数据库 schema v9 与可移植归档 schema v8 共用同一旧值拆分映射；导入与元数据更新接口以 `domains`/`genres` 取代 `categories`。
 
 ## 外部卡、作业和生命周期
 
@@ -58,7 +62,7 @@
   3. 只读：不入队作业、不写任何表、不持久化任何内容；成功返回 `{title, author, source_date}`（均可空）供链接获取表单回填。
   4. Cookie 规则同 REQ-047a：`use_cookie: true` 未导入 cookies.txt → `422`，绝不静默回退为无 Cookie 探测；Cookie 内容绝不进入数据库、日志、API 响应。
   5. downloader 不可用（yt-dlp/FFmpeg 缺失、代理启动失败）→ `503`；探测失败（反爬、链接失效、平台拒绝、超时）→ `502` 通用脱敏消息。
-- `REQ-048`：图片导入（`POST /imports/image`）：本地 jpg/jpeg/png/webp 图片作为新来源导入，与文档/视频同一纪律——后缀白名单、权利声明必填（`REQ-011`）、2GB 上限与容量预检、原始字节流式写入不可变 SHA-256 artifact、不保存原始本地完整路径，标题缺省回退文件名 stem 或"未命名图片"。导入入队轻量 `image_analyze` 作业：仅用 Pillow 本地读取尺寸/格式与 EXIF（拍摄时间、Artist、ImageDescription 等常见字段，取不到即为空），不做 OCR、不做 AI 内容描述、无任何网络调用；断路器沿用视频既有设置项（超时/内存/磁盘），解码前按像素估算内存护栏；损坏或无法解码的图片作业 failed，消息通用脱敏。元数据以 `image_metadata` locator（宽高/格式/拍摄时间，由域工厂校验）写入 extraction representation 与 evidence；representation 中文摘要（尺寸、格式、拍摄时间等）进入检索索引，检索仅命中这些元数据，不宣称理解图片内容。零新数据库表：artifact、representation、evidence 复用既有结构，备份、导出、还原与检索自动覆盖。仅在 artifact SHA-256 校验通过后作业成功。
+- `REQ-048`：图片导入（`POST /imports/image`）：本地 jpg/jpeg/png/webp 图片作为新来源导入，与文档/视频同一纪律——后缀白名单、权利声明必填（`REQ-011`）、2GB 上限与容量预检、原始字节流式写入不可变 SHA-256 artifact、不保存原始本地完整路径，标题缺省回退文件名 stem 或"未命名图片"。导入入队轻量 `image_analyze` 作业：仅用 Pillow 本地读取尺寸/格式与 EXIF（拍摄时间、Artist、ImageDescription 等常见字段，取不到即为空），不做 OCR、不做 AI 内容描述、无任何网络调用；断路器使用独立设置项 `image_timeout_seconds`/`image_memory_limit_mb`/`image_disk_limit_mb`（缺省与视频断路器一致），解码前按像素估算内存护栏；损坏或无法解码的图片作业 failed，消息通用脱敏。元数据以 `image_metadata` locator（宽高/格式/拍摄时间，由域工厂校验）写入 extraction representation 与 evidence；representation 中文摘要（尺寸、格式、拍摄时间等）进入检索索引，检索仅命中这些元数据，不宣称理解图片内容。零新数据库表：artifact、representation、evidence 复用既有结构，备份、导出、还原与检索自动覆盖。仅在 artifact SHA-256 校验通过后作业成功。
 - `REQ-049`：导入预填（`POST /imports/prefill`）：用户选择文件或粘贴文本后，端点只读识别元数据并返回可空建议字段 `title`/`author`/`language`/`source_date`；接受 multipart `file`（后缀白名单 `.pdf/.docx/.md/.markdown/.txt/.jpg/.jpeg/.png/.webp`，图片本阶段仅以文件名 stem 建议标题）或 multipart `text` 字段，两者都空 → `422`；文件上限 20MB、文本上限 1MB。端点不读写数据库、不触碰数据根、不发起任何网络调用；损坏/加密文件返回全空建议而非报错；拒绝消息不含文件内容；权利确认（`REQ-011`）、分类与标签不参与预填。
 - `REQ-034`：软删除无限期；显式永久删除才移除 source versions/derived/index/cache，仅在无 active source 引用时删除 artifact；永久删除后最小无内容审计保留 1 年。
 
@@ -67,7 +71,7 @@
 - `REQ-040`：每日首次成功启动后排低优先级备份（非 Windows 任务）；保留最近 30 个成功日备份。备份含 DB、artifacts、derived/evidence、settings、manifest，排除模型缓存、staging、日志正文；快照一致并 SHA-256 验证。
 - `REQ-041`：还原只能到新数据根，绝不覆盖；导出完整可移植 ZIP + JSON manifest，含原 artifact、派生数据、逻辑记录和 sha manifests，排除密钥/凭据/私密权利备注/cookies/原路径/日志正文；UI 必须确认导出。再导入校验 schema/zip/manifest/hash/relations，不覆盖；同 ID 不同链拒绝并报告。
 - `REQ-042`：摄取/导出/还原均校验 hash，支持手工完整校验和空闲抽样；操作日志按日保留 30 天且不含内容/路径/令牌。视频分析记录、关键帧 artifact 及其引用也必须进入备份、导出、还原和再导入一致性校验。
-- `REQ-043`：所有端点位于 `/api/v1`：health/capabilities、settings、sources/relations/rights/metadata、imports/paste、videos/local、videos/link、videos/{id}/stream/frames/transcribe/summarize、settings/download-cookies/{platform}、docs/representations/evidence/citations/knowledge、search、tags/topics、external/douyin cards、jobs、delete/restore/purge、backup/restore、export/reimport；类型稳定并有 OpenAPI。`/capabilities` 增加 `downloader` 节。其余不变。
+- `REQ-043`：所有端点位于 `/api/v1`：health/capabilities、settings、sources/relations/rights/metadata、imports/paste、videos/local、videos/link、videos/{id}/stream/frames/transcribe/summarize、settings/download-cookies/{platform}、settings/ai（双组媒体 AI 配置与连通性检查）、docs/representations/evidence/citations/knowledge、search、taxonomy/tags/topics（主题支持重命名/删除/移除成员）、external/douyin cards、jobs、delete/restore/purge、backup/restore、export/reimport；类型稳定并有 OpenAPI。`/capabilities` 增加 `downloader` 节。其余不变。
 - `REQ-044`：UI 页面包括库、导入、来源详情、检索、作业、设置、备份/还原/导出、外部卡；极简中文；导入页为统一智能识别入口：单一大输入框加文件选择，粘贴文本/链接或选择文档（PDF/DOCX/MD/TXT）、图片（JPG/PNG/WebP）、视频（MP4/WebM）文件后自动识别类型并路由到对应导入流程；粘贴命中白名单平台（哔哩哔哩含 b23.tv/抖音）的 HTTPS 视频链接（含抖音分享口令等混合文本，自动提取其中的平台链接并把剩余文案带入备注）即进入"链接获取"提交表单：平台按域名自动判定、URL 输入、权利声明必选、Cookie 开关（按识别出的平台使用该平台已导入的 Cookie 文件，含该平台可用状态提示）、联网告知（提交即向所选平台服务器发起下载请求）、"识别链接"按钮按需读取元数据、提交后跳转作业页，可切换为仅保存外部卡；其他 URL 识别为外部卡创建；不做预览、嗅探或解析展示；外部卡页为只读列表，创建统一在导入页进行；视频仅播放本地 artifact 并显示本地元数据/关键帧；PDF 使用隔离只读预览并禁用嵌入链接，仅显式外开；文本安全渲染；目标 Edge/Chrome。
 - `REQ-045`：SQLite 默认于 `data/state`，为 PostgreSQL 提供 production adapter/migrations；Docker Compose 运行 web/api/worker/postgres/redis，端口仅 loopback；集成测试只能使用 `tests\runtime\compose-<run-id>`，不得使用日常 data。
 - `REQ-046`：依赖仅接受明确开源许可；锁定依赖/模型/镜像版本，不自动升级；建立合成、无版权 fixtures 和完整文档、决策、开发报告。

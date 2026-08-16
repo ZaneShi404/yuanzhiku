@@ -13,6 +13,10 @@
 | T-VID-005 | 真实平台手工验收 | 真实 B站/抖音链接手工验收（脱敏摘要与成功率），会员/付费/DRM 按 REQ-047.9 拒绝；因平台反爬不稳定，不作为自动化门禁；由 acceptance 角色独立登记 | REQ-047 |
 | T-VID-006 | 链接元数据探测 | fake yt-dlp 子进程解析 title/uploader/upload_date、白名单拒绝脱敏、Cookie 规则（未导入 422/无静默回退）、工具缺失 503、失败/超时 502 脱敏、代理随请求销毁、无 shell/stdin 关闭/环境代理清空 | REQ-047b |
 | T-IMG-001 | 图片导入与分析 | Pillow 合成带 EXIF JPEG/无 EXIF PNG/WebP：导入→image_analyze→image_metadata evidence→元数据检索命中→original inline；损坏图片 failed 脱敏；后缀白名单与容量预检；标题 stem 回退 | REQ-048 |
+| T-VID-007 | 场景感知采样与分析治理 | `plan_frame_times` 边界/锚点/短视频 ≥3 帧/场景吸附与去重、黑帧候选重试、帧真实宽高与 scene/even reason、v8 迁移补 reason 列、≤v7 归档 reason 默认、多分析列表与当前标记、analysis 按 completeness 门控 | REQ-016, REQ-053 |
+| T-AI-001 | 媒体 AI 配置与作业 | fake AI 边界（litellm 转写/completion 与 httpx 探测全部替换为进程内假实现，零真实网络）：base_url 校验与稳定 422、设置往返掩码与凭据文件落盘、分组门控、连通性检查脱敏、错误永不回显密钥、音频分块偏移合并、无时间戳分段合成、完整性规则短路/LLM 阈值、画面文字强制、建议收敛分类、级联 tier 与 visual_gap、先转写后摘要、失败不降版本状态、凭据排除备份与导出 | REQ-017, REQ-051, REQ-052, REQ-033a |
+| T-TAX-001 | 分类体系 | taxonomy 端点唯一下发、写入校验（领域多选/体裁 ≤1/未知值拒绝）、SQLite v9 迁移拆分映射、多体裁遗留行编辑强制单选、schema v7 归档再导入拆分规范化、领域（OR/`_none`）/体裁/`topic_id` 过滤、分类与标签 token 退出全文 | REQ-050, REQ-024, REQ-025 |
+| T-TOPIC-001 | 主题与来源关系 | 主题重命名/重名 409/删除级联成员/成员移除 404、关系删除涉及性校验、`topic_id` 只过滤来源分支、same-work 候选（同 artifact 哈希/规范化标题/已声明排除） | REQ-025 |
 | T-JOB-001 | 作业执行 | queued 到 succeeded/blocked，attempt 与 evidence/index 校验 | REQ-032, REQ-033 |
 | T-KNOW-001 | 知识发布 | 无引用拒绝，有有效 evidence 允许发布 | REQ-022 |
 | T-EXT-001 | 外部卡 | URL 原样保存、抖音白名单/非 HTTPS 拒绝、无 URL 获取路径或网络访问 | REQ-030, REQ-031 |

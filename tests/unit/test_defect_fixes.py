@@ -45,7 +45,7 @@ def paste(client: TestClient, title: str, text: str = "# source\n\nshared text")
         "title": title,
         "text": text,
         "rights": "owned",
-        "categories": ["document"],
+        "genres": ["document"],
         "tags": ["devfix"],
     })
     assert response.status_code == 201, response.text
@@ -179,7 +179,7 @@ def build_two_page_pdf() -> bytes:
 def test_pdf_evidence_uses_each_page_ordinal(client: TestClient) -> None:
     upload = client.post(
         "/api/v1/imports/file",
-        data={"rights": "owned", "title": "multi page", "categories": "[]", "tags": "[]", "language": "zh"},
+        data={"rights": "owned", "title": "multi page", "domains": "[]", "genres": "[]", "tags": "[]", "language": "zh"},
         files={"file": ("two.pdf", build_two_page_pdf(), "application/pdf")},
     )
     assert upload.status_code == 201, upload.text
@@ -199,7 +199,7 @@ def test_docx_evidence_uses_each_paragraph_ordinal(client: TestClient) -> None:
     document.save(output)
     upload = client.post(
         "/api/v1/imports/file",
-        data={"rights": "owned", "title": "multi paragraph", "categories": "[]", "tags": "[]", "language": "zh"},
+        data={"rights": "owned", "title": "multi paragraph", "domains": "[]", "genres": "[]", "tags": "[]", "language": "zh"},
         files={"file": ("two.docx", output.getvalue(), "application/vnd.openxmlformats-officedocument.wordprocessingml.document")},
     )
     assert upload.status_code == 201, upload.text

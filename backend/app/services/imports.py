@@ -38,7 +38,7 @@ class ImportService:
         self,
         *, encoded: bytes | None, stream: BinaryIO | None, expected_bytes: int | None, source_type: str,
         title: str, author: str | None, language: str, notes: str | None, rights: str,
-        categories: list[str], tags: list[str], original_name: str, media_type: str, audit_event: str,
+        domains: list[str], genres: list[str], tags: list[str], original_name: str, media_type: str, audit_event: str,
         source_date: str | None, job_kind: str = "parse",
     ) -> dict:
         # Filesystem and database cannot share a transaction. Serialize the small
@@ -53,7 +53,8 @@ class ImportService:
                     language=language,
                     notes=notes,
                     rights=rights,
-                    categories=categories,
+                    domains=domains,
+                    genres=genres,
                     tags=tags,
                     source_date=source_date,
                     artifact_sha256=stored.sha256,
@@ -90,7 +91,8 @@ class ImportService:
             language=request.language,
             notes=request.notes,
             rights=request.rights.value,
-            categories=request.categories,
+            domains=request.domains,
+            genres=request.genres,
             tags=request.tags,
             original_name="pasted.md",
             media_type="text/markdown",
@@ -100,7 +102,7 @@ class ImportService:
 
     def video(
         self, stream: BinaryIO, filename: str, title: str, rights: str, author: str | None,
-        language: str, notes: str | None, categories: list[str], tags: list[str], expected_bytes: int | None,
+        language: str, notes: str | None, domains: list[str], genres: list[str], tags: list[str], expected_bytes: int | None,
         source_date: str | None = None,
     ) -> dict:
         suffix = Path(filename).suffix.lower()
@@ -120,7 +122,8 @@ class ImportService:
             language=language,
             notes=notes,
             rights=rights,
-            categories=categories,
+            domains=domains,
+            genres=genres,
             tags=tags,
             original_name=Path(filename).name,
             media_type=CANONICAL_MEDIA_TYPES[suffix],
@@ -131,7 +134,7 @@ class ImportService:
 
     def image(
         self, stream: BinaryIO, filename: str, title: str, rights: str, author: str | None,
-        language: str, notes: str | None, categories: list[str], tags: list[str], expected_bytes: int | None,
+        language: str, notes: str | None, domains: list[str], genres: list[str], tags: list[str], expected_bytes: int | None,
         source_date: str | None = None,
     ) -> dict:
         suffix = Path(filename).suffix.lower()
@@ -151,7 +154,8 @@ class ImportService:
             language=language,
             notes=notes,
             rights=rights,
-            categories=categories,
+            domains=domains,
+            genres=genres,
             tags=tags,
             original_name=Path(filename).name,
             media_type=CANONICAL_MEDIA_TYPES[suffix],
@@ -176,7 +180,8 @@ class ImportService:
         language: str,
         notes: str | None,
         rights: str,
-        categories: list[str],
+        domains: list[str],
+        genres: list[str],
         tags: list[str],
         source_date: str | None,
         original_name: str,
@@ -203,7 +208,8 @@ class ImportService:
                     language=language,
                     notes=notes,
                     rights=rights,
-                    categories=categories,
+                    domains=domains,
+                    genres=genres,
                     tags=tags,
                     source_date=source_date,
                     artifact_sha256=stored.sha256,
@@ -236,7 +242,7 @@ class ImportService:
 
     def file(
         self, stream: BinaryIO, filename: str, content_type: str | None, title: str, rights: str,
-        author: str | None, language: str, notes: str | None, categories: list[str], tags: list[str], expected_bytes: int | None,
+        author: str | None, language: str, notes: str | None, domains: list[str], genres: list[str], tags: list[str], expected_bytes: int | None,
         source_date: str | None = None,
     ) -> dict:
         suffix = Path(filename).suffix.lower()
@@ -258,7 +264,8 @@ class ImportService:
             language=language,
             notes=notes,
             rights=rights,
-            categories=categories,
+            domains=domains,
+            genres=genres,
             tags=tags,
             original_name=Path(filename).name,
             media_type=media_type,

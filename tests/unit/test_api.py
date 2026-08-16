@@ -36,7 +36,7 @@ def client(runtime_root: Path):
 def import_and_run(client: TestClient) -> dict:
     response = client.post("/api/v1/imports/paste", json={
         "title": "合成中文来源", "text": "# 测试标题\n\n这是一段用于证据和检索的合成中文文本。", "rights": "owned",
-        "categories": ["technical"], "tags": ["测试", "证据"],
+        "domains": ["technical"], "genres": ["document"], "tags": ["测试", "证据"],
     })
     assert response.status_code == 201, response.text
     result = response.json()
@@ -53,7 +53,10 @@ def test_health_openapi_and_paste_evidence_chain(client: TestClient) -> None:
     source_id = imported["source"]["id"]
     source = client.get(f"/api/v1/sources/{source_id}")
     assert source.status_code == 200
-    assert "categories_json" not in source.json()
+    assert "domains_json" not in source.json()
+    assert "genres_json" not in source.json()
+    assert source.json()["domains"] == ["technical"]
+    assert source.json()["genres"] == ["document"]
     version_id = source.json()["versions"][0]["id"]
     representations = client.get(f"/api/v1/documents/{version_id}/representations").json()
     assert representations[-1]["parser_name"] == "native-utf8"
@@ -129,7 +132,7 @@ def test_lifecycle_backup_export_restore_and_verify(client: TestClient, runtime_
 def test_search_and_file_import(client: TestClient) -> None:
     uploaded = client.post(
         "/api/v1/imports/file",
-        data={"rights": "open_license", "title": "合成文件", "categories": '["document"]', "tags": '["样本"]', "language": "zh"},
+        data={"rights": "open_license", "title": "合成文件", "domains": "[]", "genres": '["document"]', "tags": '["样本"]', "language": "zh"},
         files={"file": ("synthetic.md", "# 合成文件\n\n用于本地文件导入和搜索的文本。".encode("utf-8"), "text/markdown")},
     )
     assert uploaded.status_code == 201, uploaded.text
@@ -141,7 +144,7 @@ def test_search_and_file_import(client: TestClient) -> None:
 def test_original_artifact_uses_safe_framework_disposition(client: TestClient) -> None:
     uploaded = client.post(
         "/api/v1/imports/file",
-        data={"rights": "owned", "categories": "[]", "tags": "[]"},
+        data={"rights": "owned", "domains": "[]", "genres": "[]", "tags": "[]"},
         files={"file": ('unsafe"name.txt', b"local text", "text/plain")},
     )
     assert uploaded.status_code == 201, uploaded.text
@@ -158,7 +161,7 @@ def test_file_import_rejects_oversized_content_length_before_persisting(client: 
     response = client.post(
         "/api/v1/imports/file",
         headers={"content-length": str(2 * 1024 * 1024 * 1024 + 1)},
-        data={"rights": "owned", "categories": "[]", "tags": "[]"},
+        data={"rights": "owned", "domains": "[]", "genres": "[]", "tags": "[]"},
         files={"file": ("synthetic.txt", b"small body", "text/plain")},
     )
 
@@ -175,7 +178,8 @@ def test_file_import_preserves_utf8_multipart_metadata(client: TestClient) -> No
             "title": "合成中文标题",
             "author": "中文作者",
             "notes": "中文备注",
-            "categories": '["document"]',
+            "domains": "[]",
+            "genres": '["document"]',
             "tags": '["中文标签"]',
             "language": "zh",
         },

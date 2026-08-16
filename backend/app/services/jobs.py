@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import hashlib
 import json
 import multiprocessing
 import os
@@ -12,10 +13,10 @@ import threading
 import time
 from dataclasses import replace
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
-from app.domain.media import MediaProcessingLimits
-from app.domain.models import sanitize_download_url
+from app.domain.media import MediaProcessingLimits, MediaTranscriptSegment, video_time_range_locator
+from app.domain.models import TAXONOMY_DOMAIN_VALUES, TAXONOMY_GENRE_VALUES, sanitize_download_url
 from app.domain.parsing import ParsedDocument
 from app.ports.parser import DocumentParserPort
 from app.ports.media import (
@@ -23,6 +24,7 @@ from app.ports.media import (
     DownloadProcessingCancelled,
     DownloadUnavailable,
     ImageInputInvalid,
+    MediaAiPort,
     MediaAiUnavailable,
     MediaDownloaderPort,
     MediaInputInvalid,
@@ -119,6 +121,58 @@ class JobLeaseLost(RuntimeError):
     pass
 
 
+# REQ-033a：转写/摘要是 video_analyze 之后的附加产物，其成败绝不触碰
+# 版本完整性与来源处理状态。
+AI_JOB_KINDS = {"video_transcribe", "video_summarize"}
+
+
+def _format_ms(milliseconds: int) -> str:
+    seconds = max(0, milliseconds // 1000)
+    return f"{seconds // 60}:{seconds % 60:02d}"
+
+
+def _summary_text(
+    result: dict[str, Any],
+    assessment: dict[str, Any],
+    frame_descriptions: list[dict[str, Any]] | None,
+    tier: int,
+    visual_gap: bool,
+) -> str:
+    """摘要表示正文：摘要 + 完整性附录 + 画面理解附录 + 建议标记行（前端解析用）。"""
+    lines = [str(result["summary"]).strip(), "", "---"]
+    verdict = "可能不完整" if assessment.get("verdict") == "likely_incomplete" else "内容完整"
+    confidence = assessment.get("confidence")
+    confidence_text = f"{confidence:.2f}" if isinstance(confidence, (int, float)) else "-"
+    lines.append(f"完整性判断：{verdict}（置信度 {confidence_text}）")
+    missing = [str(item) for item in assessment.get("missing_aspects") or []]
+    lines.append(f"缺失方面：{'、'.join(missing) if missing else '无'}")
+    reason = str(assessment.get("reason") or "").strip()
+    if reason:
+        lines.append(f"判断依据：{reason}")
+    if frame_descriptions:
+        lines.extend(["", "画面理解："])
+        for item in frame_descriptions:
+            description = str(item.get("description") or "").strip()
+            visible_text = str(item.get("visible_text") or "").strip()
+            line = f"- [{_format_ms(int(item.get('time_ms') or 0))}] {description or '（无描述）'}"
+            if visible_text:
+                line += f"（画面文字：{visible_text}）"
+            lines.append(line)
+    marker = json.dumps(
+        {
+            "domains": result.get("suggested_domains") or [],
+            "genres": result.get("suggested_genres") or [],
+            "tags": result.get("suggested_tags") or [],
+            "tier": tier,
+            "visual_gap": visual_gap,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    lines.append(f"<!--yuanzhiku:suggestions {marker} -->")
+    return "\n".join(lines)
+
+
 class JobService:
     def __init__(
         self,
@@ -134,6 +188,7 @@ class JobService:
         imports: ImportService | None = None,
         downloader: MediaDownloaderPort | None = None,
         images: ImageService | None = None,
+        media_ai: MediaAiPort | None = None,
     ) -> None:
         self.repository = repository
         self.artifacts = artifacts
@@ -142,6 +197,7 @@ class JobService:
         self.imports = imports
         self.downloader = downloader
         self.images = images
+        self.media_ai = media_ai
         if parser is None:
             from app.adapters.parsers import LocalDocumentParser
 
@@ -170,8 +226,10 @@ class JobService:
                 self._image_analyze(job)
             elif job["kind"] == "video_download":
                 self._video_download(job)
-            elif job["kind"] in {"video_transcribe", "video_summarize"}:
-                self._finish(job, "blocked", "未配置媒体 AI 服务", progress=100)
+            elif job["kind"] == "video_transcribe":
+                self._video_transcribe(job)
+            elif job["kind"] == "video_summarize":
+                self._video_summarize(job)
             elif job["kind"] == "backup":
                 if self.backup_runner is None:
                     self._finish(job, "blocked", "备份服务不可用")
@@ -215,10 +273,14 @@ class JobService:
                 pass
         except MediaProcessingCancelled:
             try:
-                message = "图片分析已取消" if job["kind"] == "image_analyze" else "视频分析已取消"
-                if self._finish(job, "cancelled", message):
-                    self.repository.set_version_completeness(job["content_version_id"], "incomplete")
-                    self.repository.update_processing(job["source_id"], "cancelled")
+                if job["kind"] in AI_JOB_KINDS:
+                    # REQ-033a：附加 AI 作业的取消不影响既有版本完整性。
+                    self._finish(job, "cancelled", "媒体 AI 处理已取消")
+                else:
+                    message = "图片分析已取消" if job["kind"] == "image_analyze" else "视频分析已取消"
+                    if self._finish(job, "cancelled", message):
+                        self.repository.set_version_completeness(job["content_version_id"], "incomplete")
+                        self.repository.update_processing(job["source_id"], "cancelled")
             except JobLeaseLost:
                 pass
         except MediaToolUnavailable:
@@ -283,7 +345,7 @@ class JobService:
                 if self._finish(job, state, "本地处理失败", outcome="retryable_failure"):
                     if state == "failed" and job["kind"] == "parse" and job["content_version_id"]:
                         self.repository.set_version_completeness(job["content_version_id"], "incomplete")
-                    if job["source_id"] and state == "failed":
+                    if job["source_id"] and state == "failed" and job["kind"] not in AI_JOB_KINDS:
                         self.repository.update_processing(job["source_id"], "failed")
             except JobLeaseLost:
                 pass
@@ -449,6 +511,195 @@ class JobService:
         if not self.repository.update_job(job["id"], job["lease_token"], progress=progress, message=message):
             raise JobLeaseLost()
 
+    def _latest_representation(self, version_id: str, kind: str) -> dict | None:
+        matches = [
+            item for item in self.repository.representations_for_version(version_id)
+            if item["kind"] == kind
+        ]
+        return matches[-1] if matches else None
+
+    def _video_transcribe(self, job: dict) -> None:
+        """语音转写（REQ-017）：AI 附加产物，证据一律 video_time_range 定位（REQ-016）。
+
+        REQ-033a：成功/失败/取消均不改版本完整性与来源处理状态。
+        """
+        if self.media_ai is None or not self.media_ai.capability().get("transcribe_enabled"):
+            self._finish(job, "blocked", "未配置媒体 AI 服务", progress=100)
+            return
+        self._update_video_progress(job, 10, "正在语音转写")
+        cancelled = lambda: self.repository.job_cancel_requested(job["id"])
+        version = self.repository.get_version(job["content_version_id"])
+        transcript = self._run_with_lease_heartbeat(
+            job,
+            lambda: self.media_ai.transcribe(
+                self.artifacts.artifact_path(job["artifact_sha256"]),
+                (version or {}).get("media_type"),
+                cancelled,
+            ),
+        )
+        if cancelled():
+            self._finish(job, "cancelled", "媒体 AI 处理已取消")
+            return
+        if not transcript.text.strip():
+            raise RuntimeError("语音转写未返回可用文本")
+        segments = list(transcript.segments)
+        if not segments:
+            segments = [MediaTranscriptSegment(transcript.text.strip(), 0, 1000)]
+        self._update_video_progress(job, 80, "正在写入转写表示与证据")
+        evidence: list[dict] = []
+        for segment in segments:
+            start_ms = max(0, int(segment.start_ms))
+            end_ms = max(start_ms + 1, int(segment.end_ms))
+            excerpt = segment.text[:300]
+            evidence.append({
+                "locator": video_time_range_locator(start_ms, end_ms),
+                "excerpt": excerpt,
+                "excerpt_hash": hashlib.sha256(excerpt.encode("utf-8")).hexdigest(),
+                "is_validated": True,
+            })
+        settings = self.repository.get_settings()
+        parser_name = (
+            f"ai-{settings.get('ai_transcribe_provider', 'off')}"
+            f"-{settings.get('ai_transcribe_model', '').strip() or 'whisper-1'}"
+        )
+        self.repository.persist_representation_bundle(
+            version_id=job["content_version_id"],
+            artifact_sha256=job["artifact_sha256"],
+            kind="transcription",
+            parser_name=parser_name,
+            config_hash=self.media_ai.config_hash("transcribe"),
+            text=transcript.text,
+            parent_id=None,
+            chunks=self.documents.search_chunk_pairs(transcript.text),
+            evidence=evidence,
+        )
+        self._finish(job, "succeeded", "语音转写完成", progress=100)
+
+    def _video_summarize(self, job: dict) -> None:
+        """内容摘要（REQ-017）：转写 → 完整性判断 → 分层（tier1/tier2）→ 摘要表示。
+
+        无转写时终态失败"请先完成语音转写"（不进重试循环）；REQ-033a 同转写。
+        """
+        if self.media_ai is None or not self.media_ai.capability().get("understand_enabled"):
+            self._finish(job, "blocked", "未配置媒体 AI 服务", progress=100)
+            return
+        cancelled = lambda: self.repository.job_cancel_requested(job["id"])
+        try:
+            payload = json.loads(job["payload_json"])
+        except (TypeError, ValueError):
+            payload = {}
+        force_tier2 = bool(payload.get("force_tier2")) if isinstance(payload, dict) else False
+        version_id = job["content_version_id"]
+        transcription = self._latest_representation(version_id, "transcription")
+        if transcription is None:
+            self._finish(job, "failed", "请先完成语音转写", progress=100)
+            return
+        transcript_text = transcription["text_content"]
+        source = self.repository.get_source(job["source_id"]) if job["source_id"] else None
+        analysis = self.repository.video_analysis_for_version(version_id)
+        duration_ms = 0
+        if analysis is not None:
+            try:
+                duration_ms = max(0, int(json.loads(analysis["metadata_json"]).get("duration_ms") or 0))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                duration_ms = 0
+        # 最长静音：转写证据时间范围之间的最大空档（含首尾）。
+        ranges: list[tuple[int, int]] = []
+        for row in self.repository.evidence_for_representation(transcription["id"]):
+            try:
+                locator = json.loads(row["locator_json"])
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if isinstance(locator, dict) and locator.get("type") == "video_time_range":
+                ranges.append((max(0, int(locator.get("start_ms") or 0)), max(0, int(locator.get("end_ms") or 0))))
+        ranges.sort()
+        max_silence_ms = 0
+        cursor = 0
+        for start_ms, end_ms in ranges:
+            max_silence_ms = max(max_silence_ms, start_ms - cursor)
+            cursor = max(cursor, end_ms)
+        if duration_ms > cursor:
+            max_silence_ms = max(max_silence_ms, duration_ms - cursor)
+        context = {
+            "title": (source or {}).get("title") or "",
+            "notes": (source or {}).get("notes") or "",
+            "duration_ms": duration_ms,
+            "coverage_chars_per_sec": len(transcript_text) / (duration_ms / 1000) if duration_ms > 0 else 0.0,
+            "max_silence_ms": max_silence_ms,
+        }
+        self._update_video_progress(job, 15, "正在判断内容完整性")
+        assessment = self._run_with_lease_heartbeat(job, lambda: self.media_ai.assess_completeness(transcript_text, context))
+        if cancelled():
+            self._finish(job, "cancelled", "媒体 AI 处理已取消")
+            return
+        want_tier2 = force_tier2 or assessment.get("verdict") == "likely_incomplete"
+        tier2_enabled = bool(self.media_ai.capability().get("tier2_enabled"))
+        tier2 = bool(want_tier2 and tier2_enabled)
+        visual_gap = bool(want_tier2 and not tier2_enabled)
+        frame_descriptions: list[dict] | None = None
+        if tier2:
+            self._update_video_progress(job, 35, "正在理解关键帧画面")
+            frame_inputs: list[dict] = []
+            if analysis is not None:
+                for frame in self.repository.list_video_frames(analysis["id"]):
+                    path = self.artifacts.artifact_path(frame["artifact_sha256"])
+                    if path.is_file():
+                        frame_inputs.append({"path": path, "time_ms": int(frame["time_ms"])})
+            frame_descriptions = self._run_with_lease_heartbeat(
+                job,
+                lambda: self.media_ai.describe_frames(frame_inputs, (source or {}).get("title") or "", cancelled),
+            )
+            if cancelled():
+                self._finish(job, "cancelled", "媒体 AI 处理已取消")
+                return
+        self._update_video_progress(job, 65, "正在生成内容摘要")
+        result = self._run_with_lease_heartbeat(
+            job,
+            lambda: self.media_ai.summarize(
+                {
+                    "transcript_text": transcript_text,
+                    "frame_descriptions": frame_descriptions,
+                    "title": (source or {}).get("title") or "",
+                    "taxonomy_domains": list(TAXONOMY_DOMAIN_VALUES),
+                    "taxonomy_genres": list(TAXONOMY_GENRE_VALUES),
+                },
+                cancelled,
+            ),
+        )
+        if cancelled():
+            self._finish(job, "cancelled", "媒体 AI 处理已取消")
+            return
+        self._update_video_progress(job, 85, "正在写入摘要表示")
+        tier = 2 if tier2 else 1
+        settings = self.repository.get_settings()
+        chat_model = settings.get("ai_chat_model", "").strip() or "qwen-plus"
+        vision_model = settings.get("ai_vision_model", "").strip()
+        parser_name = f"ai-{settings.get('ai_understand_provider', 'off')}-{chat_model}"
+        if tier2:
+            parser_name += f"+{vision_model}"
+        text = _summary_text(result, assessment, frame_descriptions, tier, visual_gap)
+        # 摘要针对全片内容：证据以整段 video_time_range 定位（REQ-016 同转写纪律）。
+        summary_end_ms = duration_ms or max((end for _, end in ranges), default=0) or 1000
+        excerpt = str(result["summary"])[:300]
+        evidence = [{
+            "locator": video_time_range_locator(0, max(1, summary_end_ms)),
+            "excerpt": excerpt,
+            "excerpt_hash": hashlib.sha256(excerpt.encode("utf-8")).hexdigest(),
+            "is_validated": True,
+        }]
+        self.repository.persist_representation_bundle(
+            version_id=version_id,
+            artifact_sha256=job["artifact_sha256"],
+            kind="summary",
+            parser_name=parser_name,
+            config_hash=self.media_ai.config_hash("summarize"),
+            text=text,
+            parent_id=transcription["id"],
+            chunks=self.documents.search_chunk_pairs(text),
+            evidence=evidence,
+        )
+        self._finish(job, "succeeded", "内容摘要完成", progress=100)
+
     def _image_analyze(self, job: dict) -> None:
         if self.images is None:
             if self._finish(job, "blocked", "本地图片分析服务不可用", progress=100):
@@ -457,9 +708,9 @@ class JobService:
             return
         settings = self.repository.get_settings()
         try:
-            timeout_seconds = max(60.0, min(86_400.0, float(settings.get("video_timeout_seconds", "3600"))))
-            memory_limit_mb = max(64, min(32_768, int(settings.get("video_memory_limit_mb", "2048"))))
-            disk_limit_mb = max(64, min(32_768, int(settings.get("video_disk_limit_mb", "1024"))))
+            timeout_seconds = max(60.0, min(86_400.0, float(settings.get("image_timeout_seconds", "3600"))))
+            memory_limit_mb = max(64, min(32_768, int(settings.get("image_memory_limit_mb", "2048"))))
+            disk_limit_mb = max(64, min(32_768, int(settings.get("image_disk_limit_mb", "1024"))))
         except (TypeError, ValueError):
             timeout_seconds = 3600.0
             memory_limit_mb = 2048
@@ -605,7 +856,8 @@ class JobService:
                     language=str(payload.get("language") or "zh"),
                     notes=payload.get("notes") if isinstance(payload.get("notes"), str) else None,
                     rights=rights,
-                    categories=[item for item in payload.get("categories", []) if isinstance(item, str)],
+                    domains=[item for item in payload.get("domains", []) if isinstance(item, str)],
+                    genres=[item for item in payload.get("genres", []) if isinstance(item, str)],
                     tags=[item for item in payload.get("tags", []) if isinstance(item, str)],
                     source_date=payload.get("source_date") if isinstance(payload.get("source_date"), str) else None,
                     original_name=result.filename,

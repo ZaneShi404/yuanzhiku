@@ -545,7 +545,7 @@ def test_postgres_repository_normal_api_worker_workflow(runtime_root: Path, monk
             title="PostgreSQL integration source",
             text="# PostgreSQL workflow\n\nEvidence content for the worker.",
             rights="owned",
-            categories=["technical"],
+            domains=["technical"],
             tags=["postgresql", "integration"],
         )
     )

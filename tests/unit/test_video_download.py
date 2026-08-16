@@ -248,7 +248,7 @@ def test_download_url_platform_mismatch_rejected(client_and_services) -> None:
     assert unsupported.json()["detail"]["code"] == "unsupported_platform"
 
 
-def test_download_link_requires_rights_and_valid_categories(client_and_services) -> None:
+def test_download_link_requires_rights_and_valid_taxonomy(client_and_services) -> None:
     client, _, _ = client_and_services
     missing = client.post("/api/v1/videos/link", json={"url": "https://www.bilibili.com/video/BV1test", "platform": "bilibili"})
     assert missing.status_code == 422
@@ -256,9 +256,12 @@ def test_download_link_requires_rights_and_valid_categories(client_and_services)
     invalid_rights = _submit_link(client, "https://www.bilibili.com/video/BV1test", rights="stolen")
     assert invalid_rights.status_code == 422
     assert invalid_rights.json()["detail"]["code"] == "request_validation"
-    invalid_category = _submit_link(client, "https://www.bilibili.com/video/BV1test", categories=["not-a-category"])
-    assert invalid_category.status_code == 422
-    assert invalid_category.json()["detail"]["code"] == "request_validation"
+    invalid_domain = _submit_link(client, "https://www.bilibili.com/video/BV1test", domains=["not-a-domain"])
+    assert invalid_domain.status_code == 422
+    assert invalid_domain.json()["detail"]["code"] == "request_validation"
+    multi_genre = _submit_link(client, "https://www.bilibili.com/video/BV1test", genres=["interview", "podcast"])
+    assert multi_genre.status_code == 422
+    assert multi_genre.json()["detail"]["code"] == "request_validation"
 
 
 # --- 用例 2：按平台 Cookie 库治理 ---
@@ -1566,7 +1569,7 @@ def test_synthetic_download_full_chain(
             {
                 "url": url, "platform": "bilibili", "use_cookie": False, "rights": "owned",
                 "title": "合成下载视频", "author": None, "language": "zh", "notes": None,
-                "source_date": None, "categories": [], "tags": [],
+                "source_date": None, "domains": [], "genres": [], "tags": [],
             },
             priority=100,
         )

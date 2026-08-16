@@ -15,7 +15,8 @@ type SourceSummary = {
   notes?: string | null
   source_date?: string | null
   rights?: string | null
-  categories: string[]
+  domains: string[]
+  genres: string[]
   tags: string[]
   processing_state: string
   imported_at: string
@@ -37,7 +38,8 @@ type Relation = {
   relation_type: string
   created_at: string
 }
-type SourceDetail = SourceSummary & { versions: Version[]; relations: Relation[] }
+type SameWorkCandidate = { id: string; title: string; reason: 'same_artifact' | 'same_title' }
+type SourceDetail = SourceSummary & { versions: Version[]; relations: Relation[]; same_work_candidates: SameWorkCandidate[] }
 type Job = {
   id: string
   kind: string
@@ -116,6 +118,7 @@ type VideoFrame = {
   time_ms: number
   width?: number | null
   height?: number | null
+  reason?: 'scene' | 'even'
 }
 type VideoMetadata = {
   container_name: string
@@ -129,17 +132,24 @@ type VideoDetail = {
   source_id: string
   version: Version
   analysis: { id: string; metadata: VideoMetadata; frames: VideoFrame[] } | null
+  analyses: { id: string; created_at: string; analyzer_name: string; config_hash: string; frame_count: number }[]
+  current_analysis_id: string | null
   media_capability: { enabled: boolean }
-  ai_capability: { enabled: boolean; provider?: string | null; reason?: string }
+  ai_capability: {
+    enabled: boolean
+    transcribe_enabled?: boolean
+    understand_enabled?: boolean
+    tier2_enabled?: boolean
+    provider?: string | null
+    reason?: string
+  }
 }
 
 type Page = 'library' | 'import' | 'search' | 'knowledge' | 'jobs' | 'external' | 'transfers' | 'settings'
 type SourceScope = 'active' | 'deleted'
+type TaxonomyOption = { value: string; label: string }
+type Taxonomy = { domains: TaxonomyOption[]; genres: TaxonomyOption[] }
 const API = '/api/v1'
-const categories = [
-  ['technical', '技术'], ['business', '商业'], ['education', '教育'], ['news', '新闻'],
-  ['interview', '访谈'], ['podcast', '播客'], ['document', '文档'],
-] as const
 const rights = [
   ['owned', '本人拥有'], ['authorized', '已获授权'], ['permitted', '已获许可'],
   ['open_license', '开放许可'], ['other', '其他'],
@@ -239,8 +249,36 @@ function stateLabel(value: string) {
 function sourceType(value: string) {
   return value === 'paste' ? '粘贴文本' : value === 'file' ? '本地文件' : value === 'douyin' ? '抖音参考' : value === 'video_link' ? '链接视频' : '外部卡'
 }
+function representationKindLabel(kind: string) {
+  const map: Record<string, string> = { extraction: '提取', manual: '人工修订', transcription: '转写', summary: '摘要' }
+  return map[kind] || kind
+}
+type SummarySuggestions = { domains: string[]; genres: string[]; tags: string[]; tier: number; visual_gap: boolean }
+function parseSummaryMarker(text: string): { body: string; suggestions: SummarySuggestions } | null {
+  const match = text.match(/\s*<!--yuanzhiku:suggestions (\{[\s\S]*?\}) -->\s*$/)
+  if (!match) return null
+  try {
+    const raw = JSON.parse(match[1]) as Partial<SummarySuggestions>
+    const strings = (value: unknown) => Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
+    return {
+      body: text.slice(0, match.index).trimEnd(),
+      suggestions: {
+        domains: strings(raw.domains),
+        genres: strings(raw.genres),
+        tags: strings(raw.tags),
+        tier: raw.tier === 2 ? 2 : 1,
+        visual_gap: raw.visual_gap === true,
+      },
+    }
+  } catch {
+    return null
+  }
+}
 function labelFor(items: readonly (readonly [string, string])[], value?: string | null) {
   return items.find(item => item[0] === value)?.[1] || value || '-'
+}
+function taxonomyLabel(items: TaxonomyOption[], value: string) {
+  return items.find(item => item.value === value)?.label || value
 }
 function parseTags(value: string) { return value.split(/[,，]/).map(item => item.trim()).filter(Boolean) }
 function asText(value: unknown) { return typeof value === 'string' || typeof value === 'number' ? String(value) : '' }
@@ -299,6 +337,7 @@ export function App() {
   const [cards, setCards] = useState<Card[]>([])
   const [topics, setTopics] = useState<Topic[]>([])
   const [knowledge, setKnowledge] = useState<Knowledge[]>([])
+  const [taxonomy, setTaxonomy] = useState<Taxonomy>({ domains: [], genres: [] })
   const [focusedCardId, setFocusedCardId] = useState<string | null>(null)
   const [focusedKnowledgeId, setFocusedKnowledgeId] = useState<string | null>(null)
   const [message, setMessage] = useState('')
@@ -343,6 +382,10 @@ export function App() {
   }, [loadCards, loadJobs, loadKnowledge, loadSources, loadTopics])
 
   useEffect(() => { void refresh() }, [refresh])
+  useEffect(() => {
+    // 分类体系由后端统一下发，启动时拉取一次
+    request<Taxonomy>('/taxonomy').then(setTaxonomy).catch(() => undefined)
+  }, [])
   useEffect(() => {
     const timer = window.setInterval(() => {
       void loadJobs().catch(() => undefined)
@@ -429,11 +472,12 @@ export function App() {
           onRefresh={refreshSource}
           onTopicsRefresh={loadTopics}
           topics={topics}
+          taxonomy={taxonomy}
           onKnowledgeRefresh={loadKnowledge}
           onMessage={setMessage}
         />}
-        {page === 'import' && <ImportPage onDone={() => { void refresh(); navigate('library') }} onDoneLink={() => { void refresh(); navigate('jobs') }} onDoneCard={() => { void refresh(); navigate('external') }} onMessage={setMessage} />}
-        {page === 'search' && <SearchPage onSelectSource={openSource} onSelectKnowledge={openKnowledge} onSelectCard={openCard} onMessage={setMessage} />}
+        {page === 'import' && <ImportPage taxonomy={taxonomy} onDone={() => { void refresh(); navigate('library') }} onDoneLink={() => { void refresh(); navigate('jobs') }} onDoneCard={() => { void refresh(); navigate('external') }} onMessage={setMessage} />}
+        {page === 'search' && <SearchPage taxonomy={taxonomy} topics={topics} onSelectSource={openSource} onSelectKnowledge={openKnowledge} onSelectCard={openCard} onMessage={setMessage} />}
         {page === 'knowledge' && <KnowledgePage knowledge={knowledge} focusedId={focusedKnowledgeId} onRefresh={loadKnowledge} onMessage={setMessage} />}
         {page === 'jobs' && <JobsPage jobs={jobs} onRefresh={refresh} onMessage={setMessage} />}
         {page === 'external' && <ExternalCardsPage cards={cards} focusedId={focusedCardId} onMessage={setMessage} />}
@@ -446,7 +490,7 @@ export function App() {
 }
 
 function LibraryPage({
-  sources, selected, onSelect, onClose, onRefresh, onTopicsRefresh, topics, onKnowledgeRefresh, onMessage,
+  sources, selected, onSelect, onClose, onRefresh, onTopicsRefresh, topics, taxonomy, onKnowledgeRefresh, onMessage,
 }: {
   sources: SourceSummary[]
   selected: SourceDetail | null
@@ -455,16 +499,19 @@ function LibraryPage({
   onRefresh: () => Promise<void>
   onTopicsRefresh: () => Promise<void>
   topics: Topic[]
+  taxonomy: Taxonomy
   onKnowledgeRefresh: () => Promise<void>
   onMessage: (message: string) => void
 }) {
   const [filter, setFilter] = useState('')
   const [scope, setScope] = useState<SourceScope>('active')
+  const [topicFilter, setTopicFilter] = useState('')
   const visible = useMemo(() => sources.filter(source => {
     const inScope = scope === 'deleted' ? Boolean(source.deleted_at) : !source.deleted_at
+    const inTopic = !topicFilter || Boolean(topics.find(topic => topic.id === topicFilter)?.source_ids.includes(source.id))
     const needle = filter.toLowerCase()
-    return inScope && (source.title.toLowerCase().includes(needle) || source.tags.some(tag => tag.toLowerCase().includes(needle)))
-  }), [filter, scope, sources])
+    return inScope && inTopic && (source.title.toLowerCase().includes(needle) || source.tags.some(tag => tag.toLowerCase().includes(needle)))
+  }), [filter, scope, sources, topicFilter, topics])
   return <div className="page library-page">
     <PageHeader title={selected ? selected.title : '资料库'}>
       {selected
@@ -475,14 +522,20 @@ function LibraryPage({
       source={selected}
       sources={sources}
       topics={topics}
+      taxonomy={taxonomy}
       onRefresh={onRefresh}
       onTopicsRefresh={onTopicsRefresh}
       onKnowledgeRefresh={onKnowledgeRefresh}
       onPurged={onClose}
+      onSelect={onSelect}
       onMessage={onMessage}
     /> : <>
       <div className="toolbar library-toolbar">
         <label className="search-field"><Search size={17}/><input value={filter} onChange={event => setFilter(event.target.value)} placeholder="按标题或标签筛选" /></label>
+        <select value={topicFilter} onChange={event => setTopicFilter(event.target.value)} aria-label="按主题筛选">
+          <option value="">全部主题</option>
+          {topics.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
+        </select>
         <div className="segmented" aria-label="来源范围">
           <button type="button" className={scope === 'active' ? 'selected' : ''} onClick={() => setScope('active')}>当前</button>
           <button type="button" className={scope === 'deleted' ? 'selected' : ''} onClick={() => setScope('deleted')}>已删除</button>
@@ -501,15 +554,17 @@ function LibraryPage({
 }
 
 function SourceDetail({
-  source, sources, topics, onRefresh, onTopicsRefresh, onKnowledgeRefresh, onPurged, onMessage,
+  source, sources, topics, taxonomy, onRefresh, onTopicsRefresh, onKnowledgeRefresh, onPurged, onSelect, onMessage,
 }: {
   source: SourceDetail
   sources: SourceSummary[]
   topics: Topic[]
+  taxonomy: Taxonomy
   onRefresh: () => Promise<void>
   onTopicsRefresh: () => Promise<void>
   onKnowledgeRefresh: () => Promise<void>
   onPurged: () => void
+  onSelect: (id: string) => void
   onMessage: (message: string) => void
 }) {
   const [showPurge, setShowPurge] = useState(false)
@@ -524,7 +579,7 @@ function SourceDetail({
   const [revisedText, setRevisedText] = useState('')
   const [highlightedExcerpt, setHighlightedExcerpt] = useState('')
   const [metadataOpen, setMetadataOpen] = useState(false)
-  const [metadata, setMetadata] = useState({ title: '', author: '', language: 'zh', notes: '', sourceDate: '', tags: '', categories: [] as string[] })
+  const [metadata, setMetadata] = useState({ title: '', author: '', language: 'zh', notes: '', sourceDate: '', tags: '', domains: [] as string[], genres: [] as string[] })
   const [right, setRight] = useState('')
   const [revisions, setRevisions] = useState<MetadataRevision[]>([])
   const [revisionsOpen, setRevisionsOpen] = useState(false)
@@ -532,6 +587,8 @@ function SourceDetail({
   const [relationType, setRelationType] = useState('related_to')
   const [topicId, setTopicId] = useState('')
   const [newTopic, setNewTopic] = useState('')
+  const [topicManageId, setTopicManageId] = useState('')
+  const [topicRename, setTopicRename] = useState('')
   const [knowledgeKind, setKnowledgeKind] = useState('fact')
   const [knowledgeStatement, setKnowledgeStatement] = useState('')
   const [knowledgeEvidenceIds, setKnowledgeEvidenceIds] = useState<string[]>([])
@@ -548,7 +605,8 @@ function SourceDetail({
       notes: source.notes || '',
       sourceDate: source.source_date || '',
       tags: source.tags.join(', '),
-      categories: source.categories,
+      domains: source.domains,
+      genres: source.genres,
     })
     setRight(source.rights || '')
     setCitation(null)
@@ -616,7 +674,8 @@ function SourceDetail({
             language: metadata.language,
             notes: metadata.notes || null,
             source_date: metadata.sourceDate || null,
-            categories: metadata.categories,
+            domains: metadata.domains,
+            genres: metadata.genres,
             tags: parseTags(metadata.tags),
           }),
         })
@@ -724,6 +783,66 @@ function SourceDetail({
       }
     })
   }
+  const removeRelation = async (relationId: string) => {
+    await runBusyAction('relation', async () => {
+      try {
+        await request(`/sources/${source.id}/relations/${relationId}`, { method: 'DELETE' })
+        await onRefresh()
+        onMessage('来源关系已删除')
+      } catch (error) {
+        onMessage(error instanceof Error ? error.message : '来源关系删除失败')
+      }
+    })
+  }
+  const markSameWork = async (candidateId: string) => {
+    await runBusyAction('relation', async () => {
+      try {
+        await request(`/sources/${source.id}/relations`, { method: 'POST', body: JSON.stringify({ related_source_id: candidateId, relation_type: 'user_declared_same_work' }) })
+        await onRefresh()
+        onMessage('已标记为同一作品')
+      } catch (error) {
+        onMessage(error instanceof Error ? error.message : '标记失败')
+      }
+    })
+  }
+  const removeTopicMembership = async (value: string) => {
+    await runBusyAction('topic', async () => {
+      try {
+        await request(`/topics/${value}/sources/${source.id}`, { method: 'DELETE' })
+        await onTopicsRefresh()
+        onMessage('来源已移出主题')
+      } catch (error) {
+        onMessage(error instanceof Error ? error.message : '移出主题失败')
+      }
+    })
+  }
+  const renameTopic = async (event: React.FormEvent) => {
+    event.preventDefault()
+    if (!topicManageId || !topicRename.trim()) return
+    await runBusyAction('topic-rename', async () => {
+      try {
+        await request(`/topics/${topicManageId}`, { method: 'PUT', body: JSON.stringify({ name: topicRename.trim() }) })
+        setTopicManageId('')
+        await onTopicsRefresh()
+        onMessage('主题已重命名')
+      } catch (error) {
+        onMessage(error instanceof Error ? error.message : '主题重命名失败')
+      }
+    })
+  }
+  const deleteTopic = async (item: Topic) => {
+    if (!window.confirm(`确定删除主题“${item.name}”？其下所有来源关联将一并移除。`)) return
+    await runBusyAction('topic-delete', async () => {
+      try {
+        await request(`/topics/${item.id}`, { method: 'DELETE' })
+        setTopicManageId('')
+        await onTopicsRefresh()
+        onMessage('主题已删除')
+      } catch (error) {
+        onMessage(error instanceof Error ? error.message : '主题删除失败')
+      }
+    })
+  }
   const createCitation = async (evidenceId: string) => {
     await runBusyAction(`citation-${evidenceId}`, async () => {
       try {
@@ -779,9 +898,15 @@ function SourceDetail({
     const otherId = item.source_id === source.id ? item.related_source_id : item.source_id
     return { ...item, other: sources.find(candidate => candidate.id === otherId) }
   })
+  const versionRelations = relatedSources.filter(item => item.relation_type === 'new_version_of' || item.relation_type === 'revision_of')
+  const otherRelations = relatedSources.filter(item => !versionRelations.includes(item))
   const linkedTopics = topics.filter(item => item.source_ids.includes(source.id))
   const availableTopics = topics.filter(item => !item.source_ids.includes(source.id))
   const availableRelations = sources.filter(item => item.id !== source.id && !item.deleted_at)
+  const relationRow = (item: (typeof relatedSources)[number]) => <div className="relation" key={item.id}>
+    <button type="button" className="relation-link" disabled={!item.other} title={item.other ? '打开关联来源' : undefined} onClick={() => item.other && onSelect(item.other.id)}>{labelFor(relationTypes, item.relation_type)} · {item.other?.title || item.other?.id || '已移除来源'}</button>
+    {!sourceDeleted && <button type="button" className="icon-button" title="删除关系" disabled={Boolean(busyAction)} onClick={() => void removeRelation(item.id)}><X size={14}/></button>}
+  </div>
 
   return <section className="detail-layout">
     <div className="detail-main">
@@ -792,13 +917,21 @@ function SourceDetail({
         <div><label>语言</label><span>{source.language}</span></div>
         <div><label>来源日期</label><span>{formatDateOnly(source.source_date)}</span></div>
         <div><label>导入时间</label><span>{formatDate(source.imported_at)}</span></div>
-        <div className="wide"><label>固定分类</label><span>{source.categories.map(value => labelFor(categories, value)).join('、') || '-'}</span></div>
+        <div className="wide"><label>领域</label><span>{source.domains.map(value => taxonomyLabel(taxonomy.domains, value)).join('、') || '-'}</span></div>
+        <div className="wide"><label>体裁</label><span>{source.genres.map(value => taxonomyLabel(taxonomy.genres, value)).join('、') || '-'}</span></div>
         <div className="wide"><label>标签</label><span>{source.tags.join('、') || '-'}</span></div>
         <div className="wide"><label>备注</label><span>{source.notes || '-'}</span></div>
       </div>
 
       {sourceDeleted && <p className="deleted-notice">此来源已软删除。可查看既有元数据和证据；恢复后才能编辑、创建派生内容或预览原件。</p>}
-      {version && (version.media_type === 'video/mp4' || version.media_type === 'video/webm') && <VideoDetailPanel sourceId={source.id} version={version} disabled={sourceDeleted} onMessage={onMessage} />}
+      {!sourceDeleted && source.same_work_candidates.length > 0 && <div className="same-work-hint">
+        <span>发现可能重复的来源：</span>
+        {source.same_work_candidates.map(item => <span className="same-work-candidate" key={item.id}>
+          {item.title}（{item.reason === 'same_artifact' ? '内容相同' : '标题相同'}）
+          <button type="button" className="text-button" disabled={Boolean(busyAction)} onClick={() => void markSameWork(item.id)}>标记为同一作品</button>
+        </span>)}
+      </div>}
+      {version && (version.media_type === 'video/mp4' || version.media_type === 'video/webm') && <VideoDetailPanel source={source} version={version} taxonomy={taxonomy} disabled={sourceDeleted} onRefresh={onRefresh} onMessage={onMessage} />}
       <section className="management-panel">
         <header><h2>来源管理</h2><div>{!sourceDeleted && <button type="button" className="button secondary" disabled={Boolean(busyAction)} onClick={() => setMetadataOpen(value => !value)}>编辑元数据</button>}<button type="button" className="button text" onClick={() => void loadRevisions()}>修订记录</button></div></header>
         {!sourceDeleted && metadataOpen && <form className="form-stack compact-form" onSubmit={saveMetadata}>
@@ -806,16 +939,17 @@ function SourceDetail({
           <div className="form-row"><label>作者<input value={metadata.author} onChange={event => setMetadata(current => ({ ...current, author: event.target.value }))}/></label><label>语言<input required value={metadata.language} onChange={event => setMetadata(current => ({ ...current, language: event.target.value }))}/></label></div>
           <div className="form-row"><label>来源日期<input type="date" value={metadata.sourceDate} onChange={event => setMetadata(current => ({ ...current, sourceDate: event.target.value }))}/></label><label>标签<input value={metadata.tags} onChange={event => setMetadata(current => ({ ...current, tags: event.target.value }))} placeholder="用逗号分隔"/></label></div>
           <label>备注<textarea value={metadata.notes} onChange={event => setMetadata(current => ({ ...current, notes: event.target.value }))}/></label>
-          <fieldset><legend>固定分类</legend><div className="check-grid">{categories.map(item => <label key={item[0]}><input type="checkbox" checked={metadata.categories.includes(item[0])} onChange={() => setMetadata(current => ({ ...current, categories: current.categories.includes(item[0]) ? current.categories.filter(value => value !== item[0]) : [...current.categories, item[0]] }))}/>{item[1]}</label>)}</div></fieldset>
+          <fieldset><legend>领域（可多选）</legend><div className="check-grid">{taxonomy.domains.map(item => <label key={item.value}><input type="checkbox" checked={metadata.domains.includes(item.value)} onChange={() => setMetadata(current => ({ ...current, domains: current.domains.includes(item.value) ? current.domains.filter(value => value !== item.value) : [...current.domains, item.value] }))}/>{item.label}</label>)}</div></fieldset>
+          <fieldset><legend>体裁（单选，可不选）</legend><div className="check-grid">{taxonomy.genres.map(item => <label key={item.value}><input type="radio" name="metadata-genre" checked={metadata.genres[0] === item.value} onChange={() => setMetadata(current => ({ ...current, genres: [item.value] }))}/>{item.label}</label>)}</div>{metadata.genres.length > 0 && <button type="button" className="button text" onClick={() => setMetadata(current => ({ ...current, genres: [] }))}>清除体裁</button>}</fieldset>
           <div className="form-actions"><button className="button primary" disabled={Boolean(busyAction)}>{busyAction === 'metadata' ? '正在保存' : '保存修订'}</button><button type="button" className="button text" disabled={Boolean(busyAction)} onClick={() => setMetadataOpen(false)}>取消</button></div>
         </form>}
         {revisionsOpen && <div className="revision-list">{revisions.map(item => <article key={item.id}><b>修订 {item.ordinal}</b><time>{formatDate(item.created_at)}</time><span>{asText(item.snapshot.title)} · {asText(item.snapshot.author) || '未署名'} · {asText(item.snapshot.source_date) || '无来源日期'}</span></article>)}</div>}
       </section>
 
       <section className="document-panel">
-        <header><h2>文本表示</h2><span>{representation?.kind === 'manual' ? '人工修订表示' : representation ? `${representation.parser_name} · ${representation.kind}` : '暂无表示'}</span></header>
+        <header><h2>文本表示</h2><span>{representation?.kind === 'manual' ? '人工修订表示' : representation ? `${representation.parser_name} · ${representationKindLabel(representation.kind)}` : '暂无表示'}</span></header>
         {source.versions.length > 1 && <label className="panel-control">内容版本<select value={version?.id || ''} onChange={event => setVersionId(event.target.value)}>{source.versions.map(item => <option key={item.id} value={item.id}>{item.original_name} · {formatDate(item.created_at)}</option>)}</select></label>}
-        {representations.length > 0 && <label className="panel-control">表示<select value={representation?.id || ''} onChange={event => setRepresentationId(event.target.value)}>{representations.map(item => <option key={item.id} value={item.id}>{item.kind === 'manual' ? '人工修订' : item.kind} · {item.parser_name}</option>)}</select></label>}
+        {representations.length > 0 && <label className="panel-control">表示<select value={representation?.id || ''} onChange={event => setRepresentationId(event.target.value)}>{representations.map(item => <option key={item.id} value={item.id}>{representationKindLabel(item.kind)} · {item.parser_name}</option>)}</select></label>}
         {representation ? <pre ref={textRef}><TextWithHighlight text={representation.text_content} highlight={highlightedExcerpt}/></pre> : <div className="loading">当前版本尚无可显示的本地文本。</div>}
       </section>
 
@@ -847,8 +981,10 @@ function SourceDetail({
     <aside className="detail-side">
       <h2>版本</h2>{source.versions.map(item => <div className="version" key={item.id}><Box size={17}/><div><b>{item.original_name}</b><small>{item.artifact_sha256.slice(0, 16)}...</small><Status value={item.completeness}/></div></div>)}
       <section className="side-section"><h2>权利确认</h2>{sourceDeleted ? <p className="muted">{labelFor(rights, source.rights)}</p> : <><select disabled={Boolean(busyAction)} value={right} onChange={event => setRight(event.target.value)}>{rights.map(item => <option key={item[0]} value={item[0]}>{item[1]}</option>)}</select><button type="button" className="button secondary" disabled={Boolean(busyAction)} onClick={() => void updateRights()}>{busyAction === 'rights' ? '正在更新' : '更新'}</button></>}</section>
-      <section className="side-section"><h2>关系</h2>{relatedSources.length ? relatedSources.map(item => <div className="relation" key={item.id}>{labelFor(relationTypes, item.relation_type)} · {item.other?.title || item.other?.id || '已移除来源'}</div>) : <p className="muted">尚无手工关系</p>}{!sourceDeleted && <form className="side-form" onSubmit={addRelation}><select required disabled={Boolean(busyAction)} value={relatedSourceId} onChange={event => setRelatedSourceId(event.target.value)}><option value="">选择来源</option>{availableRelations.map(item => <option value={item.id} key={item.id}>{item.title}</option>)}</select><select disabled={Boolean(busyAction)} value={relationType} onChange={event => setRelationType(event.target.value)}>{relationTypes.map(item => <option key={item[0]} value={item[0]}>{item[1]}</option>)}</select><button className="button secondary" disabled={Boolean(busyAction)}>{busyAction === 'relation' ? '正在添加' : '添加关系'}</button></form>}</section>
-      <section className="side-section"><h2>主题</h2>{linkedTopics.length ? linkedTopics.map(item => <div className="relation" key={item.id}>{item.name}</div>) : <p className="muted">尚未关联主题</p>}{!sourceDeleted && <><select disabled={Boolean(busyAction)} value={topicId} onChange={event => setTopicId(event.target.value)}><option value="">选择现有主题</option>{availableTopics.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select><button type="button" className="button secondary" disabled={Boolean(busyAction)} onClick={() => void addTopic()}>{busyAction === 'topic' ? '正在关联' : '关联主题'}</button><form className="side-form" onSubmit={createTopic}><input disabled={Boolean(busyAction)} value={newTopic} onChange={event => setNewTopic(event.target.value)} placeholder="新主题名称"/><button className="button secondary" disabled={Boolean(busyAction)}>{busyAction === 'topic-create' ? '正在创建' : '新建主题'}</button></form></>}</section>
+      <section className="side-section"><h2>关系</h2>{relatedSources.length ? <>{versionRelations.length > 0 && <h3>版本链</h3>}{versionRelations.map(relationRow)}{otherRelations.length > 0 && <h3>其他关系</h3>}{otherRelations.map(relationRow)}</> : <p className="muted">尚无手工关系</p>}{!sourceDeleted && <form className="side-form" onSubmit={addRelation}><select required disabled={Boolean(busyAction)} value={relatedSourceId} onChange={event => setRelatedSourceId(event.target.value)}><option value="">选择来源</option>{availableRelations.map(item => <option value={item.id} key={item.id}>{item.title}</option>)}</select><select disabled={Boolean(busyAction)} value={relationType} onChange={event => setRelationType(event.target.value)}>{relationTypes.map(item => <option key={item[0]} value={item[0]}>{item[1]}</option>)}</select><button className="button secondary" disabled={Boolean(busyAction)}>{busyAction === 'relation' ? '正在添加' : '添加关系'}</button></form>}</section>
+      <section className="side-section"><h2>主题</h2>{linkedTopics.length ? linkedTopics.map(item => <div className="relation" key={item.id}>{topicManageId === item.id
+        ? <form className="side-form" onSubmit={renameTopic}><input required disabled={Boolean(busyAction)} value={topicRename} onChange={event => setTopicRename(event.target.value)} aria-label="主题新名称"/><div className="inline-actions"><button className="button secondary" disabled={Boolean(busyAction)}>{busyAction === 'topic-rename' ? '正在保存' : '保存'}</button><button type="button" className="button text" disabled={Boolean(busyAction)} onClick={() => setTopicManageId('')}>取消</button></div></form>
+        : <><span>{item.name}</span>{!sourceDeleted && <span className="inline-actions"><button type="button" className="text-button" disabled={Boolean(busyAction)} onClick={() => { setTopicManageId(item.id); setTopicRename(item.name) }}>重命名</button><button type="button" className="text-button" disabled={Boolean(busyAction)} onClick={() => void deleteTopic(item)}>删除主题</button><button type="button" className="icon-button" title="移出主题" disabled={Boolean(busyAction)} onClick={() => void removeTopicMembership(item.id)}><X size={14}/></button></span>}</>}</div>) : <p className="muted">尚未关联主题</p>}{!sourceDeleted && <><select disabled={Boolean(busyAction)} value={topicId} onChange={event => setTopicId(event.target.value)}><option value="">选择现有主题</option>{availableTopics.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select><button type="button" className="button secondary" disabled={Boolean(busyAction)} onClick={() => void addTopic()}>{busyAction === 'topic' ? '正在关联' : '关联主题'}</button><form className="side-form" onSubmit={createTopic}><input disabled={Boolean(busyAction)} value={newTopic} onChange={event => setNewTopic(event.target.value)} placeholder="新主题名称"/><button className="button secondary" disabled={Boolean(busyAction)}>{busyAction === 'topic-create' ? '正在创建' : '新建主题'}</button></form></>}</section>
       <div className="danger-zone">{source.deleted_at ? <button type="button" className="button secondary" disabled={Boolean(busyAction)} onClick={() => void lifecycle('restore')}>{busyAction === 'lifecycle-restore' ? '正在恢复' : '恢复来源'}</button> : <button type="button" className="button danger" disabled={Boolean(busyAction)} onClick={() => void lifecycle('delete')}><Trash2 size={16}/>{busyAction === 'lifecycle-delete' ? '正在删除' : '软删除'}</button>}{source.deleted_at && <button type="button" className="button danger" disabled={Boolean(busyAction)} onClick={() => setShowPurge(true)}><Trash2 size={16}/>永久删除</button>}{showPurge && <div className="confirm"><p>将移除来源、派生数据和无引用 artifact。此操作不可撤销。</p><button type="button" className="button danger" disabled={Boolean(busyAction)} onClick={() => void lifecycle('purge')}>{busyAction === 'lifecycle-purge' ? '正在永久删除' : '确认永久删除'}</button><button type="button" className="button text" disabled={Boolean(busyAction)} onClick={() => setShowPurge(false)}>取消</button></div>}</div>
     </aside>
   </section>
@@ -862,17 +998,22 @@ function TextWithHighlight({ text, highlight }: { text: string; highlight: strin
 }
 
 function VideoDetailPanel({
-  sourceId, version, disabled, onMessage,
+  source, version, taxonomy, disabled, onRefresh, onMessage,
 }: {
-  sourceId: string
+  source: SourceDetail
   version: Version
+  taxonomy: Taxonomy
   disabled: boolean
+  onRefresh: () => Promise<void>
   onMessage: (message: string) => void
 }) {
   const [detail, setDetail] = useState<VideoDetail | null>(null)
+  const [representations, setRepresentations] = useState<Representation[]>([])
   const [loading, setLoading] = useState(true)
   const [selectedFrameId, setSelectedFrameId] = useState('')
+  const [busy, setBusy] = useState('')
   const playerRef = useRef<HTMLVideoElement>(null)
+  const sourceId = source.id
 
   useEffect(() => {
     let active = true
@@ -882,6 +1023,9 @@ function VideoDetailPanel({
         if (!active) return
         setDetail(value)
         setSelectedFrameId(current => value.analysis?.frames.some(frame => frame.id === current) ? current : '')
+        const items = await request<Representation[]>(`/documents/${version.id}/representations`)
+        if (!active) return
+        setRepresentations(items)
       } catch (error) {
         if (!active) return
         setDetail(null)
@@ -906,13 +1050,51 @@ function VideoDetailPanel({
     setSelectedFrameId(frame.id)
     void player.play().catch(() => undefined)
   }
+  const queueAiJob = async (kind: 'transcribe' | 'summarize', forceTier2 = false) => {
+    setBusy(forceTier2 ? 'force-tier2' : kind)
+    try {
+      await request(
+        `/videos/${sourceId}/${kind}`,
+        kind === 'summarize' ? { method: 'POST', body: JSON.stringify({ force_tier2: forceTier2 }) } : { method: 'POST' },
+      )
+      onMessage(kind === 'transcribe' ? '已排入语音转写作业' : '已排入内容摘要作业')
+    } catch (error) {
+      onMessage(error instanceof Error ? error.message : '作业提交失败')
+    } finally {
+      setBusy('')
+    }
+  }
   const metadata = detail?.analysis?.metadata
   const frames = detail?.analysis?.frames || []
   const versionQuery = `?version_id=${encodeURIComponent(version.id)}`
   const streamPath = `${API}/videos/${encodeURIComponent(sourceId)}/stream${versionQuery}`
+  const ai = detail?.ai_capability
+  const summaryRepresentation = representations.filter(item => item.kind === 'summary').at(-1)
+  const summary = summaryRepresentation ? parseSummaryMarker(summaryRepresentation.text_content) : null
+  const suggestions = summary?.suggestions
+  const hasSuggestions = Boolean(suggestions && (suggestions.domains.length || suggestions.genres.length || suggestions.tags.length))
+  const adoptSuggestions = async () => {
+    if (!suggestions) return
+    if (!window.confirm('将把建议的领域、体裁与标签合并进当前来源元数据（不覆盖已有取值）。确认采纳？')) return
+    setBusy('adopt')
+    try {
+      const current = await request<SourceDetail>(`/sources/${sourceId}`)
+      const domains = [...new Set([...current.domains, ...suggestions.domains])].sort()
+      const genres = current.genres.length ? current.genres : suggestions.genres.slice(0, 1)
+      const tags = [...new Set([...current.tags, ...suggestions.tags])].sort()
+      await request(`/sources/${sourceId}/metadata`, { method: 'PUT', body: JSON.stringify({ domains, genres, tags }) })
+      await onRefresh()
+      onMessage('已采纳建议')
+    } catch (error) {
+      onMessage(error instanceof Error ? error.message : '采纳建议失败')
+    } finally {
+      setBusy('')
+    }
+  }
 
   return <section className="video-panel">
     <header><div><h2>本地视频</h2><span>{detail?.analysis ? '已完成本地分析' : loading ? '正在读取视频状态' : '等待本地分析结果'}</span></div><Status value={version.completeness}/></header>
+    {detail && detail.analyses.length > 1 && <p className="muted">本结果基于 {detail.analyses.length} 份分析中的最新一份</p>}
     {!disabled && <div className="video-player-wrap"><video ref={playerRef} controls preload="metadata" src={streamPath}>当前浏览器无法播放此本地视频。</video></div>}
     {metadata ? <div className="video-metadata-grid">
       <div><label>时长</label><span>{formatDuration(metadata.duration_ms)}</span></div>
@@ -921,8 +1103,10 @@ function VideoDetailPanel({
       <div><label>视频编码</label><span>{metadata.video_codec || '-'}</span></div>
       <div><label>音频编码</label><span>{metadata.audio_codec || '-'}</span></div>
     </div> : <p className="muted video-waiting">{detail?.media_capability.enabled === false ? '本机未检测到可用的 FFmpeg/ffprobe，视频分析作业会被阻止。' : '视频原件已保存，分析作业完成后会在这里显示媒体参数和时间采样帧。'}</p>}
-    {frames.length > 0 && <section className="video-frames"><header><h3>时间采样关键帧</h3><span>{frames.length} 帧</span></header><div className="frame-strip">{frames.map(frame => <button type="button" className={selectedFrameId === frame.id ? 'video-frame selected' : 'video-frame'} key={frame.id} onClick={() => seek(frame)} title={`定位到 ${formatDuration(frame.time_ms)}`}><img src={`${API}/videos/${encodeURIComponent(sourceId)}/frames/${encodeURIComponent(frame.id)}${versionQuery}`} alt={`关键帧 ${frame.ordinal + 1}`} /><span>{formatDuration(frame.time_ms)}</span></button>)}</div></section>}
-    <section className="video-ai-status"><header><h3>转写与摘要</h3><Status value={detail?.ai_capability.enabled ? 'succeeded' : 'blocked'}/></header><div><p>{detail?.ai_capability.enabled ? '媒体 AI 服务可用。' : '媒体 AI 服务尚未配置；不会上传视频或发起外部请求。'}</p><div className="video-ai-actions"><button type="button" className="button secondary" disabled>语音转写</button><button type="button" className="button secondary" disabled>内容摘要</button></div></div></section>
+    {frames.length > 0 && <section className="video-frames"><header><h3>时间采样关键帧</h3><span>{frames.length} 帧</span><span className="muted">场景切换 + 等间隔抽样，帧内容未经理解</span></header><div className="frame-strip">{frames.map(frame => <button type="button" className={selectedFrameId === frame.id ? 'video-frame selected' : 'video-frame'} key={frame.id} onClick={() => seek(frame)} title={`${frame.reason === 'scene' ? '场景切换' : '等距'} · 定位到 ${formatDuration(frame.time_ms)}`}><img src={`${API}/videos/${encodeURIComponent(sourceId)}/frames/${encodeURIComponent(frame.id)}${versionQuery}`} alt={`关键帧 ${frame.ordinal + 1}`} /><span>{formatDuration(frame.time_ms)}</span></button>)}</div></section>}
+    <section className="video-ai-status"><header><h3>转写与摘要</h3><Status value={ai?.enabled ? 'succeeded' : 'blocked'}/></header><div><p>{ai?.enabled ? '媒体 AI 服务已配置；音频与文本将发送至你配置的云端服务处理。' : '媒体 AI 服务尚未配置；不会上传视频或发起外部请求。'}</p><div className="video-ai-actions"><button type="button" className="button secondary" disabled={disabled || !ai?.transcribe_enabled || Boolean(busy)} onClick={() => void queueAiJob('transcribe')}>{busy === 'transcribe' ? '正在提交' : '语音转写'}</button><button type="button" className="button secondary" disabled={disabled || !ai?.understand_enabled || Boolean(busy)} onClick={() => void queueAiJob('summarize')}>{busy === 'summarize' ? '正在提交' : '内容摘要'}</button></div></div>
+      {summary && suggestions && <div className="video-summary"><header><h4>内容摘要</h4><span className="tier-badge">{suggestions.tier === 2 ? '深度' : '标准'}</span>{suggestions.visual_gap && <span className="muted">可能缺少画面信息</span>}</header><p className="summary-text">{summary.body}</p>{hasSuggestions && <p className="muted">建议：领域 {suggestions.domains.map(value => taxonomyLabel(taxonomy.domains, value)).join('、') || '-'} · 体裁 {suggestions.genres.map(value => taxonomyLabel(taxonomy.genres, value)).join('、') || '-'} · 标签 {suggestions.tags.join('、') || '-'}</p>}<div className="video-ai-actions"><button type="button" className="button secondary" disabled={disabled || !ai?.tier2_enabled || Boolean(busy)} title={ai?.tier2_enabled ? '使用视觉模型理解关键帧后重新生成摘要' : '在设置中配置视觉模型后可用'} onClick={() => void queueAiJob('summarize', true)}>{busy === 'force-tier2' ? '正在提交' : '强制深度理解'}</button>{hasSuggestions && <button type="button" className="button secondary" disabled={disabled || Boolean(busy)} onClick={() => void adoptSuggestions()}>{busy === 'adopt' ? '正在采纳' : '采纳建议'}</button>}</div></div>}
+    </section>
   </section>
 }
 
@@ -961,7 +1145,8 @@ function shareNotesOf(text: string, url: string): string {
     .replace(/\s+/g, ' ').trim().slice(0, 4000)
 }
 
-function ImportPage({ onDone, onDoneLink, onDoneCard, onMessage }: {
+function ImportPage({ taxonomy, onDone, onDoneLink, onDoneCard, onMessage }: {
+  taxonomy: Taxonomy
   onDone: () => void
   onDoneLink: () => void
   onDoneCard: () => void
@@ -976,7 +1161,8 @@ function ImportPage({ onDone, onDoneLink, onDoneCard, onMessage }: {
   const [notes, setNotes] = useState('')
   const [sourceDate, setSourceDate] = useState('')
   const [tags, setTags] = useState('')
-  const [selectedCategories, setSelectedCategories] = useState<string[]>([])
+  const [selectedDomains, setSelectedDomains] = useState<string[]>([])
+  const [selectedGenre, setSelectedGenre] = useState('')
   const [busy, setBusy] = useState(false)
   const [uploadProgress, setUploadProgress] = useState<number | null>(null)
   const [asCard, setAsCard] = useState(false)
@@ -1071,13 +1257,13 @@ function ImportPage({ onDone, onDoneLink, onDoneCard, onMessage }: {
         return
       }
       if (detected === 'text') {
-        await request('/imports/paste', { method: 'POST', body: JSON.stringify({ title, text: content, rights: right, author: author || null, language, notes: notes || null, source_date: sourceDate || null, tags: parseTags(tags), categories: selectedCategories }) })
+        await request('/imports/paste', { method: 'POST', body: JSON.stringify({ title, text: content, rights: right, author: author || null, language, notes: notes || null, source_date: sourceDate || null, tags: parseTags(tags), domains: selectedDomains, genres: selectedGenre ? [selectedGenre] : [] }) })
         onMessage('已写入不可变 artifact，并已排入本地解析作业')
       } else if (detected === 'link') {
         await request('/videos/link', { method: 'POST', body: JSON.stringify({
           url: foundUrl, platform, rights: right, use_cookie: useCookie,
           title, author: author || null, language, notes: notes || null,
-          source_date: sourceDate || null, categories: selectedCategories, tags: parseTags(tags),
+          source_date: sourceDate || null, domains: selectedDomains, genres: selectedGenre ? [selectedGenre] : [], tags: parseTags(tags),
         }) })
         onMessage('已提交链接下载作业，请到作业页查看进度')
         onDoneLink()
@@ -1092,7 +1278,8 @@ function ImportPage({ onDone, onDoneLink, onDoneCard, onMessage }: {
         body.set('notes', notes)
         if (sourceDate) body.set('source_date', sourceDate)
         body.set('tags', JSON.stringify(parseTags(tags)))
-        body.set('categories', JSON.stringify(selectedCategories))
+        body.set('domains', JSON.stringify(selectedDomains))
+        body.set('genres', JSON.stringify(selectedGenre ? [selectedGenre] : []))
         setUploadProgress(0)
         await uploadFile(detected === 'image' ? '/imports/image' : detected === 'video' ? '/videos/local' : '/imports/file', body, setUploadProgress)
         onMessage(detected === 'video' ? '已写入不可变视频 artifact，并已排入本地分析作业' : '已写入不可变 artifact，并已排入本地解析作业')
@@ -1164,7 +1351,8 @@ function ImportPage({ onDone, onDoneLink, onDoneCard, onMessage }: {
       <div className="form-row"><label>作者<input value={author} onChange={event => { markTouched('author'); setAuthor(event.target.value) }} /></label><label>语言<input required value={language} onChange={event => { markTouched('language'); setLanguage(event.target.value) }}/></label></div>
       <div className="form-row"><label>来源日期<input type="date" value={sourceDate} onChange={event => { markTouched('sourceDate'); setSourceDate(event.target.value) }}/></label><label>自由标签<input value={tags} onChange={event => setTags(event.target.value)} placeholder="用逗号分隔" /></label></div>
       <label>备注<textarea value={notes} onChange={event => setNotes(event.target.value)} /></label>
-      <fieldset><legend>固定分类（可多选）</legend><div className="check-grid">{categories.map(item => <label key={item[0]}><input type="checkbox" checked={selectedCategories.includes(item[0])} onChange={() => setSelectedCategories(current => current.includes(item[0]) ? current.filter(value => value !== item[0]) : [...current, item[0]])}/>{item[1]}</label>)}</div></fieldset>
+      <fieldset><legend>领域（可多选）</legend><div className="check-grid">{taxonomy.domains.map(item => <label key={item.value}><input type="checkbox" checked={selectedDomains.includes(item.value)} onChange={() => setSelectedDomains(current => current.includes(item.value) ? current.filter(value => value !== item.value) : [...current, item.value])}/>{item.label}</label>)}</div></fieldset>
+      <fieldset><legend>体裁（单选，可不选）</legend><div className="check-grid">{taxonomy.genres.map(item => <label key={item.value}><input type="radio" name="import-genre" checked={selectedGenre === item.value} onChange={() => setSelectedGenre(item.value)}/>{item.label}</label>)}</div>{selectedGenre && <button type="button" className="button text" onClick={() => setSelectedGenre('')}>清除体裁</button>}</fieldset>
       <label>权利确认<select required value={right} onChange={event => setRight(event.target.value)}><option value="" disabled>请选择</option>{rights.map(item => <option key={item[0]} value={item[0]}>{item[1]}</option>)}</select></label>
     </>}
     {uploadProgress !== null && <div className="upload-progress" aria-live="polite"><span style={{ width: `${uploadProgress}%` }}/><small>{uploadProgress}%</small></div>}
@@ -1173,8 +1361,10 @@ function ImportPage({ onDone, onDoneLink, onDoneCard, onMessage }: {
 }
 
 function SearchPage({
-  onSelectSource, onSelectKnowledge, onSelectCard, onMessage,
+  taxonomy, topics, onSelectSource, onSelectKnowledge, onSelectCard, onMessage,
 }: {
+  taxonomy: Taxonomy
+  topics: Topic[]
   onSelectSource: (id: string) => void
   onSelectKnowledge: (id: string) => void
   onSelectCard: (id: string) => void
@@ -1186,11 +1376,13 @@ function SearchPage({
   const [includeHistorical, setIncludeHistorical] = useState(false)
   const [includeIncomplete, setIncludeIncomplete] = useState(false)
   const [sort, setSort] = useState('relevance')
-  const [filters, setFilters] = useState({ source_type: '', category: '', tag: '', author: '', language: '', processing_state: '', source_date_from: '', source_date_to: '', imported_at_from: '', imported_at_to: '' })
+  const [filters, setFilters] = useState({ source_type: '', genre: '', tag: '', author: '', language: '', processing_state: '', source_date_from: '', source_date_to: '', imported_at_from: '', imported_at_to: '', topic_id: '' })
+  const [domainFilters, setDomainFilters] = useState<string[]>([])
   const search = async (event?: React.FormEvent) => {
     event?.preventDefault()
     const params = new URLSearchParams({ q: query, include_historical: String(includeHistorical), include_incomplete: String(includeIncomplete), sort })
     for (const [key, value] of Object.entries(filters)) if (value) params.set(key, value)
+    for (const value of domainFilters) params.append('domains', value)
     try {
       const response = await request<{ items: SearchItem[] }>(`/search?${params.toString()}`)
       setResults(response.items)
@@ -1207,7 +1399,8 @@ function SearchPage({
     <div className="search-options"><label>排序<select value={sort} onChange={event => setSort(event.target.value)}><option value="relevance">相关度</option><option value="updated">导入/更新时间</option><option value="title">标题</option></select></label><div className="advanced"><button type="button" className="text-button" onClick={() => setAdvancedOpen(value => !value)}><ChevronDown size={16} className={advancedOpen ? 'turned' : ''}/>高级范围</button></div></div>
     {advancedOpen && <div className="advanced-filters">
       <div className="filter-checks"><label><input type="checkbox" checked={includeHistorical} onChange={event => setIncludeHistorical(event.target.checked)}/>包含历史版本</label><label><input type="checkbox" checked={includeIncomplete} onChange={event => setIncludeIncomplete(event.target.checked)}/>包含不完整版本</label></div>
-      <div className="filter-grid"><label>来源类型<select value={filters.source_type} onChange={event => setFilters(current => ({ ...current, source_type: event.target.value }))}><option value="">全部</option><option value="file">本地文件</option><option value="paste">粘贴文本</option><option value="external">外部卡</option><option value="douyin">抖音参考</option><option value="video_link">链接视频</option></select></label><label>固定分类<select value={filters.category} onChange={event => setFilters(current => ({ ...current, category: event.target.value }))}><option value="">全部</option>{categories.map(item => <option key={item[0]} value={item[0]}>{item[1]}</option>)}</select></label><label>标签<input value={filters.tag} onChange={event => setFilters(current => ({ ...current, tag: event.target.value }))}/></label><label>作者<input value={filters.author} onChange={event => setFilters(current => ({ ...current, author: event.target.value }))}/></label><label>语言<input value={filters.language} onChange={event => setFilters(current => ({ ...current, language: event.target.value }))}/></label><label>处理状态<select value={filters.processing_state} onChange={event => setFilters(current => ({ ...current, processing_state: event.target.value }))}><option value="">全部</option><option value="queued">排队</option><option value="running">处理中</option><option value="succeeded">已完成</option><option value="failed">失败</option><option value="blocked">已阻止</option></select></label><label>来源日期起<input type="date" value={filters.source_date_from} onChange={event => setFilters(current => ({ ...current, source_date_from: event.target.value }))}/></label><label>来源日期止<input type="date" value={filters.source_date_to} onChange={event => setFilters(current => ({ ...current, source_date_to: event.target.value }))}/></label><label>导入日期起<input type="date" value={filters.imported_at_from} onChange={event => setFilters(current => ({ ...current, imported_at_from: event.target.value }))}/></label><label>导入日期止<input type="date" value={filters.imported_at_to} onChange={event => setFilters(current => ({ ...current, imported_at_to: event.target.value }))}/></label></div>
+      <div className="filter-grid"><label>主题<select value={filters.topic_id} onChange={event => setFilters(current => ({ ...current, topic_id: event.target.value }))}><option value="">全部</option>{topics.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label><label>来源类型<select value={filters.source_type} onChange={event => setFilters(current => ({ ...current, source_type: event.target.value }))}><option value="">全部</option><option value="file">本地文件</option><option value="paste">粘贴文本</option><option value="external">外部卡</option><option value="douyin">抖音参考</option><option value="video_link">链接视频</option></select></label><label>体裁<select value={filters.genre} onChange={event => setFilters(current => ({ ...current, genre: event.target.value }))}><option value="">全部</option><option value="_none">未分类</option>{taxonomy.genres.map(item => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label><label>标签<input value={filters.tag} onChange={event => setFilters(current => ({ ...current, tag: event.target.value }))}/></label><label>作者<input value={filters.author} onChange={event => setFilters(current => ({ ...current, author: event.target.value }))}/></label><label>语言<input value={filters.language} onChange={event => setFilters(current => ({ ...current, language: event.target.value }))}/></label><label>处理状态<select value={filters.processing_state} onChange={event => setFilters(current => ({ ...current, processing_state: event.target.value }))}><option value="">全部</option><option value="queued">排队</option><option value="running">处理中</option><option value="succeeded">已完成</option><option value="failed">失败</option><option value="blocked">已阻止</option></select></label><label>来源日期起<input type="date" value={filters.source_date_from} onChange={event => setFilters(current => ({ ...current, source_date_from: event.target.value }))}/></label><label>来源日期止<input type="date" value={filters.source_date_to} onChange={event => setFilters(current => ({ ...current, source_date_to: event.target.value }))}/></label><label>导入日期起<input type="date" value={filters.imported_at_from} onChange={event => setFilters(current => ({ ...current, imported_at_from: event.target.value }))}/></label><label>导入日期止<input type="date" value={filters.imported_at_to} onChange={event => setFilters(current => ({ ...current, imported_at_to: event.target.value }))}/></label></div>
+      <fieldset className="filter-domains"><legend>领域（可多选）</legend><div className="check-grid">{taxonomy.domains.map(item => <label key={item.value}><input type="checkbox" checked={domainFilters.includes(item.value)} onChange={() => setDomainFilters(current => current.includes(item.value) ? current.filter(value => value !== item.value) : [...current, item.value])}/>{item.label}</label>)}<label><input type="checkbox" checked={domainFilters.includes('_none')} onChange={() => setDomainFilters(current => current.includes('_none') ? current.filter(value => value !== '_none') : [...current, '_none'])}/>未分类</label></div></fieldset>
     </div>}
     <p className="hint">仅进行中文短语、关键词和子串匹配，不提供语义检索。</p>
     {results.length ? <div className="result-list">{results.map(item => <button type="button" key={`${item.kind}-${item.id}`} className="result" onClick={() => open(item)}><span className="result-kind">{item.kind === 'source' ? '来源' : item.kind === 'knowledge' ? '知识' : '外部卡'}</span><b>{item.title}</b><small>匹配 {item.relevance} 次 · {formatDate(item.updated_at)}</small></button>)}</div> : <Empty icon={<Search size={36}/>} text="输入条件后开始本地检索" />}
@@ -1346,6 +1539,87 @@ function TransfersPage({ onMessage }: { onMessage: (message: string) => void }) 
   return <div className="page split-page"><section><PageHeader title="备份、还原与导出"/><div className="transfer-actions"><button type="button" className="button secondary" onClick={() => void backup()}><ArchiveRestore size={17}/>立即备份</button><button type="button" className="button secondary" onClick={() => void verify(false)}><Check size={17}/>抽样校验</button><button type="button" className="button secondary" onClick={() => void verify(true)}><Check size={17}/>全量校验</button><button type="button" className="button primary" onClick={() => void exportData()}><HardDriveDownload size={17}/>确认并导出</button></div><label className="sample-field">抽样数量<input type="number" min="1" max="10000" value={sampleSize} onChange={event => setSampleSize(Math.max(1, Number(event.target.value) || 1))}/></label><h2>可还原备份</h2>{backups.length ? <div className="backup-list">{backups.map(item => <article className="backup" key={item.id}><div><b>{item.archive_name}</b><small>{formatDate(item.created_at)} · {stateLabel(item.state)}</small></div><button type="button" className="icon-button" title="还原到新数据根" onClick={() => void restore(item.id)}><ArchiveRestore size={18}/></button></article>)}</div> : <p className="muted">尚无完成的备份。</p>}</section><aside className="transfer-form"><label>新数据根（仅还原）<input value={targetRoot} onChange={event => setTargetRoot(event.target.value)} placeholder="E:\\新位置\\data" /></label>{backend === 'postgresql' && <label>新的空目标数据库 URL<input type="password" autoComplete="off" value={targetDatabaseUrl} onChange={event => setTargetDatabaseUrl(event.target.value)} placeholder="仅本次还原使用" /></label>}<p className="hint">还原不覆盖当前数据根，目标必须不存在或为空。</p><label>导出归档路径（再导入）<input value={archive} onChange={event => setArchive(event.target.value)} placeholder="E:\\...\\export-*.zip" /></label><button type="button" className="button secondary" onClick={() => void reimport()}><Import size={17}/>校验并再导入</button>{conflicts.length > 0 && <section className="conflict-list"><h2>再导入冲突</h2><p>{conflictReason}</p>{conflicts.map(item => <code key={item}>{item}</code>)}</section>}</aside></div>
 }
 
+type AiSettings = {
+  transcribe: { provider: string; base_url: string; model: string; has_key: boolean; key_hint: string | null }
+  understand: { provider: string; base_url: string; chat_model: string; vision_model: string; has_key: boolean; key_hint: string | null }
+  timeout_seconds: number
+}
+
+function AiSettingsSection({ onMessage }: { onMessage: (message: string) => void }) {
+  const [transcribe, setTranscribe] = useState({ provider: 'off', base_url: '', model: '', api_key: '' })
+  const [understand, setUnderstand] = useState({ provider: 'off', base_url: '', chat_model: '', vision_model: '', api_key: '' })
+  const [timeoutSeconds, setTimeoutSeconds] = useState('300')
+  const [keyHints, setKeyHints] = useState<{ transcribe: string | null; understand: string | null }>({ transcribe: null, understand: null })
+  const [testResult, setTestResult] = useState<Record<string, string>>({})
+  const [busy, setBusy] = useState('')
+  const apply = useCallback((value: AiSettings) => {
+    setTranscribe({ provider: value.transcribe.provider, base_url: value.transcribe.base_url, model: value.transcribe.model, api_key: '' })
+    setUnderstand({ provider: value.understand.provider, base_url: value.understand.base_url, chat_model: value.understand.chat_model, vision_model: value.understand.vision_model, api_key: '' })
+    setTimeoutSeconds(String(value.timeout_seconds))
+    setKeyHints({
+      transcribe: value.transcribe.has_key ? value.transcribe.key_hint : null,
+      understand: value.understand.has_key ? value.understand.key_hint : null,
+    })
+  }, [])
+  useEffect(() => {
+    void request<AiSettings>('/settings/ai').then(apply).catch(error => onMessage(error instanceof Error ? error.message : '读取媒体 AI 设置失败'))
+  }, [apply, onMessage])
+  const save = async (event: React.FormEvent) => {
+    event.preventDefault()
+    setBusy('save')
+    try {
+      const value = await request<AiSettings>('/settings/ai', {
+        method: 'PUT',
+        body: JSON.stringify({
+          transcribe: { provider: transcribe.provider, base_url: transcribe.base_url, model: transcribe.model, ...(transcribe.api_key ? { api_key: transcribe.api_key } : {}) },
+          understand: { provider: understand.provider, base_url: understand.base_url, chat_model: understand.chat_model, vision_model: understand.vision_model, ...(understand.api_key ? { api_key: understand.api_key } : {}) },
+          timeout_seconds: Number(timeoutSeconds) || 300,
+        }),
+      })
+      apply(value)
+      setTestResult({})
+      onMessage('媒体 AI 设置已保存')
+    } catch (error) {
+      onMessage(error instanceof Error ? error.message : '媒体 AI 设置保存失败')
+    } finally {
+      setBusy('')
+    }
+  }
+  const test = async (part: 'transcribe' | 'understand') => {
+    setBusy(`test-${part}`)
+    try {
+      const result = await request<{ ok: boolean; message?: string }>('/settings/ai/test', { method: 'POST', body: JSON.stringify({ part }) })
+      setTestResult(current => ({ ...current, [part]: result.ok ? '连接成功' : result.message || '连接失败' }))
+    } catch (error) {
+      setTestResult(current => ({ ...current, [part]: error instanceof Error ? error.message : '连接测试失败' }))
+    } finally {
+      setBusy('')
+    }
+  }
+  const providers = [['off', '关闭'], ['openai_compatible', 'OpenAI 兼容']] as const
+  return <section className="form-stack media-ai"><h2>媒体 AI</h2>
+    <p className="hint">启用后，音频、关键帧与文本将发送至你配置的云端服务处理。API 密钥仅保存在本机凭据文件，不会进入备份、导出或日志。</p>
+    <form className="form-stack" onSubmit={save}>
+      <fieldset><legend>语音转写</legend><div className="settings-grid">
+        <label>提供方<select value={transcribe.provider} onChange={event => setTranscribe(current => ({ ...current, provider: event.target.value }))}>{providers.map(item => <option key={item[0]} value={item[0]}>{item[1]}</option>)}</select></label>
+        <label>转写模型<input value={transcribe.model} onChange={event => setTranscribe(current => ({ ...current, model: event.target.value }))} placeholder="whisper-1"/></label>
+        <label>Base URL（可空，使用提供方默认端点）<input value={transcribe.base_url} onChange={event => setTranscribe(current => ({ ...current, base_url: event.target.value }))} placeholder="https://…"/></label>
+        <label>API 密钥<input type="password" autoComplete="off" value={transcribe.api_key} onChange={event => setTranscribe(current => ({ ...current, api_key: event.target.value }))} placeholder={keyHints.transcribe ? `已配置（${keyHints.transcribe}），输入以替换` : '未配置'}/></label>
+      </div><div className="inline-actions"><button type="button" className="button secondary" disabled={Boolean(busy)} onClick={() => void test('transcribe')}>{busy === 'test-transcribe' ? '正在测试' : '测试连接'}</button>{testResult.transcribe && <span className="hint">{testResult.transcribe}</span>}</div></fieldset>
+      <fieldset><legend>理解与摘要</legend><div className="settings-grid">
+        <label>提供方<select value={understand.provider} onChange={event => setUnderstand(current => ({ ...current, provider: event.target.value }))}>{providers.map(item => <option key={item[0]} value={item[0]}>{item[1]}</option>)}</select></label>
+        <label>摘要模型<input value={understand.chat_model} onChange={event => setUnderstand(current => ({ ...current, chat_model: event.target.value }))} placeholder="qwen-plus"/></label>
+        <label>视觉模型（可空）<input value={understand.vision_model} onChange={event => setUnderstand(current => ({ ...current, vision_model: event.target.value }))} placeholder="空则不做画面理解"/></label>
+        <label>Base URL（可空，使用提供方默认端点）<input value={understand.base_url} onChange={event => setUnderstand(current => ({ ...current, base_url: event.target.value }))} placeholder="https://…"/></label>
+        <label>API 密钥<input type="password" autoComplete="off" value={understand.api_key} onChange={event => setUnderstand(current => ({ ...current, api_key: event.target.value }))} placeholder={keyHints.understand ? `已配置（${keyHints.understand}），输入以替换` : '未配置'}/></label>
+      </div><div className="inline-actions"><button type="button" className="button secondary" disabled={Boolean(busy)} onClick={() => void test('understand')}>{busy === 'test-understand' ? '正在测试' : '测试连接'}</button>{testResult.understand && <span className="hint">{testResult.understand}</span>}</div></fieldset>
+      <label>AI 调用超时（秒）<input type="number" min="60" max="86400" value={timeoutSeconds} onChange={event => setTimeoutSeconds(event.target.value)}/></label>
+      <p className="hint">测试连接使用已保存的配置与密钥；修改后请先保存。</p>
+      <div className="form-actions"><button className="button primary" disabled={Boolean(busy)}>{busy === 'save' ? '正在保存' : '保存媒体 AI 设置'}</button></div>
+    </form>
+  </section>
+}
+
 function SettingsPage({ onMessage }: { onMessage: (message: string) => void }) {
   const [settings, setSettings] = useState<Record<string, string>>({})
   const [cookies, setCookies] = useState<Record<string, boolean>>({})
@@ -1358,7 +1632,7 @@ function SettingsPage({ onMessage }: { onMessage: (message: string) => void }) {
   const save = async (event: React.FormEvent) => {
     event.preventDefault()
     try {
-      const result = await request<Record<string, string>>('/settings', { method: 'PUT', body: JSON.stringify({ parser_timeout_seconds: Number(settings.parser_timeout_seconds), parser_no_progress_seconds: Number(settings.parser_no_progress_seconds), parser_memory_limit_mb: Number(settings.parser_memory_limit_mb), parser_disk_limit_mb: Number(settings.parser_disk_limit_mb), video_timeout_seconds: Number(settings.video_timeout_seconds), video_memory_limit_mb: Number(settings.video_memory_limit_mb), video_disk_limit_mb: Number(settings.video_disk_limit_mb), video_max_frames: Number(settings.video_max_frames), job_lease_seconds: Number(settings.job_lease_seconds), max_retry_attempts: Number(settings.max_retry_attempts), download_timeout_seconds: Number(settings.download_timeout_seconds), download_no_progress_seconds: Number(settings.download_no_progress_seconds), download_disk_limit_mb: Number(settings.download_disk_limit_mb) }) })
+      const result = await request<Record<string, string>>('/settings', { method: 'PUT', body: JSON.stringify({ parser_timeout_seconds: Number(settings.parser_timeout_seconds), parser_no_progress_seconds: Number(settings.parser_no_progress_seconds), parser_memory_limit_mb: Number(settings.parser_memory_limit_mb), parser_disk_limit_mb: Number(settings.parser_disk_limit_mb), video_timeout_seconds: Number(settings.video_timeout_seconds), video_memory_limit_mb: Number(settings.video_memory_limit_mb), video_disk_limit_mb: Number(settings.video_disk_limit_mb), video_max_frames: Number(settings.video_max_frames), image_timeout_seconds: Number(settings.image_timeout_seconds), image_memory_limit_mb: Number(settings.image_memory_limit_mb), image_disk_limit_mb: Number(settings.image_disk_limit_mb), job_lease_seconds: Number(settings.job_lease_seconds), max_retry_attempts: Number(settings.max_retry_attempts), download_timeout_seconds: Number(settings.download_timeout_seconds), download_no_progress_seconds: Number(settings.download_no_progress_seconds), download_disk_limit_mb: Number(settings.download_disk_limit_mb) }) })
       setSettings(result)
       onMessage('设置已保存到本地 state')
     } catch (error) {
@@ -1392,7 +1666,7 @@ function SettingsPage({ onMessage }: { onMessage: (message: string) => void }) {
       onMessage(error instanceof Error ? error.message : '删除失败')
     }
   }
-  return <div className="page narrow"><PageHeader title="设置"/><form className="form-stack" onSubmit={save}><label>解析总超时（秒）<input type="number" min="60" max="86400" value={settings.parser_timeout_seconds || ''} onChange={event => setSettings(current => ({ ...current, parser_timeout_seconds: event.target.value }))}/></label><label>无进度断路器（秒）<input type="number" min="60" max="86400" value={settings.parser_no_progress_seconds || ''} onChange={event => setSettings(current => ({ ...current, parser_no_progress_seconds: event.target.value }))}/></label><label>解析内存上限（MB）<input type="number" min="64" max="32768" value={settings.parser_memory_limit_mb || ''} onChange={event => setSettings(current => ({ ...current, parser_memory_limit_mb: event.target.value }))}/></label><label>解析磁盘上限（MB）<input type="number" min="64" max="32768" value={settings.parser_disk_limit_mb || ''} onChange={event => setSettings(current => ({ ...current, parser_disk_limit_mb: event.target.value }))}/></label><fieldset><legend>本地视频分析</legend><div className="settings-grid"><label>视频总超时（秒）<input type="number" min="60" max="86400" value={settings.video_timeout_seconds || ''} onChange={event => setSettings(current => ({ ...current, video_timeout_seconds: event.target.value }))}/></label><label>视频内存上限（MB）<input type="number" min="64" max="32768" value={settings.video_memory_limit_mb || ''} onChange={event => setSettings(current => ({ ...current, video_memory_limit_mb: event.target.value }))}/></label><label>视频磁盘上限（MB）<input type="number" min="64" max="32768" value={settings.video_disk_limit_mb || ''} onChange={event => setSettings(current => ({ ...current, video_disk_limit_mb: event.target.value }))}/></label><label>最大关键帧数<input type="number" min="1" max="32" value={settings.video_max_frames || ''} onChange={event => setSettings(current => ({ ...current, video_max_frames: event.target.value }))}/></label></div></fieldset><fieldset><legend>链接下载</legend><div className="settings-grid"><label>下载总超时（秒）<input type="number" min="60" max="86400" value={settings.download_timeout_seconds || ''} onChange={event => setSettings(current => ({ ...current, download_timeout_seconds: event.target.value }))}/></label><label>下载无进展观察窗口（秒）<input type="number" min="10" max="86400" value={settings.download_no_progress_seconds || ''} onChange={event => setSettings(current => ({ ...current, download_no_progress_seconds: event.target.value }))}/></label><label>下载 staging 磁盘上限（MB）<input type="number" min="64" max="32768" value={settings.download_disk_limit_mb || ''} onChange={event => setSettings(current => ({ ...current, download_disk_limit_mb: event.target.value }))}/></label></div></fieldset><label>作业租约（秒）<input type="number" min="60" max="86400" value={settings.job_lease_seconds || ''} onChange={event => setSettings(current => ({ ...current, job_lease_seconds: event.target.value }))}/></label><label>最大重试次数<input type="number" min="0" max="10" value={settings.max_retry_attempts || ''} onChange={event => setSettings(current => ({ ...current, max_retry_attempts: event.target.value }))}/></label><button className="button primary">保存设置</button></form><section className="form-stack download-cookie"><h2>下载 Cookie</h2>{([['bilibili', '哔哩哔哩'], ['douyin', '抖音']] as const).map(([key, name]) => <div className="form-row" key={key}><span className="hint">{name}：{cookies[key] === true ? '已导入' : '未导入'}</span><label className="file-pick">导入 cookies.txt（Netscape 格式，≤1MB）<input className="visually-hidden" type="file" accept=".txt" onChange={event => void importCookie(key, event)} /><span><Upload size={20}/>选择 cookies.txt</span></label><button type="button" className="button secondary" disabled={cookies[key] !== true} onClick={() => void removeCookie(key)}><Trash2 size={16}/>删除</button></div>)}<p className="hint">按平台分别保存 Cookie；识别链接平台后自动选用对应文件。Cookie 内容不会进入备份、导出或日志。</p></section><section className="policy-list"><h2>本地运行策略</h2><div><Check size={16}/>仅绑定 127.0.0.1</div><div><Check size={16}/>无遥测、无本地 HTTPS、无加密层</div><div><Check size={16}/>解析仅本地回退，禁止静默云服务</div><div><Check size={16}/>视频分析仅限本地 MP4/WebM</div><div><Check size={16}/>链接下载仅白名单平台、单视频、≤1080p，出站经回环过滤代理</div><div><Check size={16}/>下载 Cookie 仅 cookies.txt 单通道，绝不进入备份、导出或日志</div><div><Check size={16}/>操作日志不记录正文、路径或令牌</div></section></div>
+  return <div className="page narrow"><PageHeader title="设置"/><form className="form-stack" onSubmit={save}><label>解析总超时（秒）<input type="number" min="60" max="86400" value={settings.parser_timeout_seconds || ''} onChange={event => setSettings(current => ({ ...current, parser_timeout_seconds: event.target.value }))}/></label><label>无进度断路器（秒）<input type="number" min="60" max="86400" value={settings.parser_no_progress_seconds || ''} onChange={event => setSettings(current => ({ ...current, parser_no_progress_seconds: event.target.value }))}/></label><label>解析内存上限（MB）<input type="number" min="64" max="32768" value={settings.parser_memory_limit_mb || ''} onChange={event => setSettings(current => ({ ...current, parser_memory_limit_mb: event.target.value }))}/></label><label>解析磁盘上限（MB）<input type="number" min="64" max="32768" value={settings.parser_disk_limit_mb || ''} onChange={event => setSettings(current => ({ ...current, parser_disk_limit_mb: event.target.value }))}/></label><fieldset><legend>本地视频分析</legend><div className="settings-grid"><label>视频总超时（秒）<input type="number" min="60" max="86400" value={settings.video_timeout_seconds || ''} onChange={event => setSettings(current => ({ ...current, video_timeout_seconds: event.target.value }))}/></label><label>视频内存上限（MB）<input type="number" min="64" max="32768" value={settings.video_memory_limit_mb || ''} onChange={event => setSettings(current => ({ ...current, video_memory_limit_mb: event.target.value }))}/></label><label>视频磁盘上限（MB）<input type="number" min="64" max="32768" value={settings.video_disk_limit_mb || ''} onChange={event => setSettings(current => ({ ...current, video_disk_limit_mb: event.target.value }))}/></label><label>最大关键帧数<input type="number" min="1" max="32" value={settings.video_max_frames || ''} onChange={event => setSettings(current => ({ ...current, video_max_frames: event.target.value }))}/></label></div></fieldset><fieldset><legend>本地图片分析</legend><div className="settings-grid"><label>图片总超时（秒）<input type="number" min="60" max="86400" value={settings.image_timeout_seconds || ''} onChange={event => setSettings(current => ({ ...current, image_timeout_seconds: event.target.value }))}/></label><label>图片内存上限（MB）<input type="number" min="64" max="32768" value={settings.image_memory_limit_mb || ''} onChange={event => setSettings(current => ({ ...current, image_memory_limit_mb: event.target.value }))}/></label><label>图片磁盘上限（MB）<input type="number" min="64" max="32768" value={settings.image_disk_limit_mb || ''} onChange={event => setSettings(current => ({ ...current, image_disk_limit_mb: event.target.value }))}/></label></div></fieldset><fieldset><legend>链接下载</legend><div className="settings-grid"><label>下载总超时（秒）<input type="number" min="60" max="86400" value={settings.download_timeout_seconds || ''} onChange={event => setSettings(current => ({ ...current, download_timeout_seconds: event.target.value }))}/></label><label>下载无进展观察窗口（秒）<input type="number" min="10" max="86400" value={settings.download_no_progress_seconds || ''} onChange={event => setSettings(current => ({ ...current, download_no_progress_seconds: event.target.value }))}/></label><label>下载 staging 磁盘上限（MB）<input type="number" min="64" max="32768" value={settings.download_disk_limit_mb || ''} onChange={event => setSettings(current => ({ ...current, download_disk_limit_mb: event.target.value }))}/></label></div></fieldset><label>作业租约（秒）<input type="number" min="60" max="86400" value={settings.job_lease_seconds || ''} onChange={event => setSettings(current => ({ ...current, job_lease_seconds: event.target.value }))}/></label><label>最大重试次数<input type="number" min="0" max="10" value={settings.max_retry_attempts || ''} onChange={event => setSettings(current => ({ ...current, max_retry_attempts: event.target.value }))}/></label><button className="button primary">保存设置</button></form><section className="form-stack download-cookie"><h2>下载 Cookie</h2>{([['bilibili', '哔哩哔哩'], ['douyin', '抖音']] as const).map(([key, name]) => <div className="form-row" key={key}><span className="hint">{name}：{cookies[key] === true ? '已导入' : '未导入'}</span><label className="file-pick">导入 cookies.txt（Netscape 格式，≤1MB）<input className="visually-hidden" type="file" accept=".txt" onChange={event => void importCookie(key, event)} /><span><Upload size={20}/>选择 cookies.txt</span></label><button type="button" className="button secondary" disabled={cookies[key] !== true} onClick={() => void removeCookie(key)}><Trash2 size={16}/>删除</button></div>)}<p className="hint">按平台分别保存 Cookie；识别链接平台后自动选用对应文件。Cookie 内容不会进入备份、导出或日志。</p></section><AiSettingsSection onMessage={onMessage}/><section className="policy-list"><h2>本地运行策略</h2><div><Check size={16}/>仅绑定 127.0.0.1</div><div><Check size={16}/>无遥测、无本地 HTTPS、无加密层</div><div><Check size={16}/>解析仅本地回退，禁止静默云服务</div><div><Check size={16}/>视频分析仅限本地 MP4/WebM</div><div><Check size={16}/>链接下载仅白名单平台、单视频、≤1080p，出站经回环过滤代理</div><div><Check size={16}/>下载 Cookie 仅 cookies.txt 单通道，绝不进入备份、导出或日志</div><div><Check size={16}/>操作日志不记录正文、路径或令牌</div></section></div>
 }
 
 function Empty({ icon, text }: { icon: React.ReactNode; text: string }) { return <div className="empty">{icon}<span>{text}</span></div> }

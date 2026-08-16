@@ -42,6 +42,15 @@ class DataPaths:
         return self.download_cookies / f"{platform}.txt"
 
     @property
+    def ai_state(self) -> Path:
+        return self.state / "ai"
+
+    @property
+    def ai_credentials_file(self) -> Path:
+        """媒体 AI 凭据文件（state/ai/credentials.json）；绝不进备份、导出或日志。"""
+        return self.ai_state / "credentials.json"
+
+    @property
     def artifacts(self) -> Path:
         return self.root / "artifacts"
 
@@ -84,7 +93,7 @@ class DataPaths:
     def create(self) -> None:
         for path in (
             self.root, self.state, self.download, self.download_cookies, self.artifacts,
-            self.staging, self.models, self.backups, self.exports, self.logs,
+            self.staging, self.models, self.backups, self.exports, self.logs, self.ai_state,
         ):
             path.mkdir(parents=True, exist_ok=True)
 

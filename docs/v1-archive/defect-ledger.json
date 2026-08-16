@@ -352,6 +352,134 @@
       "discovery": "reports/development/20260815T061108Z-bilibili-download-channel-repair.md",
       "retest": "reports/development/20260815T061108Z-bilibili-download-channel-repair.md；tests/unit/test_video_download.py（test_proxy_relay_has_no_absolute_lifetime_cap）",
       "disposition": "resolved_locally"
+    },
+    {
+      "defect_id": "DEF-SEARCH-002",
+      "severity": "P2",
+      "summary": "视频容器元数据模板进入全文检索语料造成噪声命中（REQ-024）",
+      "discovery": "v1.4.0 升级开发自审",
+      "retest": "tests/unit/test_video_media.py（test_video_metadata_template_stays_out_of_fulltext_search）",
+      "disposition": "resolved_locally"
+    },
+    {
+      "defect_id": "DEF-VID-001",
+      "severity": "P2",
+      "summary": "关键帧仅为静态图片，不在证据与检索链中（经转写证据链与场景感知采样修复，REQ-053）",
+      "discovery": "v1.4.0 升级开发自审",
+      "retest": "tests/unit/test_media_ai.py（test_transcription_job_persists_time_range_evidence_and_searchable_chunks）；tests/unit/test_video_media.py（test_extract_frames_fills_dimensions_and_scene_reasons）",
+      "disposition": "resolved_locally"
+    },
+    {
+      "defect_id": "DEF-VID-002",
+      "severity": "P1",
+      "summary": "视频分析先持久化后校验，失败可留下与分析记录矛盾的版本状态（改为先校验后持久化，REQ-016）",
+      "discovery": "v1.4.0 升级开发自审",
+      "retest": "tests/unit/test_video_media.py（test_video_detail_gates_analysis_on_completeness）",
+      "disposition": "resolved_locally"
+    },
+    {
+      "defect_id": "DEF-VID-003",
+      "severity": "P2",
+      "summary": "转写/摘要入口为无实现死端（REQ-051 双组配置接入真实作业）",
+      "discovery": "v1.4.0 升级开发自审",
+      "retest": "tests/unit/test_media_ai.py（test_transcription_job_persists_time_range_evidence_and_searchable_chunks、test_summarize_job_cascade_tiers_and_visual_gap）",
+      "disposition": "resolved_locally"
+    },
+    {
+      "defect_id": "DEF-VID-004",
+      "severity": "P2",
+      "summary": "关键帧 width/height 恒为 NULL（REQ-016）",
+      "discovery": "v1.4.0 升级开发自审",
+      "retest": "tests/unit/test_video_media.py（test_extract_frames_fills_dimensions_and_scene_reasons）",
+      "disposition": "resolved_locally"
+    },
+    {
+      "defect_id": "DEF-VID-005",
+      "severity": "P2",
+      "summary": "采样配置不可追溯：config_hash 未覆盖采样参数（REQ-016 全参数化）",
+      "discovery": "v1.4.0 升级开发自审",
+      "retest": "tests/unit/test_video_media.py（test_plan_frame_times_boundaries）",
+      "disposition": "resolved_locally"
+    },
+    {
+      "defect_id": "DEF-VID-006",
+      "severity": "P2",
+      "summary": "同一版本多份分析静默共存且无当前标记（REQ-016）",
+      "discovery": "v1.4.0 升级开发自审",
+      "retest": "tests/unit/test_video_media.py（test_video_detail_lists_multiple_analyses_with_current_marker）",
+      "disposition": "resolved_locally"
+    },
+    {
+      "defect_id": "DEF-VID-007",
+      "severity": "P2",
+      "summary": "采样边界跳变、首尾永不覆盖、短视频仅抽单帧（REQ-053）",
+      "discovery": "v1.4.0 升级开发自审",
+      "retest": "tests/unit/test_video_media.py（test_plan_frame_times_boundaries、test_plan_frame_times_short_video_edge_and_cap、test_plan_frame_times_snaps_nearest_unused_scene）",
+      "disposition": "resolved_locally"
+    },
+    {
+      "defect_id": "DEF-VID-008",
+      "severity": "P2",
+      "summary": "黑帧未经检查即接受入库（REQ-053）",
+      "discovery": "v1.4.0 升级开发自审",
+      "retest": "tests/unit/test_video_media.py（test_extract_frames_rejects_black_frame_with_shifted_candidate）",
+      "disposition": "resolved_locally"
+    },
+    {
+      "defect_id": "DEF-TAX-001",
+      "severity": "P2",
+      "summary": "固定分类单清单混合领域与体裁两个维度（REQ-050）",
+      "discovery": "v1.4.0 升级开发自审",
+      "retest": "tests/unit/test_taxonomy.py（test_taxonomy_endpoint_is_single_source_of_truth、test_sqlite_v9_migration_splits_categories）",
+      "disposition": "resolved_locally"
+    },
+    {
+      "defect_id": "DEF-SEARCH-003",
+      "severity": "P2",
+      "summary": "英文分类 token 进入全文语料：中文标签不可搜且制造噪声命中（REQ-024）",
+      "discovery": "v1.4.0 升级开发自审",
+      "retest": "tests/unit/test_taxonomy.py（test_search_excludes_classification_tokens_from_fulltext）",
+      "disposition": "resolved_locally"
+    },
+    {
+      "defect_id": "DEF-SEARCH-004",
+      "severity": "P3",
+      "summary": "分类过滤仅支持单值（REQ-024 领域多值 OR 与 _none 哨兵）",
+      "discovery": "v1.4.0 升级开发自审",
+      "retest": "tests/unit/test_taxonomy.py（test_search_domain_and_genre_filters）",
+      "disposition": "resolved_locally"
+    },
+    {
+      "defect_id": "DEF-TAX-002",
+      "severity": "P2",
+      "summary": "分类清单前后端各自硬编码且无兜底值（REQ-050 后端唯一下发）",
+      "discovery": "v1.4.0 升级开发自审",
+      "retest": "tests/unit/test_taxonomy.py（test_taxonomy_endpoint_is_single_source_of_truth）",
+      "disposition": "resolved_locally"
+    },
+    {
+      "defect_id": "DEF-IMG-001",
+      "severity": "P3",
+      "summary": "图片分析断路器沿用 video_* 设置项，无独立 image_* 键",
+      "discovery": "v1.4.0 升级开发自审",
+      "retest": "tests/unit/test_image_import.py::test_image_analyze_uses_independent_image_settings",
+      "disposition": "resolved_locally"
+    },
+    {
+      "defect_id": "DEF-TOPIC-001",
+      "severity": "P2",
+      "summary": "主题只能写入，无重命名/删除/成员管理与检索消费方（REQ-025）",
+      "discovery": "v1.4.0 升级开发自审",
+      "retest": "tests/unit/test_topics_relations.py（test_topic_rename_duplicate_delete_and_membership、test_topic_delete_removes_membership_rows、test_search_topic_id_filters_source_branch_only）",
+      "disposition": "resolved_locally"
+    },
+    {
+      "defect_id": "DEF-REL-001",
+      "severity": "P2",
+      "summary": "来源关系只能写入，无导航/删除/同作查重反馈（REQ-025）",
+      "discovery": "v1.4.0 升级开发自审",
+      "retest": "tests/unit/test_topics_relations.py（test_relation_delete_requires_source_involvement、test_same_work_candidates_detects_same_artifact、test_same_work_candidates_detects_normalized_title、test_same_work_candidates_excludes_declared_same_work）",
+      "disposition": "resolved_locally"
     }
   ]
 }

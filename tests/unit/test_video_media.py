@@ -15,7 +15,7 @@ from fastapi.testclient import TestClient
 
 from app.core.config import data_paths
 from app.domain.media import ExtractedVideoFrame, MediaProcessingLimits, VideoMetadata
-from app.adapters.media import LocalFfmpegMediaAnalyzer
+from app.adapters.media import LocalFfmpegMediaAnalyzer, plan_frame_times
 from app.main import create_app
 
 
@@ -88,7 +88,7 @@ def test_local_video_analysis_stream_and_disabled_ai(client_and_services) -> Non
     client, services = client_and_services
     uploaded = client.post(
         "/api/v1/videos/local",
-        data={"rights": "owned", "title": "本地视频", "categories": "[]", "tags": "[\"样本\"]"},
+        data={"rights": "owned", "title": "本地视频", "domains": "[]", "genres": "[]", "tags": "[\"样本\"]"},
         files={"file": ("sample.mp4", b"not-a-real-mp4", "video/mp4")},
     )
     assert uploaded.status_code == 201, uploaded.text
@@ -130,7 +130,7 @@ def test_local_video_upload_rejects_non_video_suffix(client_and_services) -> Non
     client, _ = client_and_services
     response = client.post(
         "/api/v1/videos/local",
-        data={"rights": "owned", "categories": "[]", "tags": "[]"},
+        data={"rights": "owned", "domains": "[]", "genres": "[]", "tags": "[]"},
         files={"file": ("sample.txt", b"not video", "text/plain")},
     )
 
@@ -141,7 +141,7 @@ def test_local_video_upload_rejects_non_video_suffix(client_and_services) -> Non
 def _analyzed_video(client, services) -> tuple[str, str, list[str]]:
     uploaded = client.post(
         "/api/v1/videos/local",
-        data={"rights": "owned", "title": "可移植视频", "categories": "[]", "tags": "[]"},
+        data={"rights": "owned", "title": "可移植视频", "domains": "[]", "genres": "[]", "tags": "[]"},
         files={"file": ("portable.mp4", b"portable-video", "video/mp4")},
     )
     assert uploaded.status_code == 201, uploaded.text
@@ -269,14 +269,45 @@ def test_video_export_reimport_preserves_analysis_frames_and_artifacts(client_an
     assert all(recipient.artifacts.verify(sha256) for sha256 in frame_hashes)
 
 
+def test_video_metadata_template_stays_out_of_fulltext_search(client_and_services) -> None:
+    # 视频容器元数据模板（ffmpeg-local）退出全文检索；表示本身仍可读
+    client, services = client_and_services
+    source_id, _, _ = _analyzed_video(client, services)
+
+    hits = client.get("/api/v1/search", params={"q": "h264"})
+    assert hits.status_code == 200, hits.text
+    assert source_id not in {item["id"] for item in hits.json()["items"]}
+    detail = client.get(f"/api/v1/videos/{source_id}")
+    assert detail.status_code == 200 and detail.json()["analysis"]["metadata"]["video_codec"] == "h264"
+
+
+def _write_jpeg(path: Path, shade: int = 200, size: tuple[int, int] = (320, 180)) -> None:
+    from PIL import Image
+
+    Image.new("L", size, shade).save(path, "JPEG")
+
+
+def _fake_run_writing_jpegs(shade: int = 200, black_slots: frozenset[str] = frozenset(), scene_output: bytes = b""):
+    def fake_run(cls, command, limits, cancelled, heartbeat, *, workspace=None, capture_stdout=False, capture_stderr=False):
+        if any("showinfo" in part for part in command):
+            return scene_output
+        destination = Path(command[-1])
+        time_value = command[command.index("-ss") + 1]
+        _write_jpeg(destination, shade=0 if time_value in black_slots else shade)
+        return b""
+
+    return classmethod(fake_run)
+
+
 def test_extract_frames_escapes_comma_in_scale_filter(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """ffmpeg filtergraph 中逗号是链分隔符：min(640,iw) 必须转义为 min(640\,iw)。"""
     captured: list[list[str]] = []
 
-    def fake_run(cls, command, limits, cancelled, heartbeat, *, workspace=None, capture_stdout=False):
+    def fake_run(cls, command, limits, cancelled, heartbeat, *, workspace=None, capture_stdout=False, capture_stderr=False):
         captured.append(list(command))
-        destination = Path(command[-1])
-        destination.write_bytes(b"fake-jpeg")
+        if any("showinfo" in part for part in command):
+            return b""
+        _write_jpeg(Path(command[-1]))
         return b""
 
     monkeypatch.setattr(LocalFfmpegMediaAnalyzer, "_run", classmethod(fake_run))
@@ -290,9 +321,88 @@ def test_extract_frames_escapes_comma_in_scale_filter(monkeypatch: pytest.Monkey
         cancelled=lambda: False, heartbeat=lambda: None,
     )
     assert captured
-    for command in captured:
+    frame_commands = [command for command in captured if not any("showinfo" in part for part in command)]
+    assert frame_commands
+    for command in frame_commands:
         assert "-vf" in command
         assert command[command.index("-vf") + 1] == "scale=min(640\,iw):-2"
+
+
+def test_extract_frames_fills_dimensions_and_scene_reasons(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """抽帧后必须用 Pillow 回填真实宽高；命中场景切换点的帧标记为 scene。"""
+    scene_output = (
+        b"[Parsed_showinfo_1 @ 0] n:1 pts:5500 pts_time:5.5\n"
+        b"[Parsed_showinfo_1 @ 0] n:2 pts:0 pts_time:0\n"
+        b"[Parsed_showinfo_1 @ 0] n:3 pts:20000 pts_time:20\n"
+    )
+    monkeypatch.setattr(LocalFfmpegMediaAnalyzer, "_run", _fake_run_writing_jpegs(scene_output=scene_output))
+    analyzer = LocalFfmpegMediaAnalyzer()
+    metadata = VideoMetadata("mov,mp4,m4a,3gp,3g2,mj2", 10_000, 1280, 720, "h264", "aac")
+    frames = analyzer.extract_frames(
+        tmp_path / "artifact.mp4", metadata, tmp_path / "frames", maximum_frames=12,
+        limits=MediaProcessingLimits(30.0, 1024 ** 3, 1024 ** 3),
+        cancelled=lambda: False, heartbeat=lambda: None,
+    )
+    assert [(frame.time_ms, frame.reason) for frame in frames] == [
+        (500, "even"), (5500, "scene"), (9500, "even"),
+    ]
+    assert all((frame.width, frame.height) == (320, 180) for frame in frames)
+
+
+def test_extract_frames_rejects_black_frame_with_shifted_candidate(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """黑帧槽位依次尝试平移候选；首个非黑候选成为最终帧时间点。"""
+    monkeypatch.setattr(
+        LocalFfmpegMediaAnalyzer, "_run", _fake_run_writing_jpegs(black_slots=frozenset({"0.500"}))
+    )
+    analyzer = LocalFfmpegMediaAnalyzer()
+    metadata = VideoMetadata("mov,mp4,m4a,3gp,3g2,mj2", 10_000, 1280, 720, "h264", "aac")
+    frames = analyzer.extract_frames(
+        tmp_path / "artifact.mp4", metadata, tmp_path / "frames", maximum_frames=12,
+        limits=MediaProcessingLimits(30.0, 1024 ** 3, 1024 ** 3),
+        cancelled=lambda: False, heartbeat=lambda: None,
+    )
+    assert [frame.time_ms for frame in frames] == [1500, 5000, 9500]
+
+
+@pytest.mark.parametrize(
+    "duration_ms, maximum_frames, expected",
+    [
+        # 短视频至少 3 帧，锚定约 5%/50%/95%。
+        (60_000, 12, [(3_000, "even"), (30_000, "even"), (57_000, "even")]),
+        # maximum_frames 不足时帧数随之收缩。
+        (60_000, 2, [(3_000, "even"), (57_000, "even")]),
+        # 120 秒边界：恰好 120s 进入长视频密度规则，单帧锚定中点。
+        (120_000, 12, [(60_000, "even")]),
+        # 长视频按 ceil(时长/120s) 抽样，首尾锚定 5%/95%。
+        (360_000, 12, [(18_000, "even"), (180_000, "even"), (342_000, "even")]),
+    ],
+)
+def test_plan_frame_times_boundaries(duration_ms: int, maximum_frames: int, expected: list[tuple[int, str]]) -> None:
+    assert plan_frame_times(duration_ms, maximum_frames, []) == expected
+
+
+def test_plan_frame_times_short_video_edge_and_cap() -> None:
+    assert len(plan_frame_times(119_999, 12, [])) == 3
+    # 一小时视频目标 30 帧，被 maximum_frames 封顶。
+    assert len(plan_frame_times(3_600_000, 12, [])) == 12
+    assert plan_frame_times(0, 12, []) == []
+
+
+def test_plan_frame_times_snaps_nearest_unused_scene() -> None:
+    planned = plan_frame_times(360_000, 12, [170_000, 175_000])
+    assert (175_000, "scene") in planned
+    assert (18_000, "even") in planned
+    assert (342_000, "even") in planned
+    # 每个场景点只吸附一次。
+    assert sum(1 for _, reason in planned if reason == "scene") == 1
+
+
+def test_plan_frame_times_scene_tolerance_and_dedupe() -> None:
+    # 单帧槽位容差为时长的 5%：超出容差的场景点不吸附。
+    assert plan_frame_times(120_000, 12, [10_000]) == [(60_000, "even")]
+    assert plan_frame_times(120_000, 12, [62_000]) == [(62_000, "scene")]
+    # 相距不足 1 秒的时间点去重。
+    assert plan_frame_times(200_000, 12, [99_500, 100_400]) == [(99_500, "scene")]
 
 
 def _recently_exited_pid() -> int:
@@ -327,3 +437,133 @@ def test_video_time_range_locator_validation() -> None:
     for bad in ("0", 1.5, True):
         with pytest.raises(ValueError):
             video_time_range_locator(bad, 10)  # type: ignore[arg-type]
+
+
+def test_video_detail_gates_analysis_on_completeness(client_and_services) -> None:
+    client, services = client_and_services
+    source_id, _, _ = _analyzed_video(client, services)
+    detail = services.videos.detail(source_id)
+    assert detail is not None and detail["analysis"] is not None
+    assert detail["current_analysis_id"] == detail["analysis"]["id"]
+    assert [entry["id"] for entry in detail["analyses"]] == [detail["analysis"]["id"]]
+    assert detail["analyses"][0]["frame_count"] == 2
+
+    services.repository.set_version_completeness(detail["version"]["id"], "pending")
+    gated = services.videos.detail(source_id)
+
+    assert gated is not None
+    assert gated["analysis"] is None
+    assert gated["current_analysis_id"] is None
+    assert len(gated["analyses"]) == 1
+
+
+def test_video_detail_lists_multiple_analyses_with_current_marker(client_and_services) -> None:
+    client, services = client_and_services
+    source_id, _, _ = _analyzed_video(client, services)
+    detail = services.videos.detail(source_id)
+    assert detail is not None and detail["analysis"] is not None
+    first_id = detail["analysis"]["id"]
+    with services.repository.connection() as connection:
+        byte_sizes = {
+            row["sha256"]: row["byte_size"]
+            for row in connection.execute("SELECT sha256, byte_size FROM artifacts")
+        }
+    frames = [
+        {
+            "artifact_sha256": frame["artifact_sha256"],
+            "byte_size": byte_sizes[frame["artifact_sha256"]],
+            "ordinal": frame["ordinal"],
+            "time_ms": frame["time_ms"],
+            "width": frame["width"],
+            "height": frame["height"],
+            "reason": "scene",
+        }
+        for frame in detail["analysis"]["frames"]
+    ]
+    second = services.repository.persist_video_analysis(
+        version_id=detail["version"]["id"],
+        analyzer_name="ffmpeg-local",
+        config_hash="0" * 64,
+        metadata=detail["analysis"]["metadata"],
+        frames=frames,
+    )
+
+    listed = services.videos.detail(source_id)
+
+    assert listed is not None
+    assert [entry["id"] for entry in listed["analyses"]] == [second["analysis"]["id"], first_id]
+    assert listed["analyses"][0]["frame_count"] == 2
+    assert listed["current_analysis_id"] == second["analysis"]["id"]
+    assert listed["analysis"]["id"] == second["analysis"]["id"]
+    assert all(frame["reason"] == "scene" for frame in listed["analysis"]["frames"])
+
+
+def test_migration_v8_adds_reason_column_to_existing_database(tmp_path: Path) -> None:
+    """v7 状态的老库 initialize 后必须补出 reason 列并回填 'even'。"""
+    import sqlite3
+
+    from app.adapters.sqlite import SqliteRepository
+
+    database = tmp_path / "knowledge.db"
+    connection = sqlite3.connect(database)
+    connection.executescript(
+        "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);"
+        "CREATE TABLE video_frames ("
+        "id TEXT PRIMARY KEY, video_analysis_id TEXT NOT NULL, artifact_sha256 TEXT NOT NULL, "
+        "ordinal INTEGER NOT NULL, time_ms INTEGER NOT NULL, width INTEGER, height INTEGER, "
+        "created_at TEXT NOT NULL, UNIQUE(video_analysis_id, ordinal));"
+        + "".join(
+            f"INSERT INTO schema_migrations(version, applied_at) VALUES({version}, '2026-08-01T00:00:00+00:00');"
+            for version in range(1, 8)
+        )
+        + "INSERT INTO video_frames VALUES('frame-1', 'analysis-1', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 0, 3000, 320, 180, '2026-08-01T00:00:00+00:00');"
+    )
+    connection.commit()
+    connection.close()
+
+    SqliteRepository(database).initialize()
+
+    verify = sqlite3.connect(database)
+    columns = {row[1] for row in verify.execute("PRAGMA table_info(video_frames)")}
+    reason = verify.execute("SELECT reason FROM video_frames WHERE id='frame-1'").fetchone()
+    migrated = verify.execute("SELECT version FROM schema_migrations WHERE version=8").fetchone()
+    verify.close()
+    assert "reason" in columns
+    assert reason == ("even",)
+    assert migrated is not None
+
+
+def test_video_export_reimport_defaults_reason_for_pre_v7_archives(client_and_services, runtime_root: Path) -> None:
+    """schema 6 归档的关键帧没有 reason 列：还原时必须回填默认 'even'。"""
+    client, services = client_and_services
+    source_id, _, _ = _analyzed_video(client, services)
+    exported = services.transfers.create_export(True)
+    archive_path = Path(exported["archive_path"])
+    with ZipFile(archive_path) as archive:
+        members = {entry.filename: archive.read(entry.filename) for entry in archive.infolist()}
+    payload = json.loads(members["records.json"])
+    payload["schema_version"] = 6
+    for frame in payload["records"]["video_frames"]:
+        del frame["reason"]
+    members["records.json"] = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    manifest = json.loads(members.pop("manifest.json"))
+    manifest["schema_version"] = 6
+    for entry in manifest["entries"]:
+        if entry["path"] == "records.json":
+            entry["sha256"] = hashlib.sha256(members["records.json"]).hexdigest()
+            entry["byte_size"] = len(members["records.json"])
+            break
+    legacy = archive_path.with_name("legacy-v6.zip")
+    with ZipFile(legacy, "w") as archive:
+        for name, content in members.items():
+            archive.writestr(name, content)
+        archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False))
+    recipient = create_app(runtime_root / "recipient-v6", acquire_lock=False).state.services
+
+    result = recipient.transfers.reimport(str(legacy))
+
+    assert result["imported"] is True
+    imported = recipient.videos.detail(source_id)
+    assert imported is not None and imported["analysis"] is not None
+    assert imported["analysis"]["frames"]
+    assert all(frame["reason"] == "even" for frame in imported["analysis"]["frames"])

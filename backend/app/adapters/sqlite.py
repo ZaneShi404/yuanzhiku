@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Any, Iterator
 from urllib.parse import urlsplit, urlunsplit
 
+from app.domain.models import split_legacy_categories
+
 
 def now() -> str:
     return datetime.now(UTC).isoformat()
@@ -41,8 +43,8 @@ CREATE TABLE IF NOT EXISTS artifacts (
 );
 CREATE TABLE IF NOT EXISTS sources (
     id TEXT PRIMARY KEY, source_type TEXT NOT NULL, title TEXT NOT NULL, author TEXT,
-    language TEXT NOT NULL, notes TEXT, source_date TEXT, rights TEXT, categories_json TEXT NOT NULL,
-    tags_json TEXT NOT NULL, processing_state TEXT NOT NULL, imported_at TEXT NOT NULL,
+    language TEXT NOT NULL, notes TEXT, source_date TEXT, rights TEXT, domains_json TEXT NOT NULL,
+    genres_json TEXT NOT NULL, tags_json TEXT NOT NULL, processing_state TEXT NOT NULL, imported_at TEXT NOT NULL,
     updated_at TEXT NOT NULL, deleted_at TEXT
 );
 CREATE TABLE IF NOT EXISTS source_metadata_revisions (
@@ -65,7 +67,7 @@ CREATE INDEX IF NOT EXISTS idx_video_analyses_version ON video_analyses(content_
 CREATE TABLE IF NOT EXISTS video_frames (
     id TEXT PRIMARY KEY, video_analysis_id TEXT NOT NULL REFERENCES video_analyses(id),
     artifact_sha256 TEXT NOT NULL REFERENCES artifacts(sha256), ordinal INTEGER NOT NULL, time_ms INTEGER NOT NULL,
-    width INTEGER, height INTEGER, created_at TEXT NOT NULL, UNIQUE(video_analysis_id, ordinal)
+    width INTEGER, height INTEGER, reason TEXT NOT NULL DEFAULT 'even', created_at TEXT NOT NULL, UNIQUE(video_analysis_id, ordinal)
 );
 CREATE INDEX IF NOT EXISTS idx_video_frames_analysis ON video_frames(video_analysis_id, ordinal);
 CREATE TABLE IF NOT EXISTS source_relations (
@@ -151,11 +153,11 @@ BACKUP_TABLES = (
 BACKUP_TABLE_COLUMNS = {
     "settings": ("key", "value", "updated_at"),
     "artifacts": ("sha256", "byte_size", "stored_at"),
-    "sources": ("id", "source_type", "title", "author", "language", "notes", "source_date", "rights", "categories_json", "tags_json", "processing_state", "imported_at", "updated_at", "deleted_at"),
+    "sources": ("id", "source_type", "title", "author", "language", "notes", "source_date", "rights", "domains_json", "genres_json", "tags_json", "processing_state", "imported_at", "updated_at", "deleted_at"),
     "source_metadata_revisions": ("id", "source_id", "ordinal", "snapshot_json", "created_at"),
     "content_versions": ("id", "source_id", "artifact_sha256", "ordinal", "original_name", "media_type", "completeness", "created_at"),
     "video_analyses": ("id", "content_version_id", "analyzer_name", "config_hash", "metadata_json", "created_at"),
-    "video_frames": ("id", "video_analysis_id", "artifact_sha256", "ordinal", "time_ms", "width", "height", "created_at"),
+    "video_frames": ("id", "video_analysis_id", "artifact_sha256", "ordinal", "time_ms", "width", "height", "reason", "created_at"),
     "source_relations": ("id", "source_id", "related_source_id", "relation_type", "created_at"),
     "representations": ("id", "content_version_id", "kind", "parser_name", "config_hash", "parent_representation_id", "text_content", "created_at"),
     "search_chunks": ("id", "source_id", "content_version_id", "representation_id", "ordinal", "text_content", "text_hash", "created_at"),
@@ -562,6 +564,45 @@ class SqliteRepository:
                 connection.execute(
                     "INSERT INTO schema_migrations(version, applied_at) VALUES(7, ?)", (now(),)
                 )
+            migration_versions = {
+                row["version"] for row in connection.execute("SELECT version FROM schema_migrations")
+            }
+            if 8 not in migration_versions:
+                # 关键帧抽样来源（场景切换/等间隔）：老行回填默认 'even'。
+                frame_columns = {row["name"] for row in connection.execute("PRAGMA table_info(video_frames)")}
+                if "reason" not in frame_columns:
+                    connection.execute("ALTER TABLE video_frames ADD COLUMN reason TEXT NOT NULL DEFAULT 'even'")
+                connection.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES(8, ?)", (now(),)
+                )
+            migration_versions = {
+                row["version"] for row in connection.execute("SELECT version FROM schema_migrations")
+            }
+            if 9 not in migration_versions:
+                # 分类体系重构：固定分类拆分为 领域（多选）× 体裁（单选）；旧值按映射迁移
+                # （多体裁全部保留，≤1 规则不适用于迁移），未知值忽略。
+                source_columns = {row["name"] for row in connection.execute("PRAGMA table_info(sources)")}
+                if "domains_json" not in source_columns:
+                    connection.execute("ALTER TABLE sources ADD COLUMN domains_json TEXT NOT NULL DEFAULT '[]'")
+                if "genres_json" not in source_columns:
+                    connection.execute("ALTER TABLE sources ADD COLUMN genres_json TEXT NOT NULL DEFAULT '[]'")
+                if "categories_json" in source_columns:
+                    for source in connection.execute("SELECT id, categories_json FROM sources").fetchall():
+                        try:
+                            legacy = json.loads(source["categories_json"])
+                        except (TypeError, json.JSONDecodeError):
+                            legacy = []
+                        domains, genres = split_legacy_categories(
+                            [item for item in legacy if isinstance(item, str)] if isinstance(legacy, list) else []
+                        )
+                        connection.execute(
+                            "UPDATE sources SET domains_json=?, genres_json=? WHERE id=?",
+                            (json.dumps(domains), json.dumps(genres), source["id"]),
+                        )
+                    connection.execute("ALTER TABLE sources DROP COLUMN categories_json")
+                connection.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES(9, ?)", (now(),)
+                )
             defaults = {
                 "parser_timeout_seconds": "86400",
                 "parser_no_progress_seconds": "86400",
@@ -571,11 +612,22 @@ class SqliteRepository:
                 "video_memory_limit_mb": "2048",
                 "video_disk_limit_mb": "1024",
                 "video_max_frames": "12",
+                "image_timeout_seconds": "3600",
+                "image_memory_limit_mb": "2048",
+                "image_disk_limit_mb": "1024",
                 "job_lease_seconds": "300",
                 "max_retry_attempts": "2",
                 "download_timeout_seconds": "3600",
                 "download_no_progress_seconds": "10",
                 "download_disk_limit_mb": "2048",
+                "ai_transcribe_provider": "off",
+                "ai_transcribe_base_url": "",
+                "ai_transcribe_model": "whisper-1",
+                "ai_understand_provider": "off",
+                "ai_understand_base_url": "",
+                "ai_chat_model": "qwen-plus",
+                "ai_vision_model": "",
+                "ai_timeout_seconds": "300",
                 "last_backup_date": "",
                 "last_integrity_sample_date": "",
             }
@@ -630,7 +682,7 @@ class SqliteRepository:
 
     @staticmethod
     def _metadata_snapshot(row: sqlite3.Row) -> dict[str, Any]:
-        fields = ("title", "author", "language", "notes", "source_date", "rights", "categories_json", "tags_json")
+        fields = ("title", "author", "language", "notes", "source_date", "rights", "domains_json", "genres_json", "tags_json")
         return {field: row[field] for field in fields}
 
     def _record_metadata_revision(self, connection: sqlite3.Connection, source_id: str, stamp: str) -> None:
@@ -657,7 +709,7 @@ class SqliteRepository:
     def create_source_with_version(
         self,
         *, source_type: str, title: str, author: str | None, language: str, notes: str | None,
-        rights: str, categories: list[str], tags: list[str], artifact_sha256: str, original_name: str,
+        rights: str, domains: list[str], genres: list[str], tags: list[str], artifact_sha256: str, original_name: str,
         media_type: str | None, byte_size: int, source_date: str | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         source_id = identifier()
@@ -669,9 +721,9 @@ class SqliteRepository:
                 (artifact_sha256, byte_size, stamp),
             )
             connection.execute(
-                """INSERT INTO sources(id,source_type,title,author,language,notes,source_date,rights,categories_json,tags_json,processing_state,imported_at,updated_at,deleted_at)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)""",
-                (source_id, source_type, title, author, language, notes, source_date, rights, json.dumps(categories), json.dumps(tags), "queued", stamp, stamp),
+                """INSERT INTO sources(id,source_type,title,author,language,notes,source_date,rights,domains_json,genres_json,tags_json,processing_state,imported_at,updated_at,deleted_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)""",
+                (source_id, source_type, title, author, language, notes, source_date, rights, json.dumps(domains), json.dumps(genres), json.dumps(tags), "queued", stamp, stamp),
             )
             connection.execute(
                 """INSERT INTO content_versions(id,source_id,artifact_sha256,ordinal,original_name,media_type,completeness,created_at)
@@ -684,7 +736,7 @@ class SqliteRepository:
     def create_ingest(
         self,
         *, source_type: str, title: str, author: str | None, language: str, notes: str | None,
-        rights: str, categories: list[str], tags: list[str], artifact_sha256: str, original_name: str,
+        rights: str, domains: list[str], genres: list[str], tags: list[str], artifact_sha256: str, original_name: str,
         media_type: str | None, byte_size: int, job_payload: dict[str, Any], priority: int,
         audit_event: str, source_date: str | None = None, job_kind: str = "parse",
         download_provenance: dict[str, Any] | None = None,
@@ -708,9 +760,9 @@ class SqliteRepository:
                 (artifact_sha256, byte_size, stamp),
             )
             connection.execute(
-                """INSERT INTO sources(id,source_type,title,author,language,notes,source_date,rights,categories_json,tags_json,processing_state,imported_at,updated_at,deleted_at)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)""",
-                (source_id, source_type, title, author, language, notes, source_date, rights, json.dumps(categories), json.dumps(tags), "queued", stamp, stamp),
+                """INSERT INTO sources(id,source_type,title,author,language,notes,source_date,rights,domains_json,genres_json,tags_json,processing_state,imported_at,updated_at,deleted_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)""",
+                (source_id, source_type, title, author, language, notes, source_date, rights, json.dumps(domains), json.dumps(genres), json.dumps(tags), "queued", stamp, stamp),
             )
             connection.execute(
                 """INSERT INTO content_versions(id,source_id,artifact_sha256,ordinal,original_name,media_type,completeness,created_at)
@@ -792,14 +844,17 @@ class SqliteRepository:
                 ).fetchone())
                 if existing is None:
                     connection.execute(
-                        "INSERT INTO video_frames(id,video_analysis_id,artifact_sha256,ordinal,time_ms,width,height,created_at) "
-                        "VALUES(?,?,?,?,?,?,?,?)",
+                        "INSERT INTO video_frames(id,video_analysis_id,artifact_sha256,ordinal,time_ms,width,height,reason,created_at) "
+                        "VALUES(?,?,?,?,?,?,?,?,?)",
                         (
                             identifier(), analysis["id"], frame["artifact_sha256"], frame["ordinal"],
-                            frame["time_ms"], frame.get("width"), frame.get("height"), now(),
+                            frame["time_ms"], frame.get("width"), frame.get("height"),
+                            frame.get("reason") or "even", now(),
                         ),
                     )
                 elif any(existing[field] != frame.get(field) for field in ("artifact_sha256", "ordinal", "time_ms", "width", "height")):
+                    raise ValueError("同一视频分析身份的关键帧不一致")
+                elif existing["reason"] != (frame.get("reason") or "even"):
                     raise ValueError("同一视频分析身份的关键帧不一致")
             actual = self._rows(connection.execute(
                 "SELECT * FROM video_frames WHERE video_analysis_id=? ORDER BY ordinal", (analysis["id"],)
@@ -818,6 +873,17 @@ class SqliteRepository:
                     "SELECT * FROM video_frames WHERE video_analysis_id=? ORDER BY ordinal", (analysis["id"],)
                 ).fetchall())
             return analysis
+
+    def list_video_analyses(self, version_id: str) -> list[dict[str, Any]]:
+        with self.connection() as connection:
+            analyses = self._rows(connection.execute(
+                "SELECT * FROM video_analyses WHERE content_version_id=? ORDER BY created_at DESC", (version_id,)
+            ).fetchall())
+            for analysis in analyses:
+                analysis["frames"] = self._rows(connection.execute(
+                    "SELECT * FROM video_frames WHERE video_analysis_id=? ORDER BY ordinal", (analysis["id"],)
+                ).fetchall())
+            return analyses
 
     def list_video_frames(self, video_analysis_id: str) -> list[dict[str, Any]]:
         with self.connection() as connection:
@@ -853,7 +919,7 @@ class SqliteRepository:
             return self._rows(connection.execute("SELECT * FROM content_versions WHERE source_id=? ORDER BY ordinal DESC", (source_id,)).fetchall())
 
     def update_source_metadata(self, source_id: str, values: dict[str, Any]) -> dict[str, Any] | None:
-        allowed = {"title", "author", "language", "notes", "source_date", "categories_json", "tags_json"}
+        allowed = {"title", "author", "language", "notes", "source_date", "domains_json", "genres_json", "tags_json"}
         fields = [(key, value) for key, value in values.items() if key in allowed]
         if not fields:
             return self.get_source(source_id)
@@ -891,6 +957,10 @@ class SqliteRepository:
     def relations_for_source(self, source_id: str) -> list[dict[str, Any]]:
         with self.connection() as connection:
             return self._rows(connection.execute("SELECT * FROM source_relations WHERE source_id=? OR related_source_id=?", (source_id, source_id)).fetchall())
+
+    def delete_relation(self, relation_id: str) -> bool:
+        with self.connection() as connection:
+            return bool(connection.execute("DELETE FROM source_relations WHERE id=?", (relation_id,)).rowcount)
 
     def update_processing(self, source_id: str, state: str) -> None:
         with self.connection() as connection:
@@ -1496,6 +1566,58 @@ class SqliteRepository:
                 return False
             connection.execute("INSERT OR IGNORE INTO topic_sources(topic_id,source_id) VALUES(?,?)", (topic_id, source_id))
             return True
+
+    def rename_topic(self, topic_id: str, name: str) -> dict[str, Any] | None:
+        with self.connection() as connection:
+            updated = connection.execute("UPDATE topics SET name=? WHERE id=?", (name, topic_id)).rowcount
+            if not updated:
+                return None
+            return self._row(connection.execute("SELECT * FROM topics WHERE id=?", (topic_id,)).fetchone())
+
+    def remove_source_from_topic(self, topic_id: str, source_id: str) -> bool:
+        with self.connection() as connection:
+            return bool(connection.execute("DELETE FROM topic_sources WHERE topic_id=? AND source_id=?", (topic_id, source_id)).rowcount)
+
+    def delete_topic(self, topic_id: str) -> bool:
+        with self.connection() as connection:
+            connection.execute("DELETE FROM topic_sources WHERE topic_id=?", (topic_id,))
+            return bool(connection.execute("DELETE FROM topics WHERE id=?", (topic_id,)).rowcount)
+
+    def source_ids_for_topic(self, topic_id: str) -> set[str]:
+        with self.connection() as connection:
+            return {row["source_id"] for row in connection.execute("SELECT source_id FROM topic_sources WHERE topic_id=?", (topic_id,))}
+
+    def same_work_candidates(self, source_id: str) -> list[dict[str, Any]]:
+        """未声明为同一作品的潜在重复来源：同一 artifact 内容或规范化标题相同。"""
+        with self.connection() as connection:
+            source = connection.execute("SELECT id,title FROM sources WHERE id=? AND deleted_at IS NULL", (source_id,)).fetchone()
+            if source is None:
+                return []
+            declared = {
+                row["related_source_id"] if row["source_id"] == source_id else row["source_id"]
+                for row in connection.execute(
+                    "SELECT source_id,related_source_id FROM source_relations WHERE relation_type='user_declared_same_work' AND (source_id=? OR related_source_id=?)",
+                    (source_id, source_id),
+                )
+            }
+            candidates: dict[str, dict[str, Any]] = {}
+            for row in connection.execute(
+                """SELECT DISTINCT s.id, s.title FROM content_versions cv
+                   JOIN content_versions other ON other.artifact_sha256=cv.artifact_sha256 AND other.source_id!=cv.source_id
+                   JOIN sources s ON s.id=other.source_id
+                   WHERE cv.source_id=? AND s.deleted_at IS NULL""",
+                (source_id,),
+            ).fetchall():
+                if row["id"] not in declared:
+                    candidates[row["id"]] = {"id": row["id"], "title": row["title"], "reason": "same_artifact"}
+            normalized = " ".join(source["title"].split()).casefold()
+            if normalized:
+                for row in connection.execute("SELECT id,title FROM sources WHERE id!=? AND deleted_at IS NULL", (source_id,)).fetchall():
+                    if row["id"] in declared or row["id"] in candidates:
+                        continue
+                    if " ".join(row["title"].split()).casefold() == normalized:
+                        candidates[row["id"]] = {"id": row["id"], "title": row["title"], "reason": "same_title"}
+            return sorted(candidates.values(), key=lambda item: (item["title"].casefold(), item["id"]))
 
     def soft_delete_source(self, source_id: str) -> dict[str, Any] | None:
         with self.connection() as connection:

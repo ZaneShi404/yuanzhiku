@@ -10,7 +10,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Annotated, Any
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
@@ -27,12 +27,15 @@ from app.adapters.downloader import (
     YtDlpDownloader,
     host_matches_registered_domain,
 )
-from app.adapters.media import LocalFfmpegMediaAnalyzer, UnconfiguredMediaAi
+from app.adapters.media import LocalFfmpegMediaAnalyzer
+from app.adapters.media_ai import ConfiguredMediaAi
 from app.core.config import DataPaths, InstanceLock, data_paths, database_backend, database_url
 from app.core.operations import OperationalLog
 from app.ports.media import DownloadInputInvalid, DownloadUnavailable
 from app.ports.repository import RepositoryPort
 from app.domain.models import (
+    AiConnectionTestRequest,
+    AiSettingsUpdate,
     DownloadLinkRequest,
     DouyinCardCreate,
     ExportCreate,
@@ -48,12 +51,19 @@ from app.domain.models import (
     SettingsUpdate,
     SourceMetadataUpdate,
     TopicCreate,
+    TopicRename,
     VerifyRequest,
+    VideoSummarizeRequest,
+    TAXONOMY_DOMAIN_VALUES,
+    TAXONOMY_DOMAINS,
+    TAXONOMY_GENRE_VALUES,
+    TAXONOMY_GENRES,
     sanitize_download_url,
     validate_download_url,
 )
 from app.services.documents import DocumentService
 from app.services.external_cards import ExternalCardService
+from app.services.ai_credentials import read_ai_credentials, write_ai_credentials
 from app.services.images import ImageService
 from app.services.imports import ImportService
 from app.services.jobs import JobService
@@ -87,7 +97,13 @@ class ApplicationServices:
         self.artifacts = ArtifactStore(paths)
         self.parser = LocalDocumentParser(paths.models, Path(__file__).resolve().parents[1] / "models.lock.json")
         self.media_analyzer = LocalFfmpegMediaAnalyzer()
-        self.media_ai = UnconfiguredMediaAi()
+        # 单例即可：适配器每次调用惰性读取设置与凭据，改配置即时生效；
+        # 双组全关时 capability().enabled=False，作业保持 blocked 语义。
+        self.media_ai = ConfiguredMediaAi(
+            settings_getter=self.repository.get_settings,
+            credentials_reader=lambda: read_ai_credentials(paths.ai_credentials_file),
+            staging_dir=paths.staging,
+        )
         self.downloader = YtDlpDownloader(cookie_resolver=paths.download_cookie_file)
         self.documents = DocumentService(self.repository)
         self.videos = VideoService(self.repository, self.artifacts, self.documents, self.media_analyzer)
@@ -105,6 +121,7 @@ class ApplicationServices:
             imports=self.imports,
             downloader=self.downloader,
             images=self.images,
+            media_ai=self.media_ai,
         )
         self.external_cards = ExternalCardService(self.repository)
         self.lifecycle = LifecycleService(self.repository, self.artifacts)
@@ -159,7 +176,8 @@ def _source_view(source: dict[str, Any] | None) -> dict[str, Any]:
     if source is None:
         raise HTTPException(status_code=404, detail="来源不存在")
     value = dict(source)
-    value["categories"] = json.loads(value.pop("categories_json"))
+    value["domains"] = json.loads(value.pop("domains_json"))
+    value["genres"] = json.loads(value.pop("genres_json"))
     value["tags"] = json.loads(value.pop("tags_json"))
     return value
 
@@ -177,6 +195,67 @@ def _evidence_view(evidence: dict[str, Any] | None) -> dict[str, Any]:
     value["locator"] = json.loads(value.pop("locator_json"))
     value["is_validated"] = bool(value["is_validated"])
     return value
+
+
+def _ai_key_hint(value: str | None) -> str | None:
+    """凭据提示只保留末四位；完整密钥绝不出现在任何响应里。"""
+    return f"…{value[-4:]}" if value else None
+
+
+def _ai_settings_view(services: "ApplicationServices") -> dict[str, Any]:
+    settings = services.repository.get_settings()
+    credentials = read_ai_credentials(services.paths.ai_credentials_file)
+    try:
+        timeout_seconds = int(settings.get("ai_timeout_seconds", "300"))
+    except (TypeError, ValueError):
+        timeout_seconds = 300
+    return {
+        "transcribe": {
+            "provider": settings.get("ai_transcribe_provider", "off"),
+            "base_url": settings.get("ai_transcribe_base_url", ""),
+            "model": settings.get("ai_transcribe_model", ""),
+            "has_key": bool(credentials.get("transcribe")),
+            "key_hint": _ai_key_hint(credentials.get("transcribe")),
+        },
+        "understand": {
+            "provider": settings.get("ai_understand_provider", "off"),
+            "base_url": settings.get("ai_understand_base_url", ""),
+            "chat_model": settings.get("ai_chat_model", ""),
+            "vision_model": settings.get("ai_vision_model", ""),
+            "has_key": bool(credentials.get("understand")),
+            "key_hint": _ai_key_hint(credentials.get("understand")),
+        },
+        "timeout_seconds": timeout_seconds,
+    }
+
+
+def _apply_ai_group(
+    group: Any,
+    prefix: str,
+    credential_group: str,
+    model_fields: dict[str, str],
+    settings: dict[str, str],
+    updates: dict[str, str],
+    credentials: dict[str, str],
+) -> bool:
+    """应用单个 AI 分组的非密钥字段与凭据变更；返回凭据是否被修改。"""
+    changed = False
+    if group.provider is not None:
+        updates[f"ai_{prefix}_provider"] = group.provider
+    if group.base_url is not None:
+        updates[f"ai_{prefix}_base_url"] = group.base_url
+    for field, setting_key in model_fields.items():
+        value = getattr(group, field)
+        if value is not None:
+            updates[setting_key] = value
+    effective_provider = group.provider if group.provider is not None else settings.get(f"ai_{prefix}_provider", "off")
+    if effective_provider == "off":
+        # 分组关闭即移除其凭据（off 即不再持有密钥）。
+        changed = credentials.pop(credential_group, None) is not None
+    elif group.api_key:
+        credentials[credential_group] = group.api_key
+        changed = True
+    return changed
 
 
 def create_app(root: str | Path | None = None, *, acquire_lock: bool = True) -> FastAPI:
@@ -357,6 +436,40 @@ def create_app(root: str | Path | None = None, *, acquire_lock: bool = True) -> 
     def put_settings(request: SettingsUpdate, svc: ApplicationServices = Depends(get_services)) -> dict[str, Any]:
         return svc.repository.update_settings(request.model_dump(exclude_none=True))
 
+    @app.get(f"{api}/settings/ai", tags=["settings"])
+    def get_ai_settings(svc: ApplicationServices = Depends(get_services)) -> dict[str, Any]:
+        return _ai_settings_view(svc)
+
+    @app.put(f"{api}/settings/ai", tags=["settings"])
+    def put_ai_settings(request: AiSettingsUpdate, svc: ApplicationServices = Depends(get_services)) -> dict[str, Any]:
+        settings = svc.repository.get_settings()
+        updates: dict[str, str] = {}
+        credentials = read_ai_credentials(svc.paths.ai_credentials_file)
+        credentials_changed = False
+        if request.transcribe is not None:
+            credentials_changed = _apply_ai_group(
+                request.transcribe, "transcribe", "transcribe",
+                {"model": "ai_transcribe_model"}, settings, updates, credentials,
+            ) or credentials_changed
+        if request.understand is not None:
+            credentials_changed = _apply_ai_group(
+                request.understand, "understand", "understand",
+                {"chat_model": "ai_chat_model", "vision_model": "ai_vision_model"}, settings, updates, credentials,
+            ) or credentials_changed
+        if request.timeout_seconds is not None:
+            updates["ai_timeout_seconds"] = str(request.timeout_seconds)
+        if updates:
+            svc.repository.update_settings(updates)
+        if credentials_changed:
+            write_ai_credentials(svc.paths.ai_credentials_file, credentials)
+        return _ai_settings_view(svc)
+
+    @app.post(f"{api}/settings/ai/test", tags=["settings"])
+    def test_ai_connection(request: AiConnectionTestRequest, svc: ApplicationServices = Depends(get_services)) -> dict[str, Any]:
+        # 轻量连通性检查：使用已保存的配置与凭据；失败消息已脱敏，不回显 URL/密钥/响应。
+        ok, message = svc.media_ai.test_connection(request.part)
+        return {"ok": True} if ok else {"ok": False, "message": message}
+
     @app.post(f"{api}/settings/download-cookies/{{platform}}", status_code=204, tags=["settings"])
     async def upload_download_cookie(
         platform: str,
@@ -414,20 +527,22 @@ def create_app(root: str | Path | None = None, *, acquire_lock: bool = True) -> 
         language: Annotated[str, Form()] = "zh",
         notes: Annotated[str | None, Form()] = None,
         source_date: Annotated[str | None, Form()] = None,
-        categories: Annotated[str, Form()] = "[]",
+        domains: Annotated[str, Form()] = "[]",
+        genres: Annotated[str, Form()] = "[]",
         tags: Annotated[str, Form()] = "[]",
         svc: ApplicationServices = Depends(get_services),
     ) -> dict[str, Any]:
         try:
-            category_values = json.loads(categories)
+            domain_values = json.loads(domains)
+            genre_values = json.loads(genres)
             tag_values = json.loads(tags)
-            if not isinstance(category_values, list) or not isinstance(tag_values, list):
-                raise ValueError("分类和标签必须是 JSON 数组")
+            if not isinstance(domain_values, list) or not isinstance(genre_values, list) or not isinstance(tag_values, list):
+                raise ValueError("领域、体裁和标签必须是 JSON 数组")
             from app.domain.models import PasteImportRequest
 
-            validated = PasteImportRequest(title=title or file.filename or "未命名文档", text="x", rights=rights, language=language, source_date=source_date, categories=category_values, tags=tag_values)
+            validated = PasteImportRequest(title=title or file.filename or "未命名文档", text="x", rights=rights, language=language, source_date=source_date, domains=domain_values, genres=genre_values, tags=tag_values)
             expected_bytes = file.size if isinstance(file.size, int) and file.size >= 0 else None
-            return svc.imports.file(file.file, file.filename or "upload.bin", file.content_type, validated.title, rights.value, author, language, notes, validated.categories, validated.tags, expected_bytes, validated.source_date.isoformat() if validated.source_date else None)
+            return svc.imports.file(file.file, file.filename or "upload.bin", file.content_type, validated.title, rights.value, author, language, notes, validated.domains, validated.genres, validated.tags, expected_bytes, validated.source_date.isoformat() if validated.source_date else None)
         except (ValueError, StorageLimitError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         finally:
@@ -442,26 +557,28 @@ def create_app(root: str | Path | None = None, *, acquire_lock: bool = True) -> 
         language: Annotated[str, Form()] = "zh",
         notes: Annotated[str | None, Form()] = None,
         source_date: Annotated[str | None, Form()] = None,
-        categories: Annotated[str, Form()] = "[]",
+        domains: Annotated[str, Form()] = "[]",
+        genres: Annotated[str, Form()] = "[]",
         tags: Annotated[str, Form()] = "[]",
         svc: ApplicationServices = Depends(get_services),
     ) -> dict[str, Any]:
         try:
-            category_values = json.loads(categories)
+            domain_values = json.loads(domains)
+            genre_values = json.loads(genres)
             tag_values = json.loads(tags)
-            if not isinstance(category_values, list) or not isinstance(tag_values, list):
-                raise ValueError("分类和标签必须是 JSON 数组")
+            if not isinstance(domain_values, list) or not isinstance(genre_values, list) or not isinstance(tag_values, list):
+                raise ValueError("领域、体裁和标签必须是 JSON 数组")
             from app.domain.models import PasteImportRequest
 
             validated = PasteImportRequest(
                 title=title or (Path(file.filename).stem if file.filename else "") or "未命名图片", text="x",
                 rights=rights, language=language,
-                source_date=source_date, categories=category_values, tags=tag_values,
+                source_date=source_date, domains=domain_values, genres=genre_values, tags=tag_values,
             )
             expected_bytes = file.size if isinstance(file.size, int) and file.size >= 0 else None
             return svc.imports.image(
                 file.file, file.filename or "upload.bin", validated.title, rights.value, author, language,
-                notes, validated.categories, validated.tags, expected_bytes,
+                notes, validated.domains, validated.genres, validated.tags, expected_bytes,
                 validated.source_date.isoformat() if validated.source_date else None,
             )
         except (ValueError, StorageLimitError) as exc:
@@ -514,25 +631,27 @@ def create_app(root: str | Path | None = None, *, acquire_lock: bool = True) -> 
         language: Annotated[str, Form()] = "zh",
         notes: Annotated[str | None, Form()] = None,
         source_date: Annotated[str | None, Form()] = None,
-        categories: Annotated[str, Form()] = "[]",
+        domains: Annotated[str, Form()] = "[]",
+        genres: Annotated[str, Form()] = "[]",
         tags: Annotated[str, Form()] = "[]",
         svc: ApplicationServices = Depends(get_services),
     ) -> dict[str, Any]:
         try:
-            category_values = json.loads(categories)
+            domain_values = json.loads(domains)
+            genre_values = json.loads(genres)
             tag_values = json.loads(tags)
-            if not isinstance(category_values, list) or not isinstance(tag_values, list):
-                raise ValueError("分类和标签必须是 JSON 数组")
+            if not isinstance(domain_values, list) or not isinstance(genre_values, list) or not isinstance(tag_values, list):
+                raise ValueError("领域、体裁和标签必须是 JSON 数组")
             from app.domain.models import PasteImportRequest
 
             validated = PasteImportRequest(
                 title=title or file.filename or "未命名视频", text="x", rights=rights, language=language,
-                source_date=source_date, categories=category_values, tags=tag_values,
+                source_date=source_date, domains=domain_values, genres=genre_values, tags=tag_values,
             )
             expected_bytes = file.size if isinstance(file.size, int) and file.size >= 0 else None
             return svc.imports.video(
                 file.file, file.filename or "upload.bin", validated.title, rights.value, author, language,
-                notes, validated.categories, validated.tags, expected_bytes,
+                notes, validated.domains, validated.genres, validated.tags, expected_bytes,
                 validated.source_date.isoformat() if validated.source_date else None,
             )
         except (ValueError, StorageLimitError) as exc:
@@ -576,7 +695,8 @@ def create_app(root: str | Path | None = None, *, acquire_lock: bool = True) -> 
                 "language": request.language,
                 "notes": request.notes,
                 "source_date": request.source_date.isoformat() if request.source_date else None,
-                "categories": request.categories,
+                "domains": request.domains,
+                "genres": request.genres,
                 "tags": request.tags,
             },
             priority=100,
@@ -652,14 +772,18 @@ def create_app(root: str | Path | None = None, *, acquire_lock: bool = True) -> 
         )
 
     @app.post(f"{api}/videos/{{source_id}}/summarize", status_code=201, tags=["videos"])
-    def queue_video_summary(source_id: str, svc: ApplicationServices = Depends(get_services)) -> dict[str, Any]:
+    def queue_video_summary(
+        source_id: str,
+        request: VideoSummarizeRequest | None = None,
+        svc: ApplicationServices = Depends(get_services),
+    ) -> dict[str, Any]:
         detail = svc.videos.detail(source_id)
         if detail is None:
             raise HTTPException(status_code=404, detail="视频来源不存在或尚不可用")
         version = detail["version"]
         return svc.repository.create_job(
             "video_summarize", source_id, version["id"], version["artifact_sha256"],
-            svc.media_ai.config_hash("summarize"), {}, priority=100,
+            svc.media_ai.config_hash("summarize"), {"force_tier2": bool(request and request.force_tier2)}, priority=100,
         )
 
     @app.get(f"{api}/videos/{{source_id}}/stream", tags=["videos"])
@@ -737,13 +861,16 @@ def create_app(root: str | Path | None = None, *, acquire_lock: bool = True) -> 
         source = _source_view(svc.repository.get_source(source_id))
         source["versions"] = svc.repository.versions_for_source(source_id)
         source["relations"] = svc.repository.relations_for_source(source_id)
+        source["same_work_candidates"] = svc.repository.same_work_candidates(source_id)
         return source
 
     @app.put(f"{api}/sources/{{source_id}}/metadata", tags=["sources"])
     def update_metadata(source_id: str, request: SourceMetadataUpdate, svc: ApplicationServices = Depends(get_services)) -> dict[str, Any]:
         values = request.model_dump(exclude_unset=True)
-        if "categories" in values:
-            values["categories_json"] = json.dumps(values.pop("categories"), ensure_ascii=False)
+        if "domains" in values:
+            values["domains_json"] = json.dumps(values.pop("domains"), ensure_ascii=False)
+        if "genres" in values:
+            values["genres_json"] = json.dumps(values.pop("genres"), ensure_ascii=False)
         if "tags" in values:
             values["tags_json"] = json.dumps(sorted(set(values.pop("tags"))), ensure_ascii=False)
         return _source_view(svc.repository.update_source_metadata(source_id, values))
@@ -775,6 +902,15 @@ def create_app(root: str | Path | None = None, *, acquire_lock: bool = True) -> 
             return svc.repository.add_relation(source_id, request.related_source_id, request.relation_type)
         except Exception as exc:
             raise HTTPException(status_code=409, detail="来源关系已存在或无效") from exc
+
+    @app.delete(f"{api}/sources/{{source_id}}/relations/{{relation_id}}", status_code=204, tags=["sources"])
+    def delete_relation(source_id: str, relation_id: str, svc: ApplicationServices = Depends(get_services)) -> Response:
+        # 关系必须涉及该来源（任一方向），否则按不存在处理。
+        relation = next((item for item in svc.repository.relations_for_source(source_id) if item["id"] == relation_id), None)
+        if relation is None:
+            raise HTTPException(status_code=404, detail="来源关系不存在")
+        svc.repository.delete_relation(relation_id)
+        return Response(status_code=204)
 
     @app.get(f"{api}/documents/{{version_id}}/representations", tags=["documents"])
     @app.get(f"{api}/docs/{{version_id}}/representations", tags=["documents"], include_in_schema=False)
@@ -847,20 +983,30 @@ def create_app(root: str | Path | None = None, *, acquire_lock: bool = True) -> 
     @app.get(f"{api}/search", tags=["search"])
     def search(
         q: str = "", include_historical: bool = False, include_incomplete: bool = False, source_type: str | None = None,
-        category: str | None = None, tag: str | None = None, author: str | None = None, language: str | None = None,
+        domains: Annotated[list[str] | None, Query()] = None, genre: str | None = None, tag: str | None = None, author: str | None = None,
+        language: str | None = None,
         processing_state: str | None = None, source_date_from: date | None = None, source_date_to: date | None = None,
-        imported_at_from: date | None = None, imported_at_to: date | None = None, sort: str = "relevance", svc: ApplicationServices = Depends(get_services),
+        imported_at_from: date | None = None, imported_at_to: date | None = None, topic_id: str | None = None,
+        sort: str = "relevance", svc: ApplicationServices = Depends(get_services),
     ) -> dict[str, Any]:
+        invalid_domains = sorted(set(domains or []) - set(TAXONOMY_DOMAIN_VALUES) - {"_none"})
+        if invalid_domains or (genre is not None and genre != "_none" and genre not in TAXONOMY_GENRE_VALUES):
+            raise HTTPException(status_code=422, detail={"code": "request_validation", "message": "请求字段无效"})
         try:
             items = svc.search.search(
                 q, include_historical=include_historical, include_incomplete=include_incomplete, source_type=source_type,
-                category=category, tag=tag, author=author, language=language, processing_state=processing_state,
+                domains=domains, genre=genre, tag=tag, author=author, language=language, processing_state=processing_state,
                 source_date_from=source_date_from, source_date_to=source_date_to, imported_at_from=imported_at_from,
-                imported_at_to=imported_at_to, sort=sort,
+                imported_at_to=imported_at_to, topic_id=topic_id, sort=sort,
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return {"mode": "短语、关键词、子串匹配；不提供语义检索", "sort": sort, "items": items}
+
+    @app.get(f"{api}/taxonomy", tags=["taxonomy"])
+    def taxonomy() -> dict[str, Any]:
+        # 分类体系（领域×体裁）的唯一来源；前端启动时拉取一次。
+        return {"domains": list(TAXONOMY_DOMAINS), "genres": list(TAXONOMY_GENRES)}
 
     @app.get(f"{api}/tags", tags=["taxonomy"])
     def tags(svc: ApplicationServices = Depends(get_services)) -> list[str]:
@@ -886,6 +1032,28 @@ def create_app(root: str | Path | None = None, *, acquire_lock: bool = True) -> 
         if not svc.repository.add_source_to_topic(topic_id, source_id):
             raise HTTPException(status_code=404, detail="主题或来源不存在")
         return {"topic_id": topic_id, "source_id": source_id}
+
+    @app.put(f"{api}/topics/{{topic_id}}", tags=["taxonomy"])
+    def rename_topic(topic_id: str, request: TopicRename, svc: ApplicationServices = Depends(get_services)) -> dict[str, Any]:
+        try:
+            topic = svc.repository.rename_topic(topic_id, request.name)
+        except Exception as exc:
+            raise HTTPException(status_code=409, detail="主题名称已存在") from exc
+        if topic is None:
+            raise HTTPException(status_code=404, detail="主题不存在")
+        return topic
+
+    @app.delete(f"{api}/topics/{{topic_id}}", status_code=204, tags=["taxonomy"])
+    def delete_topic(topic_id: str, svc: ApplicationServices = Depends(get_services)) -> Response:
+        if not svc.repository.delete_topic(topic_id):
+            raise HTTPException(status_code=404, detail="主题不存在")
+        return Response(status_code=204)
+
+    @app.delete(f"{api}/topics/{{topic_id}}/sources/{{source_id}}", status_code=204, tags=["taxonomy"])
+    def remove_topic_source(topic_id: str, source_id: str, svc: ApplicationServices = Depends(get_services)) -> Response:
+        if not svc.repository.remove_source_from_topic(topic_id, source_id):
+            raise HTTPException(status_code=404, detail="主题关联不存在")
+        return Response(status_code=204)
 
     @app.get(f"{api}/external/cards", tags=["external-cards"])
     def list_external_cards(svc: ApplicationServices = Depends(get_services)) -> list[dict[str, Any]]:

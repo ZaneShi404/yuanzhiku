@@ -26,10 +26,11 @@ from app.adapters.sqlite import (
 )
 from app.adapters.storage import ArtifactStore
 from app.core.config import DataPaths, database_backend
+from app.domain.models import split_legacy_categories
 from app.ports.repository import RepositoryPort
 
-ARCHIVE_SCHEMA_VERSION = 6
-SUPPORTED_ARCHIVE_SCHEMA_VERSIONS = frozenset({1, 2, 3, 4, 5, ARCHIVE_SCHEMA_VERSION})
+ARCHIVE_SCHEMA_VERSION = 8
+SUPPORTED_ARCHIVE_SCHEMA_VERSIONS = frozenset({1, 2, 3, 4, 5, 6, 7, ARCHIVE_SCHEMA_VERSION})
 BACKUP_CATALOG_STATES = frozenset({"succeeded", "pruning", "discarding"})
 SAFE_ARCHIVE_BASENAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,250}\.zip\Z")
 WINDOWS_RESERVED_BASENAMES = frozenset(
@@ -267,7 +268,7 @@ class TransferService:
                     "database_backend": self.repository.backend,
                     "created_at": stamp,
                     "entries": sorted(entries, key=lambda item: item["path"]),
-                    "exclusions": ["models", "staging", "log_bodies", "credentials", "cookies", "original_paths", "private_rights_notes", "state/download"],
+                    "exclusions": ["models", "staging", "log_bodies", "credentials", "cookies", "original_paths", "private_rights_notes", "state/download", "state/ai"],
                 }
                 manifest_path = temp / "manifest.json"
                 manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -516,8 +517,17 @@ class TransferService:
             legacy_evidence_columns = tuple(
                 column for column in expected_columns if column != "locator_hash"
             )
-            legacy_columns = tuple(column for column in expected_columns if column != "source_date")
-            legacy_appended_source_date_columns = legacy_columns + ("source_date",)
+            # v7 及更早归档的 sources 行携带 categories_json；v1 行可能缺 source_date。
+            legacy_taxonomy_source_columns = tuple(
+                "categories_json" if column == "domains_json" else column
+                for column in expected_columns
+                if column != "genres_json"
+            )
+            legacy_source_columns = tuple(column for column in legacy_taxonomy_source_columns if column != "source_date")
+            legacy_appended_source_date_columns = legacy_source_columns + ("source_date",)
+            # v1 归档尚无 source_date：其余列与当前形态一致时按缺省 None 补齐。
+            legacy_dateless_columns = tuple(column for column in expected_columns if column != "source_date")
+            legacy_appended_date_columns = legacy_dateless_columns + ("source_date",)
             legacy_job_columns = tuple(
                 column
                 for column in expected_columns
@@ -525,6 +535,9 @@ class TransferService:
             )
             legacy_attempt_columns = tuple(
                 column for column in expected_columns if column != "lease_token"
+            )
+            legacy_frame_columns = tuple(
+                column for column in expected_columns if column != "reason"
             )
             if not isinstance(rows, list):
                 raise ValueError("逻辑记录无效")
@@ -548,9 +561,32 @@ class TransferService:
                         "locator_json": locator_json,
                         "locator_hash": hashlib.sha256(locator_json.encode("utf-8")).hexdigest(),
                     })
-                elif schema_version == 1 and table == "sources" and columns in {legacy_columns, legacy_appended_source_date_columns}:
+                elif schema_version == 1 and table == "sources" and columns in {legacy_dateless_columns, legacy_appended_date_columns}:
                     normalized_rows.append({
                         column: row[column] if column in row else None
+                        for column in expected_columns
+                    })
+                elif (
+                    table == "sources"
+                    and schema_version in {1, 2, 3, 4, 5, 6, 7}
+                    and columns in {legacy_taxonomy_source_columns, legacy_source_columns, legacy_appended_source_date_columns}
+                ):
+                    # v7 及更早归档的固定分类列：按映射拆分为 领域/体裁（多体裁保留，未知值忽略）。
+                    try:
+                        legacy_categories = json.loads(row["categories_json"])
+                    except (TypeError, json.JSONDecodeError) as exc:
+                        raise ValueError("逻辑记录无效") from exc
+                    if not isinstance(legacy_categories, list):
+                        raise ValueError("逻辑记录无效")
+                    domains, genres = split_legacy_categories(
+                        [item for item in legacy_categories if isinstance(item, str)]
+                    )
+                    normalized_rows.append({
+                        column: (
+                            json.dumps(domains) if column == "domains_json"
+                            else json.dumps(genres) if column == "genres_json"
+                            else row[column] if column in row else None
+                        )
                         for column in expected_columns
                     })
                 elif schema_version in {1, 2} and table == "jobs" and columns == legacy_job_columns:
@@ -566,6 +602,12 @@ class TransferService:
                     normalized_rows.append({
                         column: row[column] if column in row else None
                         for column in expected_columns
+                    })
+                elif schema_version in {5, 6} and table == "video_frames" and columns == legacy_frame_columns:
+                    # v5/v6 归档的关键帧尚无抽样来源列：回填默认 'even'。
+                    normalized_rows.append({
+                        **{column: row[column] for column in legacy_frame_columns},
+                        "reason": "even",
                     })
                 else:
                     raise ValueError("逻辑记录无效")
@@ -646,6 +688,8 @@ class TransferService:
                 value = frame.get(dimension)
                 if value is not None and (not isinstance(value, int) or value <= 0):
                     raise ValueError("视频记录无效")
+            if frame.get("reason") not in {"scene", "even"}:
+                raise ValueError("视频记录无效")
             frame_ids.add(frame_id)
             frame_identities.add(identity)
 

@@ -46,10 +46,57 @@ class KnowledgeType(str, Enum):
     UNVERIFIED = "unverified"
 
 
-FIXED_CATEGORIES = (
-    "technical", "business", "education", "news", "interview", "podcast", "document"
+# 分类体系：领域（多选、可空）× 体裁（单选、可空），后端为唯一来源（GET /taxonomy 下发）。
+TAXONOMY_DOMAINS = (
+    {"value": "technical", "label": "技术"},
+    {"value": "business", "label": "商业"},
+    {"value": "education", "label": "教育"},
+    {"value": "news", "label": "资讯"},
+    {"value": "entertainment", "label": "娱乐"},
+    {"value": "life", "label": "生活"},
+    {"value": "other", "label": "其他"},
 )
+TAXONOMY_GENRES = (
+    {"value": "document", "label": "文档"},
+    {"value": "lecture", "label": "讲解"},
+    {"value": "interview", "label": "访谈"},
+    {"value": "podcast", "label": "播客"},
+    {"value": "review", "label": "评测"},
+    {"value": "recording", "label": "记录"},
+    {"value": "other", "label": "其他"},
+)
+TAXONOMY_DOMAIN_VALUES = tuple(item["value"] for item in TAXONOMY_DOMAINS)
+TAXONOMY_GENRE_VALUES = tuple(item["value"] for item in TAXONOMY_GENRES)
 RELATION_TYPES = ("new_version_of", "revision_of", "related_to", "user_declared_same_work")
+
+# 旧固定分类拆分映射（数据库迁移与旧归档规范化共用）：前四项归领域，后三项归体裁。
+_LEGACY_CATEGORY_DOMAINS = ("technical", "business", "education", "news")
+_LEGACY_CATEGORY_GENRES = ("interview", "podcast", "document")
+
+
+def split_legacy_categories(categories: list[str]) -> tuple[list[str], list[str]]:
+    """旧固定分类 → (domains, genres)；未知值忽略，多体裁全部保留（≤1 规则不适用于迁移）。"""
+    values = set(categories)
+    return (
+        sorted(values.intersection(_LEGACY_CATEGORY_DOMAINS)),
+        sorted(values.intersection(_LEGACY_CATEGORY_GENRES)),
+    )
+
+
+def validate_taxonomy_domains(value: list[str]) -> list[str]:
+    invalid = sorted(set(value) - set(TAXONOMY_DOMAIN_VALUES))
+    if invalid:
+        raise ValueError(f"不支持的领域: {', '.join(invalid)}")
+    return sorted(set(value))
+
+
+def validate_taxonomy_genres(value: list[str]) -> list[str]:
+    invalid = sorted(set(value) - set(TAXONOMY_GENRE_VALUES))
+    if invalid:
+        raise ValueError(f"不支持的体裁: {', '.join(invalid)}")
+    if len(set(value)) > 1:
+        raise ValueError("体裁最多选择一项")
+    return sorted(set(value))
 
 
 class PasteImportRequest(BaseModel):
@@ -60,16 +107,19 @@ class PasteImportRequest(BaseModel):
     author: str | None = Field(default=None, max_length=300)
     notes: str | None = Field(default=None, max_length=4000)
     source_date: date | None = None
-    categories: list[str] = Field(default_factory=list)
+    domains: list[str] = Field(default_factory=list)
+    genres: list[str] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
 
-    @field_validator("categories")
+    @field_validator("domains")
     @classmethod
-    def valid_categories(cls, value: list[str]) -> list[str]:
-        invalid = sorted(set(value) - set(FIXED_CATEGORIES))
-        if invalid:
-            raise ValueError(f"不支持的固定分类: {', '.join(invalid)}")
-        return sorted(set(value))
+    def valid_domains(cls, value: list[str]) -> list[str]:
+        return validate_taxonomy_domains(value)
+
+    @field_validator("genres")
+    @classmethod
+    def valid_genres(cls, value: list[str]) -> list[str]:
+        return validate_taxonomy_genres(value)
 
 
 class SourceMetadataUpdate(BaseModel):
@@ -78,26 +128,31 @@ class SourceMetadataUpdate(BaseModel):
     language: str | None = Field(default=None, max_length=32)
     notes: str | None = Field(default=None, max_length=4000)
     source_date: date | None = None
-    categories: list[str] | None = None
+    domains: list[str] | None = None
+    genres: list[str] | None = None
     tags: list[str] | None = None
 
     @model_validator(mode="after")
     def required_fields_are_not_cleared(self) -> "SourceMetadataUpdate":
-        non_nullable = {"title", "language", "categories", "tags"}
+        non_nullable = {"title", "language", "domains", "genres", "tags"}
         cleared = non_nullable.intersection(self.model_fields_set)
         if any(getattr(self, field) is None for field in cleared):
-            raise ValueError("标题、语言、分类和标签不能设为 null；请提交有效值或省略字段")
+            raise ValueError("标题、语言、领域、体裁和标签不能设为 null；请提交有效值或省略字段")
         return self
 
-    @field_validator("categories")
+    @field_validator("domains")
     @classmethod
-    def valid_categories(cls, value: list[str] | None) -> list[str] | None:
+    def valid_domains(cls, value: list[str] | None) -> list[str] | None:
         if value is None:
             return value
-        invalid = sorted(set(value) - set(FIXED_CATEGORIES))
-        if invalid:
-            raise ValueError(f"不支持的固定分类: {', '.join(invalid)}")
-        return sorted(set(value))
+        return validate_taxonomy_domains(value)
+
+    @field_validator("genres")
+    @classmethod
+    def valid_genres(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return value
+        return validate_taxonomy_genres(value)
 
 
 class RelationCreate(BaseModel):
@@ -140,6 +195,10 @@ class TopicCreate(BaseModel):
     source_ids: list[str] = Field(default_factory=list)
 
 
+class TopicRename(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+
+
 class SettingsUpdate(BaseModel):
     parser_timeout_seconds: int | None = Field(default=None, ge=60, le=86_400)
     parser_no_progress_seconds: int | None = Field(default=None, ge=60, le=86_400)
@@ -149,6 +208,9 @@ class SettingsUpdate(BaseModel):
     video_memory_limit_mb: int | None = Field(default=None, ge=64, le=32_768)
     video_disk_limit_mb: int | None = Field(default=None, ge=64, le=32_768)
     video_max_frames: int | None = Field(default=None, ge=1, le=32)
+    image_timeout_seconds: int | None = Field(default=None, ge=60, le=86_400)
+    image_memory_limit_mb: int | None = Field(default=None, ge=64, le=32_768)
+    image_disk_limit_mb: int | None = Field(default=None, ge=64, le=32_768)
     job_lease_seconds: int | None = Field(default=None, ge=60, le=86_400)
     max_retry_attempts: int | None = Field(default=None, ge=0, le=10)
     download_timeout_seconds: int | None = Field(default=None, ge=60, le=86_400)
@@ -214,6 +276,92 @@ def sanitize_download_url(value: str) -> str:
     return sanitized[:4096]
 
 
+# 媒体 AI 提供方：off 关闭 / openai_compatible 走 OpenAI 兼容端点（litellm 通道）。
+AI_PROVIDER_VALUES = ("off", "openai_compatible")
+
+
+def validate_ai_base_url(value: str) -> None:
+    """AI 服务端点校验：空串表示使用提供方默认端点；非空必须是 ≤2048 的 HTTPS 公网地址。
+
+    与 validate_download_url 同一脱敏纪律：拒绝消息不含 URL 内容。
+    """
+    if not value:
+        return
+    if len(value) > 2048:
+        raise ValueError("invalid_base_url")
+    try:
+        parsed = urlsplit(value)
+        host = (parsed.hostname or "").rstrip(".").lower()
+    except ValueError:
+        raise ValueError("invalid_base_url") from None
+    if parsed.scheme.lower() != "https" or not host:
+        raise ValueError("invalid_base_url")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("invalid_base_url")
+    if _host_is_reserved(host):
+        raise ValueError("invalid_base_url")
+
+
+def _valid_ai_base_url(value: str | None) -> str | None:
+    if value is None:
+        return value
+    stripped = value.strip()
+    validate_ai_base_url(stripped)
+    return stripped
+
+
+def _valid_ai_provider(value: str | None) -> str | None:
+    if value is not None and value not in AI_PROVIDER_VALUES:
+        raise ValueError("不支持的 AI 提供方")
+    return value
+
+
+class AiTranscribeSettings(BaseModel):
+    """语音转写分组；字段缺省表示保持不变（api_key 空串不触碰既有凭据）。"""
+
+    provider: str | None = None
+    base_url: str | None = Field(default=None, max_length=2048)
+    model: str | None = Field(default=None, max_length=200)
+    api_key: str | None = Field(default=None, max_length=500)
+
+    _provider = field_validator("provider")(_valid_ai_provider)
+    _base_url = field_validator("base_url")(_valid_ai_base_url)
+
+
+class AiUnderstandSettings(BaseModel):
+    """理解与摘要分组；视觉模型为空表示不做画面理解（tier-2 关闭）。"""
+
+    provider: str | None = None
+    base_url: str | None = Field(default=None, max_length=2048)
+    chat_model: str | None = Field(default=None, max_length=200)
+    vision_model: str | None = Field(default=None, max_length=200)
+    api_key: str | None = Field(default=None, max_length=500)
+
+    _provider = field_validator("provider")(_valid_ai_provider)
+    _base_url = field_validator("base_url")(_valid_ai_base_url)
+
+
+class AiSettingsUpdate(BaseModel):
+    transcribe: AiTranscribeSettings | None = None
+    understand: AiUnderstandSettings | None = None
+    timeout_seconds: int | None = Field(default=None, ge=60, le=86_400)
+
+
+class AiConnectionTestRequest(BaseModel):
+    part: str
+
+    @field_validator("part")
+    @classmethod
+    def valid_part(cls, value: str) -> str:
+        if value not in ("transcribe", "understand"):
+            raise ValueError("不支持的测试分组")
+        return value
+
+
+class VideoSummarizeRequest(BaseModel):
+    force_tier2: bool = False
+
+
 class DownloadLinkRequest(BaseModel):
     url: str = Field(min_length=1)
     platform: str = Field(min_length=1, max_length=32)
@@ -224,16 +372,19 @@ class DownloadLinkRequest(BaseModel):
     language: str = Field(default="zh", max_length=32)
     notes: str | None = Field(default=None, max_length=4000)
     source_date: date | None = None
-    categories: list[str] = Field(default_factory=list)
+    domains: list[str] = Field(default_factory=list)
+    genres: list[str] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
 
-    @field_validator("categories")
+    @field_validator("domains")
     @classmethod
-    def valid_categories(cls, value: list[str]) -> list[str]:
-        invalid = sorted(set(value) - set(FIXED_CATEGORIES))
-        if invalid:
-            raise ValueError(f"不支持的固定分类: {', '.join(invalid)}")
-        return sorted(set(value))
+    def valid_domains(cls, value: list[str]) -> list[str]:
+        return validate_taxonomy_domains(value)
+
+    @field_validator("genres")
+    @classmethod
+    def valid_genres(cls, value: list[str]) -> list[str]:
+        return validate_taxonomy_genres(value)
 
 
 class LinkProbeRequest(BaseModel):

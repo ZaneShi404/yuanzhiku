@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Protocol
+from typing import Any, Callable, Protocol
 
 from app.domain.media import ExtractedVideoFrame, MediaProcessingLimits, MediaTranscript, VideoMetadata
 
@@ -70,7 +70,16 @@ class MediaAiPort(Protocol):
 
     def transcribe(self, artifact_path: Path, media_type: str | None, cancelled: Callable[[], bool]) -> MediaTranscript: ...
 
-    def summarize(self, transcript: str, cancelled: Callable[[], bool]) -> str: ...
+    def assess_completeness(self, transcript_text: str, context: dict[str, Any]) -> dict[str, Any]: ...
+
+    def describe_frames(
+        self,
+        frame_inputs: list[dict[str, Any]],
+        focus: str,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> list[dict[str, Any]]: ...
+
+    def summarize(self, inputs: dict[str, Any], cancelled: Callable[[], bool]) -> dict[str, Any]: ...
 
 
 class DownloadUnavailable(RuntimeError):

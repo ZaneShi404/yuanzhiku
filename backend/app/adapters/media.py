@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
+import re
 import shutil
 import subprocess
 import tempfile
 import time
 from pathlib import Path
 from typing import Callable
+
+from PIL import Image, ImageStat
 
 from app.domain.media import ExtractedVideoFrame, MediaProcessingLimits, MediaTranscript, VideoMetadata
 from app.ports.media import (
@@ -20,6 +24,64 @@ from app.ports.media import (
     MediaProcessingCancelled,
     MediaToolUnavailable,
 )
+
+# 关键帧抽样参数：任何变更都会改变 config_hash，使新旧分析成为不同身份。
+SAMPLING_STRATEGY = "scene-hybrid"
+SAMPLING_DENSITY_SECONDS = 120
+SAMPLING_PLACEMENT = "5-95-anchors"
+SAMPLING_SCALE_MAX_WIDTH = 640
+SAMPLING_JPEG_QUALITY = 3
+SAMPLING_SCENE_THRESHOLD = 0.3
+
+_SCENE_TIME_PATTERN = re.compile(r"pts_time:([0-9]+(?:\.[0-9]+)?)")
+
+
+def plan_frame_times(
+    duration_ms: int,
+    maximum_frames: int,
+    scene_times_ms: list[int] | tuple[int, ...],
+) -> list[tuple[int, str]]:
+    """规划关键帧时间点：场景切换优先，等间隔槽位兜底。
+
+    规则：短视频（<120s）至少抽 3 帧；长视频目标帧数为 ceil(时长/120s)，
+    并以 maximum_frames 封顶。首槽锚定约 5%、末槽约 95%，中间槽均匀分布；
+    每个槽位在半个槽距容差内吸附最近的未使用场景点，吸不到就保留等间隔
+    位置；相距不足 1 秒的时间点去重（同距优先保留场景帧）。
+    """
+    if duration_ms <= 0:
+        return []
+    maximum_frames = max(1, maximum_frames)
+    if duration_ms < SAMPLING_DENSITY_SECONDS * 1000:
+        count = min(maximum_frames, 3)
+    else:
+        count = min(maximum_frames, max(1, math.ceil(duration_ms / (SAMPLING_DENSITY_SECONDS * 1000))))
+    first = duration_ms * 0.05
+    last = duration_ms * 0.95
+    if count == 1:
+        ideals = [round(duration_ms * 0.5)]
+    else:
+        ideals = [round(first + (last - first) * index / (count - 1)) for index in range(count)]
+    scenes = sorted({int(time_ms) for time_ms in scene_times_ms if 0 < time_ms < duration_ms})
+    tolerance = round((last - first) / (count - 1) / 2) if count > 1 else round(duration_ms * 0.05)
+    used_scenes: set[int] = set()
+    planned: list[tuple[int, str]] = []
+    for ideal in ideals:
+        candidates = [time_ms for time_ms in scenes if time_ms not in used_scenes and abs(time_ms - ideal) <= tolerance]
+        scene = min(candidates, key=lambda time_ms: abs(time_ms - ideal), default=None)
+        if scene is None:
+            planned.append((ideal, "even"))
+        else:
+            planned.append((scene, "scene"))
+            used_scenes.add(scene)
+    planned.sort(key=lambda item: (item[0], item[1] != "scene"))
+    result: list[tuple[int, str]] = []
+    for time_ms, reason in planned:
+        if result and time_ms - result[-1][0] < 1000:
+            if reason == "scene" and result[-1][1] == "even":
+                result[-1] = (time_ms, reason)
+            continue
+        result.append((time_ms, reason))
+    return result
 
 
 class LocalFfmpegMediaAnalyzer(MediaAnalyzerPort):
@@ -41,7 +103,10 @@ class LocalFfmpegMediaAnalyzer(MediaAnalyzerPort):
 
     @staticmethod
     def config_hash(maximum_frames: int) -> str:
-        value = f"ffmpeg-local:1:jpeg-sampling:{maximum_frames}".encode("ascii")
+        value = (
+            f"ffmpeg-local:2:{SAMPLING_STRATEGY}:{SAMPLING_DENSITY_SECONDS}:{SAMPLING_PLACEMENT}"
+            f":{SAMPLING_SCALE_MAX_WIDTH}:{SAMPLING_JPEG_QUALITY}:{maximum_frames}"
+        ).encode("ascii")
         return hashlib.sha256(value).hexdigest()
 
     @staticmethod
@@ -78,19 +143,23 @@ class LocalFfmpegMediaAnalyzer(MediaAnalyzerPort):
         *,
         workspace: Path | None = None,
         capture_stdout: bool = False,
+        capture_stderr: bool = False,
     ) -> bytes:
         output_file = tempfile.TemporaryFile() if capture_stdout else None
+        error_file = tempfile.TemporaryFile() if capture_stderr else None
         try:
             process = subprocess.Popen(
                 command,
                 stdin=subprocess.DEVNULL,
                 stdout=output_file if output_file is not None else subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stderr=error_file if error_file is not None else subprocess.DEVNULL,
                 shell=False,
             )
         except FileNotFoundError as exc:
             if output_file is not None:
                 output_file.close()
+            if error_file is not None:
+                error_file.close()
             raise MediaToolUnavailable("not_found") from exc
         started = time.monotonic()
         deadline = limits.deadline_monotonic or (started + limits.timeout_seconds)
@@ -111,12 +180,17 @@ class LocalFfmpegMediaAnalyzer(MediaAnalyzerPort):
                     break
                 except subprocess.TimeoutExpired:
                     heartbeat()
-            if output_file is not None:
-                output_file.seek(0, os.SEEK_END)
-                if output_file.tell() > 512 * 1024:
+            for captured in (output_file, error_file):
+                if captured is None:
+                    continue
+                captured.seek(0, os.SEEK_END)
+                if captured.tell() > 512 * 1024:
                     raise MediaInputInvalid("output_limit")
-                output_file.seek(0)
+                captured.seek(0)
+            if output_file is not None:
                 output = output_file.read()
+            elif error_file is not None:
+                output = error_file.read()
             if cls._workspace_size(workspace) > limits.maximum_workspace_bytes:
                 raise MediaInputInvalid("workspace_limit")
             if len(output) > 512 * 1024 or process.returncode != 0:
@@ -132,6 +206,8 @@ class LocalFfmpegMediaAnalyzer(MediaAnalyzerPort):
                     process.wait(timeout=2)
             if output_file is not None:
                 output_file.close()
+            if error_file is not None:
+                error_file.close()
 
     def probe(
         self,
@@ -180,6 +256,79 @@ class LocalFfmpegMediaAnalyzer(MediaAnalyzerPort):
             audio_codec=str(audio_stream.get("codec_name") or "") if isinstance(audio_stream, dict) else None,
         )
 
+    def _scene_times(
+        self,
+        artifact_path: Path,
+        metadata: VideoMetadata,
+        limits: MediaProcessingLimits,
+        cancelled: Callable[[], bool],
+        heartbeat: Callable[[], None],
+    ) -> list[int]:
+        """Detect scene-cut times via ffmpeg showinfo（输出在 stderr）。"""
+        output = self._run(
+            [
+                self.ffmpeg,
+                "-nostdin",
+                "-hide_banner",
+                "-nostats",
+                "-v", "info",
+                "-i", str(artifact_path),
+                "-vf", f"select='gt(scene,{SAMPLING_SCENE_THRESHOLD})',showinfo",
+                "-an",
+                "-f", "null",
+                "-",
+            ],
+            limits,
+            cancelled,
+            heartbeat,
+            capture_stderr=True,
+        )
+        times: list[int] = []
+        for match in _SCENE_TIME_PATTERN.finditer(output.decode("utf-8", errors="replace")):
+            time_ms = round(float(match.group(1)) * 1000)
+            if 0 < time_ms < metadata.duration_ms:
+                times.append(time_ms)
+        return times
+
+    def _extract_frame_at(
+        self,
+        artifact_path: Path,
+        time_ms: int,
+        destination: Path,
+        limits: MediaProcessingLimits,
+        cancelled: Callable[[], bool],
+        heartbeat: Callable[[], None],
+        workspace: Path,
+    ) -> None:
+        self._run(
+            [
+                self.ffmpeg,
+                "-nostdin",
+                "-v", "error",
+                "-ss", f"{time_ms / 1000:.3f}",
+                "-i", str(artifact_path),
+                "-frames:v", "1",
+                # filtergraph 中逗号是链分隔符：min(640,iw) 的逗号必须转义。
+                "-vf", f"scale=min({SAMPLING_SCALE_MAX_WIDTH}\\,iw):-2",
+                "-q:v", str(SAMPLING_JPEG_QUALITY),
+                "-y",
+                str(destination),
+            ],
+            limits,
+            cancelled,
+            heartbeat,
+            workspace=workspace,
+        )
+        if not destination.is_file() or destination.stat().st_size == 0:
+            raise MediaInputInvalid("frame_failed")
+
+    @staticmethod
+    def _is_black_frame(path: Path) -> bool:
+        """黑帧护栏：灰度均值低于阈值视为无信息帧。"""
+        with Image.open(path) as image:
+            gray = image.convert("L")
+            return ImageStat.Stat(gray).mean[0] < 16
+
     def extract_frames(
         self,
         artifact_path: Path,
@@ -193,35 +342,35 @@ class LocalFfmpegMediaAnalyzer(MediaAnalyzerPort):
         if not 1 <= maximum_frames <= 32:
             raise ValueError("maximum_frames")
         workspace.mkdir(parents=True, exist_ok=True)
-        count = min(maximum_frames, max(1, (metadata.duration_ms + 119_999) // 120_000))
+        scene_times = self._scene_times(artifact_path, metadata, limits, cancelled, heartbeat)
+        planned = plan_frame_times(metadata.duration_ms, maximum_frames, scene_times)
+        shift = max(1_000, round(metadata.duration_ms * 0.05))
         frames: list[ExtractedVideoFrame] = []
-        for ordinal in range(count):
+        for ordinal, (time_ms, reason) in enumerate(planned):
             if cancelled():
                 raise MediaProcessingCancelled()
-            time_ms = round(metadata.duration_ms * (ordinal + 1) / (count + 1))
             destination = workspace / f"frame-{ordinal + 1:02d}.jpg"
-            self._run(
-                [
-                    self.ffmpeg,
-                    "-nostdin",
-                    "-v", "error",
-                    "-ss", f"{time_ms / 1000:.3f}",
-                    "-i", str(artifact_path),
-                    "-frames:v", "1",
-                    # filtergraph 中逗号是链分隔符：min(640,iw) 的逗号必须转义。
-                    "-vf", "scale=min(640\\,iw):-2",
-                    "-q:v", "3",
-                    "-y",
-                    str(destination),
-                ],
-                limits,
-                cancelled,
-                heartbeat,
-                workspace=workspace,
+            # 黑帧时依次尝试：未使用的最近场景点、±5% 平移的等距点；仍黑则接受当前结果。
+            unused_scenes = sorted(
+                (scene for scene in scene_times if scene not in {time for time, _ in planned}),
+                key=lambda scene: abs(scene - time_ms),
             )
-            if not destination.is_file() or destination.stat().st_size == 0:
-                raise MediaInputInvalid("frame_failed")
-            frames.append(ExtractedVideoFrame(ordinal, time_ms, destination, None, None))
+            candidates = [time_ms, *unused_scenes[:2], time_ms - shift, time_ms + shift]
+            candidates = [
+                candidate for index, candidate in enumerate(candidates)
+                if 0 < candidate < metadata.duration_ms and candidate not in candidates[:index]
+            ][:4]
+            chosen_ms = candidates[-1]
+            for candidate in candidates:
+                self._extract_frame_at(
+                    artifact_path, candidate, destination, limits, cancelled, heartbeat, workspace
+                )
+                chosen_ms = candidate
+                if not self._is_black_frame(destination):
+                    break
+            with Image.open(destination) as image:
+                width, height = image.size
+            frames.append(ExtractedVideoFrame(ordinal, chosen_ms, destination, width, height, reason))
         return tuple(frames)
 
 
@@ -241,5 +390,13 @@ class UnconfiguredMediaAi:
         raise MediaAiUnavailable("not_configured")
 
     @staticmethod
-    def summarize(_: str, __: Callable[[], bool]) -> str:
+    def assess_completeness(_: str, __: dict) -> dict:
+        raise MediaAiUnavailable("not_configured")
+
+    @staticmethod
+    def describe_frames(_: list, __: str, ___: Callable[[], bool] | None = None) -> list:
+        raise MediaAiUnavailable("not_configured")
+
+    @staticmethod
+    def summarize(_: dict, __: Callable[[], bool]) -> dict:
         raise MediaAiUnavailable("not_configured")

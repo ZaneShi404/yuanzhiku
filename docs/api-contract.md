@@ -5,13 +5,13 @@
 | 区域 | 端点 | 方法 | 要点 |
 |---|---|---|---|
 | health | `/health`, `/capabilities` | GET | 运行状态、功能与本地限制 |
-| settings | `/settings`, `/settings/download-cookies/{platform}` | GET, PUT, POST, DELETE | 非敏感设置、端口和断路器；按平台 cookies.txt 导入/删除（每平台 ≤1MB） |
-| imports | `/imports/file`, `/imports/image`, `/imports/paste`, `/imports/prefill` | POST | rights 必填；文件/图片 multipart、文本 JSON；prefill 只读识别元数据，返回可空建议，不持久化、不联网 |
-| videos | `/videos/local`, `/videos/link`, `/videos/link/probe`, `/videos/{source_id}`, `/videos/{source_id}/stream`, `/videos/{source_id}/frames/{frame_id}`, `/videos/{source_id}/transcribe`, `/videos/{source_id}/summarize` | GET/POST | 本地 MP4/WebM artifact 与受限白名单链接下载；链接元数据只读探测（REQ-047b）；本地播放、关键帧和受控未来 AI 作业 |
-| sources | `/sources`, `/sources/{id}`, `/sources/{id}/metadata`, `/sources/{id}/rights`, `/sources/{id}/relations` | GET/PUT/POST | 不返回本地原路径 |
+| settings | `/settings`, `/settings/ai`, `/settings/ai/test`, `/settings/download-cookies/{platform}` | GET, PUT, POST, DELETE | 非敏感设置、端口和断路器；双组媒体 AI 配置与连通性检查（密钥仅存凭据文件，回显掩码）；按平台 cookies.txt 导入/删除（每平台 ≤1MB） |
+| imports | `/imports/file`, `/imports/image`, `/imports/paste`, `/imports/prefill` | POST | rights 必填；文件/图片 multipart、文本 JSON；分类字段为 `domains`/`genres`（`categories` 已移除）；prefill 只读识别元数据，返回可空建议，不持久化、不联网 |
+| videos | `/videos/local`, `/videos/link`, `/videos/link/probe`, `/videos/{source_id}`, `/videos/{source_id}/stream`, `/videos/{source_id}/frames/{frame_id}`, `/videos/{source_id}/transcribe`, `/videos/{source_id}/summarize` | GET/POST | 本地 MP4/WebM artifact 与受限白名单链接下载；链接元数据只读探测（REQ-047b）；本地播放、关键帧；transcribe/summarize 入队媒体 AI 作业（未配置时终态 blocked，REQ-051） |
+| sources | `/sources`, `/sources/{id}`, `/sources/{id}/metadata`, `/sources/{id}/rights`, `/sources/{id}/relations`, `/sources/{id}/relations/{relation_id}` | GET/PUT/POST/DELETE | 不返回本地原路径；来源详情含 `same_work_candidates`；关系可创建与删除 |
 | documents | `/documents/{version_id}/representations`, `/representations/{id}/evidence`, `/evidence/{id}`, `/citations`, `/knowledge`, `/knowledge/{id}/publish` | GET/POST | 保持证据链和发布校验 |
-| search | `/search` | GET | `q` 和显式 advanced 过滤参数 |
-| taxonomy | `/tags`, `/topics`, `/topics/{id}/sources` | GET/POST | 固定分类与主题关联 |
+| search | `/search` | GET | `q` 和显式 advanced 过滤参数：`domains`（重复、OR、`_none` 哨兵）、`genre`（单值、`_none`）、`topic_id` 等（REQ-024） |
+| taxonomy | `/taxonomy`, `/tags`, `/topics`, `/topics/{id}`, `/topics/{id}/sources/{source_id}` | GET/POST/PUT/DELETE | 分类清单唯一下发；主题创建/重命名/删除、成员增删 |
 | external | `/external/cards`, `/external/douyin` | GET/POST | 仅元数据，绝不发起 URL 请求；拒绝含用户名或密码的 URL |
 | jobs | `/jobs`, `/jobs/{id}`, `/jobs/{id}/cancel`, `/jobs/{id}/retry`, `/jobs/run-once` | GET/POST | 轮询和协作控制 |
 | lifecycle | `/sources/{id}/delete`, `/sources/{id}/restore`, `/sources/{id}/purge` | POST | 软删、恢复、永久删除 |
@@ -25,7 +25,7 @@
 
 ## 本地视频
 
-`POST /videos/local` 使用 multipart，字段与 `/imports/file` 相同：`file`、`rights`、可选 `title`、`author`、`language`、`notes`、`source_date`、JSON 数组格式的 `categories` 与 `tags`。仅接受文件名后缀为 `.mp4` 或 `.webm` 的本地文件；`rights` 必填。成功时响应 source、content version、artifact 和 `video_analyze` 作业。接口不接收 URL，也不会下载、探测或代理网页视频。
+`POST /videos/local` 使用 multipart，字段与 `/imports/file` 相同：`file`、`rights`、可选 `title`、`author`、`language`、`notes`、`source_date`、JSON 数组格式的 `domains`、`genres` 与 `tags`。仅接受文件名后缀为 `.mp4` 或 `.webm` 的本地文件；`rights` 必填。成功时响应 source、content version、artifact 和 `video_analyze` 作业。接口不接收 URL，也不会下载、探测或代理网页视频。
 
 ## 本地图片
 
@@ -54,7 +54,8 @@
 | `language` | 字符串 | 否 | ≤32 字符 |
 | `notes` | 字符串或 `null` | 否 | ≤4000 字符 |
 | `source_date` | ISO-8601 日期 | 否 | 与 `imported_at` 独立 |
-| `categories` | 固定分类数组 | 否 | 只能取固定分类；空数组有效 |
+| `domains` | 领域数组 | 否 | 只能取 `/taxonomy` 领域清单；空数组有效 |
+| `genres` | 体裁数组 | 否 | 只能取 `/taxonomy` 体裁清单，最多一项；空数组有效 |
 | `tags` | 字符串数组 | 否 | 空数组有效 |
 
 `POST /settings/download-cookies/{platform}` 使用 multipart 上传该平台的 cookies.txt（Netscape 格式，`platform` 限 `bilibili`/`douyin`，非法 → `422`），成功 `204`；单文件超过 1MB → `413`；同平台重复导入覆盖。文件按平台分别存于 `data/state/download/cookies/<platform>.txt`。`DELETE /settings/download-cookies/{platform}` 幂等删除该平台文件（不存在也返回 `204`）。
@@ -79,12 +80,37 @@
 
 `GET /capabilities` 新增 `downloader` 节：`{ "enabled", "adapter": "yt-dlp", "version", "supported_platforms": ["bilibili", "douyin"], "cookies": {"bilibili": ..., "douyin": ...}, "network": true }`。`enabled=false`（yt-dlp 或 FFmpeg 缺失）时前端禁用链接表单提交并显示引导，`POST /videos/link` 返回 `503`。`cookies[platform]`＝`data/state/download/cookies/<platform>.txt` 存在且 ≤1MB；探测失败一律按不可用处理。CORS `allow_methods` 含 `DELETE`，跨源 DELETE 预检放行。
 
-`GET /videos/{source_id}` 默认返回最新本地视频版本；可选 `version_id` 只能选择同一来源的已存视频版本。`analysis` 在分析未完成时为 `null`。完成后 `analysis.metadata` 包含容器、时长毫秒、尺寸及音视频编码，`analysis.frames` 按 `ordinal` 返回关键帧 id、artifact hash、时间毫秒和可选尺寸。
+`GET /videos/{source_id}` 默认返回最新本地视频版本；可选 `version_id` 只能选择同一来源的已存视频版本。`analysis` 仅在该版本 `completeness=complete` 时返回当前分析，否则为 `null`；`analyses` 按时间列出该版本全部分析记录摘要并显式标记 `current_analysis_id`。`analysis.metadata` 包含容器、时长毫秒、尺寸、音视频编码与采样参数，`analysis.frames` 按 `ordinal` 返回关键帧 id、artifact hash、时间毫秒、真实像素宽高和采样来源 `reason`（`scene`/`even`）。
+
+`POST /videos/{source_id}/transcribe`（`201`）入队 `video_transcribe` 作业：转写分组未启用或无 key 时作业终态 `blocked`（消息“未配置媒体 AI 服务”），不产生任何外部网络请求，也不改变已完成视频的状态。已配置时本地提取音频分块调用所配置转写端点，成功后写入 kind=`transcription` representation 与逐段 `video_time_range` evidence（进入检索索引）。
+
+`POST /videos/{source_id}/summarize`（`201`）入队 `video_summarize` 作业，可选 JSON 请求体 `{"force_tier2": false}`。理解分组未配置时同样终态 `blocked`；无转写产物时终态 `failed`（“请先完成语音转写”，不进重试循环）。已配置时执行两层级联：完整性判断（确定性覆盖率/静音规则 + 约束 JSON 的 LLM 判定，阈值 0.6）→ tier1 纯文本摘要，或判定疑似不完整/`force_tier2` 时走 tier2（逐帧画面理解含画面文字提取后增强摘要）；tier2 需 vision_model 已配置，需要而不可用时摘要标记 `visual_gap`。摘要写入 kind=`summary` representation（parent 为转写表示），AI 建议的领域/体裁/标签以 `<!--yuanzhiku:suggestions ...-->` 标记嵌入摘要文本，仅在用户显式保存元数据（`PUT /sources/{id}/metadata`）时才被采纳。
+
+## 分类体系（REQ-050）
+
+`GET /taxonomy` 返回分类清单的唯一来源：`{"domains": [{"value", "label"}, ...], "genres": [{"value", "label"}, ...]}`（value 为稳定英文标识，label 为中文显示名）。领域多选、可空；体裁写入时最多一项、可空（超出 → `422`）。所有接受分类的接口（`/imports/file`、`/imports/image`、`/videos/local`、`/videos/link`、`PUT /sources/{id}/metadata`）统一使用 `domains`/`genres` 字段；旧 `categories` 字段已移除，数据库（schema v9）与 ≤v7 归档再导入按固定映射迁移。
+
+## 媒体 AI 设置（REQ-051, REQ-052）
+
+`GET /settings/ai` 返回双组配置视图：`transcribe`（`provider`/`base_url`/`model`/`has_key`/`key_hint`）、`understand`（`provider`/`base_url`/`chat_model`/`vision_model`/`has_key`/`key_hint`）与 `timeout_seconds`。`provider` 取 `off` 或 `openai_compatible`；`key_hint` 为掩码提示（仅尾号），绝不回显完整密钥。
+
+`PUT /settings/ai` 接受局部更新：省略的分组/字段保持不变；`api_key` 省略或空串不触碰既有凭据，非空则原子写入 `<data-root>/state/ai/credentials.json`。`base_url` 空串表示提供方默认端点，非空必须是 ≤2048 字符的 HTTPS 公网地址、无 userinfo，否则 `422 request_validation`；密钥绝不进入数据库、日志、备份、导出或任何 API 出参。两组均为 `off`（默认）时无任何出站流量，行为与未配置完全一致。
+
+`POST /settings/ai/test` 请求体 `{"part": "transcribe" | "understand"}`，使用已保存配置做轻量连通性检查（转写分组 GET `/models`，理解分组一次最小 completion），返回 `{"ok": true}` 或 `{"ok": false, "message": "<脱敏中文原因>"}`；失败消息不含 URL、密钥或响应正文。
+
+## 检索过滤（REQ-024）
+
+`GET /search` 参数：`q`、`include_historical`、`include_incomplete`、`source_type`、`domains`（重复查询参数，OR 语义，`_none` 匹配未分类来源）、`genre`（单值，`_none` 匹配无体裁）、`tag`、`author`、`language`、`processing_state`、`source_date_from/to`、`imported_at_from/to`、`topic_id`（仅过滤来源分支，知识与外部卡不受影响）、`sort`（`relevance`/`updated`/`title`）。`domains`/`genre` 取值超出清单（`_none` 除外）→ `422 request_validation`。全文语料只含标题/作者/备注与正文类 representation 文本：分类与标签 token 不进入全文，`ffmpeg-local` 视频元数据模板不进入全文。
+
+**破坏性变更**：旧 `category` 过滤参数与导入/元数据接口的 `categories` 字段已移除；API 消费方须改用 `domains`（重复参数）与 `genre`。
+
+## 主题与来源关系
+
+`POST /topics`（`201`）创建主题（名称唯一，重复 → `409`）；`PUT /topics/{topic_id}` 重命名（不存在 → `404`，重名 → `409`）；`DELETE /topics/{topic_id}`（`204`）删除主题及其全部成员关联；`POST /topics/{topic_id}/sources/{source_id}` 添加成员；`DELETE /topics/{topic_id}/sources/{source_id}`（`204`）移除成员（关联不存在 → `404`）。
+
+`POST /sources/{id}/relations`（`201`）创建关系（`new_version_of`/`revision_of`/`related_to`/`user_declared_same_work`，重复或无效 → `409`）；`DELETE /sources/{id}/relations/{relation_id}`（`204`）删除关系，关系不涉及该来源 → `404`。`GET /sources/{id}` 详情含 `same_work_candidates`：按相同 artifact 哈希（`same_artifact`）或规范化标题（`same_title`）计算的确定性候选，已声明 same-work 的来源不再出现；候选可一键创建 `user_declared_same_work` 关系。
 
 `GET /videos/{source_id}/stream` 与 `GET /videos/{source_id}/frames/{frame_id}` 同样接受可选 `version_id`，并严格只从该版本的原 artifact 或分析帧读取内容。播放流只服务活动来源的 MP4/WebM artifact，支持单一 `Range: bytes=...` 请求；有效范围返回 `206` 和 `Content-Range`，无效或多范围请求返回 `416`。帧接口只服务该版本当前分析记录中的 JPEG 帧。两类响应均包含 `X-Content-Type-Options: nosniff` 和 sandbox CSP。
-
-`POST /videos/{source_id}/transcribe` 与 `/summarize` 仅创建未来媒体 AI 作业。默认服务未配置，该作业最终为 `blocked`，消息为“未配置媒体 AI 服务”，不产生任何外部网络请求，也不改变已完成视频的状态。
-
 
 `PUT /sources/{id}/metadata` 接受一个局部 JSON 对象。响应为更新后的来源详情；来源不存在时返回 `404`。请求中省略的字段保持既有值，不会被覆盖。
 
@@ -95,7 +121,8 @@
 | `language` | 非空字符串 | 拒绝（`422`） | 最多 32 个字符 |
 | `notes` | 字符串或 `null` | 清除 | 最多 4000 个字符 |
 | `source_date` | ISO-8601 日期或 `null` | 清除 | 与 `imported_at` 独立 |
-| `categories` | 固定分类数组 | 拒绝（`422`） | 只能取固定分类；空数组有效 |
+| `domains` | 领域数组 | 拒绝（`422`） | 只能取 `/taxonomy` 领域清单；空数组有效 |
+| `genres` | 体裁数组 | 拒绝（`422`） | 只能取 `/taxonomy` 体裁清单，最多一项；空数组有效 |
 | `tags` | 字符串数组 | 拒绝（`422`） | 空数组有效 |
 
-`title`、`language`、`categories` 和 `tags` 不接受显式 `null`；客户端应提交有效值或省略字段。`author`、`notes` 与 `source_date` 使用 JSON `null` 表示清除。错误遵循本文件开头的稳定错误信封；Pydantic 请求校验失败为 `422`。
+`title`、`language`、`domains`、`genres` 和 `tags` 不接受显式 `null`；客户端应提交有效值或省略字段。`author`、`notes` 与 `source_date` 使用 JSON `null` 表示清除。错误遵循本文件开头的稳定错误信封；Pydantic 请求校验失败为 `422`。

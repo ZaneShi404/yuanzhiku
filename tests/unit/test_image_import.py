@@ -58,7 +58,7 @@ def webp_image() -> bytes:
 
 
 def import_image(client: TestClient, filename: str, content: bytes, media_type: str, **form: str) -> dict:
-    data = {"rights": "owned", "categories": "[]", "tags": "[]", "language": "zh"}
+    data = {"rights": "owned", "domains": "[]", "genres": "[]", "tags": "[]", "language": "zh"}
     data.update(form)
     response = client.post("/api/v1/imports/image", data=data, files={"file": (filename, content, media_type)})
     assert response.status_code == 201, response.text
@@ -167,7 +167,7 @@ def test_unsupported_suffix_rejected(client: TestClient) -> None:
     for filename in ("a.gif", "b.bmp", "c.exe"):
         response = client.post(
             "/api/v1/imports/image",
-            data={"rights": "owned", "categories": "[]", "tags": "[]"},
+            data={"rights": "owned", "domains": "[]", "genres": "[]", "tags": "[]"},
             files={"file": (filename, plain_png(), "application/octet-stream")},
         )
         assert response.status_code == 422, (filename, response.text)
@@ -179,7 +179,7 @@ def test_oversized_content_length_rejected_by_preflight(client: TestClient, runt
     response = client.post(
         "/api/v1/imports/image",
         headers={"content-length": str(2 * 1024 * 1024 * 1024 + 1)},
-        data={"rights": "owned", "categories": "[]", "tags": "[]"},
+        data={"rights": "owned", "domains": "[]", "genres": "[]", "tags": "[]"},
         files={"file": ("small.png", plain_png(), "image/png")},
     )
 
@@ -205,3 +205,36 @@ def test_title_fallback_to_filename_stem(client: TestClient) -> None:
     imported = import_image(client, "度假 照片.jpeg", plain_png(), "image/jpeg")
     assert imported["source"]["title"] == "度假 照片"
     assert imported["content_version"]["media_type"] == "image/jpeg"
+
+
+def test_image_analyze_uses_independent_image_settings(runtime_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """image_analyze 断路器读取独立 image_* 设置键，不复用 video_*（DEF-IMG-001）。"""
+    monkeypatch.setenv("YUANZHIKU_EMBEDDED_WORKER", "false")
+    app = create_app(runtime_root, acquire_lock=False)
+    with TestClient(app) as test_client:
+        captured: dict[str, object] = {}
+
+        def fake_analyze(*, version_id, artifact_sha256, limits, cancelled, heartbeat, progress):
+            captured["limits"] = limits
+            return {"metadata": {}}
+
+        monkeypatch.setattr(app.state.services.images, "analyze", fake_analyze)
+        response = test_client.put(
+            "/api/v1/settings",
+            json={
+                "image_timeout_seconds": 600,
+                "image_memory_limit_mb": 128,
+                "image_disk_limit_mb": 256,
+                "video_memory_limit_mb": 2048,
+                "video_disk_limit_mb": 1024,
+                "video_timeout_seconds": 3600,
+            },
+        )
+        assert response.status_code == 200, response.text
+        import_image(test_client, "settings.png", plain_png(), "image/png")
+        job = run_once(test_client)
+        assert job["state"] == "succeeded", job
+        limits = captured["limits"]
+        assert limits.timeout_seconds == 600.0
+        assert limits.maximum_memory_bytes == 128 * 1024 * 1024
+        assert limits.maximum_workspace_bytes == 256 * 1024 * 1024

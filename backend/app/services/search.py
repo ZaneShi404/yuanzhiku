@@ -19,7 +19,8 @@ class SearchService:
         include_historical: bool = False,
         include_incomplete: bool = False,
         source_type: str | None = None,
-        category: str | None = None,
+        domains: list[str] | None = None,
+        genre: str | None = None,
         tag: str | None = None,
         author: str | None = None,
         language: str | None = None,
@@ -28,6 +29,7 @@ class SearchService:
         source_date_to: date | None = None,
         imported_at_from: date | None = None,
         imported_at_to: date | None = None,
+        topic_id: str | None = None,
         sort: str = "relevance",
     ) -> list[dict]:
         if sort not in {"relevance", "updated", "title"}:
@@ -37,12 +39,27 @@ class SearchService:
         if imported_at_from and imported_at_to and imported_at_from > imported_at_to:
             raise ValueError("导入日期起始值不能晚于结束值")
         needle = query.strip().casefold()
+        # topic_id 只过滤来源分支：主题不存在或为空时来源零命中，知识与外部卡分支不受影响。
+        topic_source_ids = self.repository.source_ids_for_topic(topic_id) if topic_id else None
         candidates: list[dict] = []
         for source in self.repository.list_sources():
+            if topic_source_ids is not None and source["id"] not in topic_source_ids:
+                continue
             if source_type and source["source_type"] != source_type:
                 continue
-            if category and category not in json.loads(source["categories_json"]):
-                continue
+            source_domains = json.loads(source["domains_json"])
+            source_genres = json.loads(source["genres_json"])
+            # 领域过滤为 OR 语义；哨兵 "_none" 匹配未分类（空列表）来源。
+            if domains:
+                matched = bool(set(domains).intersection(source_domains)) or ("_none" in domains and not source_domains)
+                if not matched:
+                    continue
+            if genre:
+                if genre == "_none":
+                    if source_genres:
+                        continue
+                elif genre not in source_genres:
+                    continue
             if tag and tag not in json.loads(source["tags_json"]):
                 continue
             if author and author.casefold() not in (source["author"] or "").casefold():
@@ -64,11 +81,15 @@ class SearchService:
             versions = self.repository.versions_for_source(source["id"])
             if not include_historical:
                 versions = versions[:1]
-            text_parts = [source["title"], source["author"] or "", source["notes"] or "", " ".join(json.loads(source["tags_json"])), " ".join(json.loads(source["categories_json"]))]
+            # 全文语料只含正文类文本：分类（领域/体裁/标签）token 不进入检索。
+            text_parts = [source["title"], source["author"] or "", source["notes"] or ""]
             for version in versions:
                 if not include_incomplete and version["completeness"] != "complete":
                     continue
                 for representation in self.repository.representations_for_version(version["id"]):
+                    if representation["parser_name"] == "ffmpeg-local":
+                        # 视频容器元数据模板是纯噪声，退出全文检索；图片元数据（pillow-local）保留。
+                        continue
                     text_parts.append(representation["text_content"])
             haystack = "\n".join(text_parts)
             relevance = haystack.casefold().count(needle) if needle else 1
