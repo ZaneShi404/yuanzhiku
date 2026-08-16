@@ -678,6 +678,64 @@ def test_verifier_rejects_declared_acceptance_identity_drift(runtime_root: Path)
     assert verify_v1_archive.verify_archive(archive)["status"] == "verified"
 
 
+def test_verifier_accepts_registered_non_independent_acceptance_but_not_recommended(runtime_root: Path) -> None:
+    repository = _write_fixture_repository(runtime_root / "repository")
+    tooling_run_id = "20260730T000003Z-fixture-tooling"
+    tooling_manifest_sha256 = hashlib.sha256(b"fixture tooling manifest").hexdigest()
+    acceptance_path = "reports/testing/non-independent-tooling-acceptance.md"
+    _write(repository / acceptance_path, "# Non Independent Tooling Acceptance\n\nSelf-acceptance record.\n")
+    acceptance_sha256 = hashlib.sha256((repository / acceptance_path).read_bytes()).hexdigest()
+    _write(repository / "reports/testing/non-independent-tooling-acceptance.json", json.dumps({
+        "schema_version": 1,
+        "report_id": "RPT-FIXTURE-TOOLING-ACCEPTANCE",
+        "recorded_at_utc": "2026-07-30T00:00:03Z",
+        "report_kind": "acceptance",
+        "author_role": "acceptance",
+        "independence": "non_independent",
+        "product_version": "v1.0.0",
+        "archive_run_id": tooling_run_id,
+        "archive_manifest_sha256": tooling_manifest_sha256,
+        "decision_scope": "archive_local",
+        "verdict": "accepted",
+        "requirements": [],
+        "defects": [],
+        "evidence_refs": [],
+        "release_gates": [],
+        "summary": "Fixture non-independent acceptance registered but not recommended.",
+    }))
+    register_path = repository / "docs/v1-archive/snapshot-register.json"
+    register = json.loads(register_path.read_text(encoding="utf-8"))
+    register["entries"].append({
+        "run_id": tooling_run_id,
+        "manifest_sha256": tooling_manifest_sha256,
+        "archive_local_verdict": "accepted",
+        "acceptance_report": acceptance_path,
+        "acceptance_report_sha256": acceptance_sha256,
+        "supersedes_run_id": register["entries"][-1]["run_id"],
+    })
+    register_path.write_text(json.dumps(register), encoding="utf-8")
+    summary_path = repository / "reports/versions/v1.0.0/version-summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary["snapshot_chain"] = register["entries"]
+    summary_path.write_text(json.dumps(summary), encoding="utf-8")
+
+    archive, archive_zip = _build_fixture_archive(repository, "20260730T010239Z")
+
+    # 政策口径：non_independent 验收的候选可被接受登记。
+    assert verify_v1_archive.verify_archive(archive)["status"] == "verified"
+    assert verify_v1_archive.verify_archive(archive_zip)["status"] == "verified"
+
+    # 但推荐快照仍须独立验收记录支撑。
+    mutable_archive, _ = _build_mutable_fixture_archive(repository, "20260730T010240Z")
+    summary_metadata_path = mutable_archive / "baseline/reports/versions/v1.0.0/version-summary.json"
+    metadata = json.loads(summary_metadata_path.read_text(encoding="utf-8"))
+    metadata["recommended_snapshot_run_id"] = tooling_run_id
+    _update_declared_report_register(mutable_archive, "RPT-FIXTURE-V1-0-0-SUMMARY", metadata)
+
+    with pytest.raises(verify_v1_archive.VerificationError, match="推荐快照缺少独立"):
+        verify_v1_archive.verify_archive(mutable_archive)
+
+
 def test_verifier_rejects_report_schema_contract_drift(runtime_root: Path) -> None:
     repository = _write_fixture_repository(runtime_root / "repository")
     archive, _ = _build_mutable_fixture_archive(repository, "20260730T010232Z")
@@ -1144,7 +1202,7 @@ def test_real_defect_ledger_contains_migrated_and_current_cycle_entries() -> Non
     ledger = json.loads((project_root / "docs/v1-archive/defect-ledger.json").read_text(encoding="utf-8"))
     assert ledger["schema_version"] == 1
     by_id = {item["defect_id"]: item for item in ledger["defects"]}
-    assert len(by_id) == 44
+    assert len(by_id) == 60
     assert by_id["DEF-PG-001"]["disposition"] == "blocked"
     for defect_id in (
         "DEF-INSTANCE-LOCK-APPEND-GROWTH",

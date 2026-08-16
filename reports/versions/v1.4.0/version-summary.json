@@ -1,7 +1,52 @@
 {
   "schema_version": 1,
-  "purpose": "Frozen identities for every known V1 audit candidate and its acceptance record. Version summaries must reproduce this ordered chain exactly.",
-  "entries": [
+  "report_id": "RPT-V1-4-0-SUMMARY-001",
+  "recorded_at_utc": "2026-08-16T06:00:21Z",
+  "report_kind": "version_summary",
+  "author_role": "release_management",
+  "independence": "not_applicable",
+  "product_version": "v1.4.0",
+  "decision_scope": "version_archive",
+  "verdict": "accepted",
+  "requirements": [],
+  "defects": [],
+  "evidence_refs": [
+    "reports/testing/20260816T055218Z-v1-4-archive-candidate-acceptance.md",
+    "reports/testing/20260816T055531Z-v1-4-archive-final-record-acceptance.md",
+    "reports/development/20260816T050313Z-v1-4-upgrade.md"
+  ],
+  "release_gates": [
+    {
+      "gate_id": "GATE-PG-PHYSICAL",
+      "status": "blocked",
+      "requirements": [
+        "REQ-045"
+      ]
+    },
+    {
+      "gate_id": "GATE-COMPOSE-PHYSICAL",
+      "status": "blocked",
+      "requirements": [
+        "REQ-045"
+      ]
+    },
+    {
+      "gate_id": "GATE-BROWSER-BLACKBOX",
+      "status": "blocked",
+      "requirements": [
+        "REQ-001",
+        "REQ-044"
+      ]
+    },
+    {
+      "gate_id": "GATE-RELEASE-READINESS",
+      "status": "blocked",
+      "requirements": [
+        "REQ-046"
+      ]
+    }
+  ],
+  "snapshot_chain": [
     {
       "run_id": "20260730T110828Z",
       "manifest_sha256": "7fd9cc5afd3576b959989c1a43abca4f75b5599d126fd8017ca56f55577b49da",
@@ -122,5 +167,7 @@
       "acceptance_report_sha256": "04910b6d7c43eff1ada28834359e7f01da8d38d6fdc0cd5b6b65073052500df1",
       "supersedes_run_id": "20260816T054638Z-v1-4-candidate"
     }
-  ]
+  ],
+  "recommended_snapshot_run_id": "20260815T082711Z-v1-3-final-record",
+  "summary": "v1.4.0（分类双字段、可配置媒体 AI、AI 出站校验与凭据隔离、场景感知关键帧采样）的版本归档汇总：候选链与冻结快照登记完全一致（15 项）；本周期候选 20260816T054638Z-v1-4-candidate 与最终记录 20260816T055450Z-v1-4-final-record 均以 non_independent archive_local 验收 accepted 登记，按政策不进入推荐位——推荐快照保持 20260815T082711Z-v1-3-final-record（独立验收），待独立 archive_local 验收后方可更替。version_archive 范围裁定为 accepted；发布门禁保持 blocked，release_readiness 为 blocked。"
 }

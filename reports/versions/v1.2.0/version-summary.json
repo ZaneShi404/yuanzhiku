@@ -242,6 +242,22 @@
       "acceptance_report": "reports/testing/20260815T121207Z-v1-3-archive-tooling-acceptance.md",
       "acceptance_report_sha256": "70bb458770957613eb538d2466ff283b12ed74a8f0b2e3a556fc096c68cd80d8",
       "supersedes_run_id": "20260815T082711Z-v1-3-final-record"
+    },
+    {
+      "run_id": "20260816T054638Z-v1-4-candidate",
+      "manifest_sha256": "10336c355f6a642135b9182266218d35400503212eaa76f5ab6ecd2dff45a10a",
+      "archive_local_verdict": "accepted",
+      "acceptance_report": "reports/testing/20260816T055218Z-v1-4-archive-candidate-acceptance.md",
+      "acceptance_report_sha256": "d6348f72f789bfb778f5f8a7c4768898e207d010462ccc93f70f1aeff1a87119",
+      "supersedes_run_id": "20260815T121704Z-archive-tooling"
+    },
+    {
+      "run_id": "20260816T055450Z-v1-4-final-record",
+      "manifest_sha256": "cdb4410112c322cc43438331fb5e205d14f09f7f7cebf32c9d93b3a8bfdd773d",
+      "archive_local_verdict": "accepted",
+      "acceptance_report": "reports/testing/20260816T055531Z-v1-4-archive-final-record-acceptance.md",
+      "acceptance_report_sha256": "04910b6d7c43eff1ada28834359e7f01da8d38d6fdc0cd5b6b65073052500df1",
+      "supersedes_run_id": "20260816T054638Z-v1-4-candidate"
     }
   ],
   "recommended_snapshot_run_id": "20260814T174651Z",

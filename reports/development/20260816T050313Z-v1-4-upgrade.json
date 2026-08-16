@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "report_id": "RPT-V1-4-UPGRADE-20260816T050313Z-001",
+  "recorded_at_utc": "2026-08-16T05:03:13Z",
+  "report_kind": "development",
+  "author_role": "development",
+  "independence": "non_independent",
+  "product_version": "v1.4.0",
+  "decision_scope": "archive_local",
+  "verdict": "accepted",
+  "requirements": [
+    "REQ-050",
+    "REQ-051",
+    "REQ-052",
+    "REQ-053"
+  ],
+  "defects": [],
+  "evidence_refs": [
+    "reports/development/20260816T050313Z-v1-4-upgrade.md"
+  ],
+  "release_gates": [
+    {
+      "gate_id": "GATE-UNIT-INTEGRATION-REGRESSION",
+      "status": "passed",
+      "requirements": [
+        "REQ-050",
+        "REQ-051",
+        "REQ-052",
+        "REQ-053"
+      ]
+    },
+    {
+      "gate_id": "GATE-FRONTEND-BUILD",
+      "status": "passed",
+      "requirements": [
+        "REQ-050",
+        "REQ-051"
+      ]
+    },
+    {
+      "gate_id": "GATE-BROWSER-BLACKBOX",
+      "status": "blocked",
+      "requirements": [
+        "REQ-001",
+        "REQ-044"
+      ]
+    },
+    {
+      "gate_id": "GATE-COMPOSE-PHYSICAL",
+      "status": "blocked",
+      "requirements": [
+        "REQ-045"
+      ]
+    },
+    {
+      "gate_id": "GATE-RELEASE-READINESS",
+      "status": "blocked",
+      "requirements": [
+        "REQ-046"
+      ]
+    }
+  ],
+  "summary": "v1.4.0 升级开发自述：REQ-050 分类双字段（domains 多选 × genres 单选，taxonomy 单源下发，schema v9 迁移与可移植归档 schema v8）、REQ-051 可配置媒体 AI（转写/理解双组配置、两层级联理解，litellm==1.96.2 唯一新依赖）、REQ-052 AI 出站校验与凭据隔离、REQ-053 场景感知关键帧采样；另有视频分析、检索、主题/关系与图片分析设置修复。本周期 16 条缺陷全部 resolved_locally（台账 60 条）。单元套件 347 passed / 2 skipped，集成 3 passed，前端构建通过。non_independent 开发自测，不构成发布批准，release_readiness 保持 blocked。"
+}

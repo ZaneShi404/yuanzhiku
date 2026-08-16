@@ -1068,10 +1068,12 @@ def _validate_report_register(member_map: dict[str, Member]) -> None:
         ):
             raise VerificationError("冻结快照登记验收报告无法追溯")
         declared = acceptance_entry.get("declared")
+        # 登记一致性只要求验收报告身份可追溯；独立性口径（推荐快照必须 independent）
+        # 由 _validate_version_summary_chain 对推荐位单独强制，政策允许 non_independent 登记。
         if isinstance(declared, dict) and (
             declared.get("report_kind") != "acceptance"
             or declared.get("decision_scope") != "archive_local"
-            or declared.get("independence") != "independent"
+            or declared.get("independence") not in REPORT_INDEPENDENCE
             or declared.get("archive_run_id") != snapshot["run_id"]
             or declared.get("archive_manifest_sha256") != snapshot["manifest_sha256"]
             or declared.get("verdict") != snapshot["archive_local_verdict"]

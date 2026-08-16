@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "report_id": "RPT-V1-4-ARCHIVE-FINAL-RECORD-ACCEPTANCE-20260816T055531Z-001",
+  "recorded_at_utc": "2026-08-16T05:55:31Z",
+  "report_kind": "acceptance",
+  "author_role": "acceptance",
+  "independence": "non_independent",
+  "product_version": "v1.4.0",
+  "decision_scope": "archive_local",
+  "verdict": "accepted",
+  "requirements": [
+    "REQ-042",
+    "REQ-046"
+  ],
+  "defects": [],
+  "evidence_refs": [
+    "reports/testing/20260816T055531Z-v1-4-archive-final-record-acceptance.md"
+  ],
+  "release_gates": [
+    {
+      "gate_id": "GATE-ARCHIVE-LOCAL-V1-4-FINAL",
+      "status": "passed",
+      "requirements": [
+        "REQ-042"
+      ]
+    },
+    {
+      "gate_id": "GATE-RELEASE-READINESS",
+      "status": "blocked",
+      "requirements": [
+        "REQ-046"
+      ]
+    }
+  ],
+  "archive_run_id": "20260816T055450Z-v1-4-final-record",
+  "archive_manifest_sha256": "cdb4410112c322cc43438331fb5e205d14f09f7f7cebf32c9d93b3a8bfdd773d",
+  "summary": "v1.4 归档链最终记录快照 20260816T055450Z-v1-4-final-record 的 archive_local 裁定：accepted（non_independent，与构建/开发同会话，按政策如实标注；本快照可被接受登记但不进入推荐位）。该快照承载候选 20260816T054638Z-v1-4-candidate 的验收记录与 14 条目冻结快照登记。封存目录与同名压缩包在重放前后均通过独立验证（225 条目，退出码 0，manifest 自哈希复核一致）；封存副本回归在隔离副本内 36 passed、1 skipped、1 warning；重放后成员集合与 manifest 哈希无变化；四份版本汇总 snapshot_chain 与登记逐项一致，v1.4.0 推荐快照保持 v1.3 最终记录。本裁定仅限 archive_local，不等于 release approval；release_readiness 保持 blocked。"
+}
