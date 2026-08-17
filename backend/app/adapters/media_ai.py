@@ -75,9 +75,17 @@ def _litellm_transcription(**kwargs: Any) -> Any:
     return litellm.transcription(**kwargs)
 
 
+def _passthrough_model(model: str) -> str:
+    """OpenAI 兼容分组统一走 litellm 的 openai/ 透传：任何模型名都可用，
+    不依赖 litellm 版本对模型名的注册表（新模型名如 deepseek-v4-pro 在
+    旧版 litellm 上会路由失败报 400）。用户已带前缀的模型名原样保留。"""
+    return model if "/" in model else f"openai/{model}"
+
+
 def _litellm_completion(**kwargs: Any) -> Any:
     import litellm
 
+    kwargs["model"] = _passthrough_model(str(kwargs.get("model") or ""))
     return litellm.completion(**kwargs)
 
 
@@ -329,7 +337,7 @@ class ConfiguredMediaAi(MediaAiPort):
     def _chat_json(self, config: _AiGroupConfig, system_prompt: str, user_content: str, *, model: str | None = None) -> dict[str, Any]:
         try:
             response = self._completion_caller(
-                model=model or config.model,
+                model=_passthrough_model(model or config.model),
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_content},
@@ -495,7 +503,7 @@ class ConfiguredMediaAi(MediaAiPort):
         try:
             if part == "understand":
                 self._completion_caller(
-                    model=config.model,
+                    model=_passthrough_model(config.model),
                     messages=[{"role": "user", "content": "ping"}],
                     max_tokens=1,
                     api_key=config.api_key,
@@ -573,7 +581,7 @@ class ApiTranscriber(MediaTranscriberPort):
             try:
                 with chunk_path.open("rb") as audio_file:
                     response = self._transcription_caller(
-                        model=config.model,
+                        model=_passthrough_model(config.model),
                         file=audio_file,
                         response_format="verbose_json",
                         timestamp_granularities=["segment"],

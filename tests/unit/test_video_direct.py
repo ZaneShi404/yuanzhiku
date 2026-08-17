@@ -136,7 +136,7 @@ def test_mimo_base64_direct_send_offsets_entries(tmp_path: Path) -> None:
     video_url = user_content[0]["video_url"]["url"]
     assert video_url.startswith("data:video/mp4;base64,")
     assert captured[0]["api_base"] == "https://api.xiaomimimo.com/v1"
-    assert captured[0]["model"] == "mimo-v2.5"
+    assert captured[0]["model"] == "openai/mimo-v2.5"
 
 
 def test_mimo_relay_preferred_over_base64(tmp_path: Path) -> None:

@@ -287,7 +287,7 @@ def test_adapter_transcribe_merges_chunk_offsets(tmp_path: Path) -> None:
         (60_500, 62_000, "第二段"),
     ]
     assert transcript.text == "第一段\n继续\n第二段"
-    assert calls[0]["model"] == "whisper-1"
+    assert calls[0]["model"] == "openai/whisper-1"
     assert calls[0]["api_key"] == SECRET
     assert calls[0]["api_base"] == BASE_URL
     assert calls[0]["timeout"] == 300.0

@@ -391,9 +391,11 @@ class _VideoChatAdapter(VideoUnderstandingPort):
 
     def _chat(self, messages: list[dict[str, Any]], model: str, base_url: str | None, api_key: str, timeout: float) -> Any:
         caller = self._completion_caller or self._default_completion()
+        from app.adapters.media_ai import _passthrough_model
+
         try:
             return caller(
-                model=model,
+                model=_passthrough_model(model),
                 messages=messages,
                 response_format={"type": "json_object"},
                 api_key=api_key,
