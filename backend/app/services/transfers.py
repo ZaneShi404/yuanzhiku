@@ -175,7 +175,11 @@ class TransferService:
             if urlsplit(card["url"]).username is not None or urlsplit(card["url"]).password is not None:
                 raise ValueError("SQLite 状态快照无效")
         try:
-            return self._backup_records({"schema_version": schema_version, "records": rows})
+            # SELECT * 的列序是数据库物理列序（迁移追加列在末尾），与可移植
+            # 契约顺序（BACKUP_TABLE_COLUMNS）可能不一致；与记录路径同样先
+            # 重排到契约顺序再校验，避免物理列序差异误判快照无效。
+            ordered = self._ordered_rows(rows, BACKUP_TABLES)
+            return self._backup_records({"schema_version": schema_version, "records": ordered})
         except ValueError as exc:
             raise ValueError("SQLite 状态快照无效") from exc
 

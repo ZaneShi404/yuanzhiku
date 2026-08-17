@@ -207,6 +207,36 @@ def test_backup_rejects_sqlite_snapshot_that_differs_from_validated_records(runt
     assert not target.exists()
 
 
+def test_backup_accepts_snapshot_with_appended_migration_columns(runtime_root: Path) -> None:
+    """迁移追加列（ALTER TABLE ADD COLUMN）后，物理列序与契约列序不同；
+    备份的快照校验必须按契约顺序重排后比较，而不是按 SELECT * 物理列序
+    误判「逻辑记录无效」（2026-08-17 日常备份失败缺陷回归）。"""
+    services, imported = _imported_service(runtime_root)
+    # 模拟 v9 迁移追加列序：把 sources 重建为「追加列在末尾」的物理顺序。
+    with services.repository.connection() as connection:
+        connection.execute("PRAGMA foreign_keys=OFF")
+        connection.execute("ALTER TABLE sources RENAME TO sources_legacy")
+        connection.execute(
+            """
+            CREATE TABLE sources (
+                id TEXT PRIMARY KEY, source_type TEXT NOT NULL, title TEXT NOT NULL, author TEXT,
+                language TEXT NOT NULL, notes TEXT, source_date TEXT, rights TEXT,
+                tags_json TEXT NOT NULL, processing_state TEXT NOT NULL, imported_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL, deleted_at TEXT, domains_json TEXT NOT NULL, genres_json TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            "INSERT INTO sources SELECT id, source_type, title, author, language, notes, source_date, "
+            "rights, tags_json, processing_state, imported_at, updated_at, deleted_at, domains_json, genres_json "
+            "FROM sources_legacy"
+        )
+        connection.execute("DROP TABLE sources_legacy")
+    backup = services.transfers.create_backup()
+    assert backup["state"] == "succeeded"
+    assert Path(backup["archive_path"]).is_file()
+
+
 def test_pre_v5_sqlite_migration_enforces_non_null_unique_locator_identity(runtime_root: Path) -> None:
     paths = data_paths(runtime_root)
     paths.create()
