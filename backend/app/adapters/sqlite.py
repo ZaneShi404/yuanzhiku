@@ -1541,6 +1541,17 @@ class SqliteRepository:
             row = connection.execute("SELECT cancel_requested_at FROM jobs WHERE id=?", (job_id,)).fetchone()
             return bool(row and row["cancel_requested_at"])
 
+    def delete_jobs(self, job_ids: list[str]) -> int:
+        """批量删除作业（含其尝试记录）；不存在的 id 幂等跳过。"""
+        if not job_ids:
+            return 0
+        with self.connection() as connection:
+            total = 0
+            for job_id in job_ids:
+                connection.execute("DELETE FROM job_attempts WHERE job_id=?", (job_id,))
+                total += connection.execute("DELETE FROM jobs WHERE id=?", (job_id,)).rowcount
+            return total
+
     def create_external_card(self, card_type: str, url: str, title: str, author: str | None, notes: str | None, tags: list[str]) -> dict[str, Any]:
         card_id = identifier()
         with self.connection() as connection:

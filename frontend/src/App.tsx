@@ -1460,10 +1460,39 @@ function jobLabel(kind: string) {
 }
 
 function JobsPage({ jobs, onRefresh, onMessage }: { jobs: Job[]; onRefresh: () => Promise<void>; onMessage: (message: string) => void }) {
+  const [selected, setSelected] = useState<string[]>([])
+  const [confirming, setConfirming] = useState(false)
+  const [busy, setBusy] = useState(false)
   const act = async (id: string, action: 'cancel' | 'retry') => {
     try { await request(`/jobs/${id}/${action}`, { method: 'POST' }); await onRefresh() } catch (error) { onMessage(error instanceof Error ? error.message : '作业操作失败') }
   }
-  return <div className="page"><PageHeader title="作业"><button type="button" className="icon-button" onClick={() => void onRefresh()} title="刷新作业"><ArchiveRestore size={18}/></button></PageHeader>{jobs.length ? <div className="job-list">{jobs.map(job => <article className="job" key={job.id}><div className="job-top"><div><b>{jobLabel(job.kind)}</b><small>{formatDate(job.created_at)} · 已尝试 {job.attempt_count} 次</small></div><Status value={job.state}/></div><div className="progress"><span style={{ width: `${job.progress}%` }} /></div><div className="job-foot"><span>{job.message || '等待本地 worker'}</span>{['queued', 'running', 'retry_wait'].includes(job.state) && <button type="button" className="icon-button" title="取消作业" onClick={() => void act(job.id, 'cancel')}><X size={17}/></button>}{['failed', 'blocked', 'cancelled'].includes(job.state) && <button type="button" className="icon-button" title="重试作业" onClick={() => void act(job.id, 'retry')}><ArchiveRestore size={17}/></button>}</div></article>)}</div> : <Empty icon={<ListChecks size={36}/>} text="没有作业记录" />}</div>
+  const toggle = (id: string) => {
+    setConfirming(false)
+    setSelected(current => current.includes(id) ? current.filter(item => item !== id) : [...current, id])
+  }
+  const selectable = jobs.filter(job => job.state !== 'running')
+  const allSelected = selectable.length > 0 && selectable.every(job => selected.includes(job.id))
+  const toggleAll = () => {
+    setConfirming(false)
+    setSelected(allSelected ? [] : selectable.map(job => job.id))
+  }
+  const removeSelected = async () => {
+    if (!confirming) { setConfirming(true); return }
+    setBusy(true)
+    try {
+      await request('/jobs/delete', { method: 'POST', body: JSON.stringify({ job_ids: selected }) })
+      setSelected([])
+      setConfirming(false)
+      await onRefresh()
+      onMessage('已删除所选作业记录')
+    } catch (error) {
+      setConfirming(false)
+      onMessage(error instanceof Error ? error.message : '作业删除失败')
+    } finally {
+      setBusy(false)
+    }
+  }
+  return <div className="page"><PageHeader title="作业"><button type="button" className="icon-button" onClick={() => void onRefresh()} title="刷新作业"><ArchiveRestore size={18}/></button><button type="button" className="icon-button" disabled={!selectable.length} onClick={toggleAll} title={allSelected ? '取消全选' : '全选可删除的作业'}><Check size={18}/></button>{selected.length > 0 && <button type="button" className={confirming ? 'button danger' : 'button secondary'} disabled={busy} onClick={() => void removeSelected()}>{busy ? '正在删除' : confirming ? `确认删除（${selected.length}）` : `删除所选（${selected.length}）`}</button>}</PageHeader>{jobs.length ? <div className="job-list">{jobs.map(job => <article className="job" key={job.id}><div className="job-top"><div><input type="checkbox" checked={selected.includes(job.id)} disabled={job.state === 'running'} onChange={() => toggle(job.id)} title={job.state === 'running' ? '运行中的作业不能删除' : '选择删除'} /><b>{jobLabel(job.kind)}</b><small>{formatDate(job.created_at)} · 已尝试 {job.attempt_count} 次</small></div><Status value={job.state}/></div><div className="progress"><span style={{ width: `${job.progress}%` }} /></div><div className="job-foot"><span>{job.message || '等待本地 worker'}</span>{['queued', 'running', 'retry_wait'].includes(job.state) && <button type="button" className="icon-button" title="取消作业" onClick={() => void act(job.id, 'cancel')}><X size={17}/></button>}{['failed', 'blocked', 'cancelled'].includes(job.state) && <button type="button" className="icon-button" title="重试作业" onClick={() => void act(job.id, 'retry')}><ArchiveRestore size={17}/></button>}</div></article>)}</div> : <Empty icon={<ListChecks size={36}/>} text="没有作业记录" />}</div>
 }
 
 function ExternalCardsPage({ cards, focusedId, onMessage }: { cards: Card[]; focusedId: string | null; onMessage: (message: string) => void }) {

@@ -444,6 +444,20 @@ class SttModelActionRequest(BaseModel):
         return value
 
 
+class JobsDeleteRequest(BaseModel):
+    """作业批量删除：运行中的作业不得删除（端点侧拒绝）。"""
+
+    job_ids: list[str] = Field(min_length=1, max_length=200)
+
+    @field_validator("job_ids")
+    @classmethod
+    def valid_job_ids(cls, value: list[str]) -> list[str]:
+        cleaned = list(dict.fromkeys(item for item in value if isinstance(item, str) and item.strip()))
+        if not cleaned:
+            raise ValueError("作业 id 列表不能为空")
+        return cleaned
+
+
 class VideoSummarizeRequest(BaseModel):
     force_tier2: bool = False
 

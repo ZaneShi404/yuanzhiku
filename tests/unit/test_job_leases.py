@@ -253,3 +253,63 @@ def test_resident_memory_bytes_tolerates_exited_process() -> None:
 
     result = _resident_memory_bytes(_recently_exited_pid())
     assert result is None or isinstance(result, int)
+
+
+def _app_and_client(runtime_root: Path):
+    import os as _os
+
+    _os.environ["YUANZHIKU_EMBEDDED_WORKER"] = "false"
+    app = create_app(runtime_root, acquire_lock=False)
+    from fastapi.testclient import TestClient
+
+    return app, TestClient(app)
+
+
+def test_jobs_delete_endpoint_deletes_and_audits(runtime_root: Path) -> None:
+    app, client = _app_and_client(runtime_root)
+    services = app.state.services
+    with client:
+        ids = [
+            services.repository.create_job("backup", None, None, None, None, {}, priority=0)["id"]
+            for _ in range(3)
+        ]
+        response = client.post("/api/v1/jobs/delete", json={"job_ids": ids})
+        assert response.status_code == 200, response.text
+        assert response.json() == {"deleted": 3}
+        remaining = {job["id"] for job in services.repository.list_jobs()}
+        assert not remaining.intersection(ids)
+        with services.repository.connection() as connection:
+            audited = {
+                row["entity_id"]
+                for row in connection.execute(
+                    "SELECT entity_id FROM audit_events WHERE event_type='job_delete'"
+                ).fetchall()
+            }
+        assert audited == set(ids)
+
+
+def test_jobs_delete_rejects_running_job(runtime_root: Path) -> None:
+    app, client = _app_and_client(runtime_root)
+    services = app.state.services
+    with client:
+        created = services.repository.create_job("backup", None, None, None, None, {}, priority=0)
+        claimed = services.repository.claim_next_job()
+        assert claimed is not None and claimed["state"] == "running"
+        response = client.post("/api/v1/jobs/delete", json={"job_ids": [created["id"]]})
+        assert response.status_code == 409
+        assert response.json()["detail"]["code"] == "job_running"
+        assert services.repository.get_job(created["id"]) is not None
+
+
+def test_jobs_delete_skips_missing_ids_and_validates_input(runtime_root: Path) -> None:
+    app, client = _app_and_client(runtime_root)
+    services = app.state.services
+    with client:
+        created = services.repository.create_job("backup", None, None, None, None, {}, priority=0)
+        response = client.post("/api/v1/jobs/delete", json={"job_ids": [created["id"], "no-such-job"]})
+        assert response.status_code == 200
+        assert response.json() == {"deleted": 1}
+        invalid = client.post("/api/v1/jobs/delete", json={"job_ids": []})
+        assert invalid.status_code == 422
+        invalid_type = client.post("/api/v1/jobs/delete", json={"job_ids": ["ok", 123]})
+        assert invalid_type.status_code == 422

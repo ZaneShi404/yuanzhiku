@@ -42,6 +42,7 @@ from app.domain.models import (
     DouyinCardCreate,
     ExportCreate,
     ExternalCardCreate,
+    JobsDeleteRequest,
     KnowledgeCreate,
     LinkProbeRequest,
     ManualRepresentationCreate,
@@ -1280,6 +1281,23 @@ def create_app(root: str | Path | None = None, *, acquire_lock: bool = True) -> 
         if job is None:
             raise HTTPException(status_code=404, detail="作业不存在")
         return job
+
+    @app.post(f"{api}/jobs/delete", tags=["jobs"])
+    def delete_jobs(request: JobsDeleteRequest, svc: ApplicationServices = Depends(get_services)) -> dict[str, Any]:
+        # 批量删除作业记录：运行中的作业拒绝（409）；不存在的 id 幂等跳过。
+        existing = {job["id"]: job for job in svc.repository.list_jobs()}
+        for job_id in request.job_ids:
+            job = existing.get(job_id)
+            if job is not None and job["state"] == "running":
+                raise HTTPException(
+                    status_code=409,
+                    detail={"code": "job_running", "message": "运行中的作业不能删除"},
+                )
+        deleted = svc.repository.delete_jobs(request.job_ids)
+        for job_id in request.job_ids:
+            if job_id in existing:
+                svc.repository.audit("job_delete", job_id, "succeeded")
+        return {"deleted": deleted}
 
     @app.post(f"{api}/jobs/run-once", tags=["jobs"])
     def run_one_job(svc: ApplicationServices = Depends(get_services)) -> dict[str, Any]:
