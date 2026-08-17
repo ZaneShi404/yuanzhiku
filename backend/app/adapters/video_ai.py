@@ -145,7 +145,10 @@ def _message_content(response: Any) -> str:
 
 
 class RelayClient:
-    """自备视频中转客户端（决策 22）：上传拿临时 URL，仅发往用户配置端点。"""
+    """自备视频中转客户端（决策 22）：两种形态——http（用户自建中转服务，需
+    已备案域名）与 cos（腾讯云对象存储，未备案环境下的默认路径，COS 默认域名
+    自带有效 HTTPS 证书）。上传返回可被供应商拉取的有效 HTTPS URL；cos 形态
+    在直送完成后按 cleanup 删除对象（http 形态由服务端 TTL 负责）。"""
 
     def __init__(
         self,
@@ -153,17 +156,34 @@ class RelayClient:
         credentials_reader: Callable[[], dict[str, str]],
         *,
         uploader: Callable[[Path, str, str], str] | None = None,
+        cos_factory: Callable[[str, str, str, str], Any] | None = None,
     ) -> None:
         self._settings_getter = settings_getter
         self._credentials_reader = credentials_reader
         self._uploader = uploader
+        self._cos_factory = cos_factory
+
+    def kind(self) -> str:
+        return self._settings_getter().get("ai_video_relay_kind", "http")
 
     def configured(self) -> bool:
+        kind = self.kind()
+        if kind == "cos":
+            bucket = (self._settings_getter().get("ai_video_cos_bucket") or "").strip()
+            credentials = self._credentials_reader()
+            return bool(bucket and credentials.get("video_cos_secret_id") and credentials.get("video_cos_secret_key"))
+        if kind == "off":
+            return False
         base = (self._settings_getter().get("ai_video_relay_base_url") or "").strip()
         secret = self._credentials_reader().get("video_relay") or ""
         return bool(base and secret)
 
     def upload(self, path: Path) -> str:
+        kind = self.kind()
+        if kind == "cos":
+            return self._cos_upload(path)
+        if kind == "off":
+            raise MediaAiUnavailable("relay_not_configured")
         base = (self._settings_getter().get("ai_video_relay_base_url") or "").strip()
         secret = self._credentials_reader().get("video_relay") or ""
         if not base or not secret:
@@ -177,6 +197,63 @@ class RelayClient:
         if not isinstance(url, str) or not url.strip():
             raise RuntimeError("视频中转上传失败")
         return url
+
+    def cleanup(self, url: str) -> None:
+        """直送完成后尽力清理；http 形态由服务端 TTL 负责，cos 形态删除对象。"""
+        if self.kind() != "cos" or not url:
+            return
+        try:
+            bucket, key = self._bucket_and_key(url)
+        except ValueError:
+            return
+        try:
+            self._cos_client().delete_object(Bucket=bucket, Key=key)
+        except Exception:
+            pass  # 清理为尽力而为；对象生命周期规则兜底
+
+    def _cos_config(self) -> tuple[str, str, str, str]:
+        settings = self._settings_getter()
+        credentials = self._credentials_reader()
+        bucket = (settings.get("ai_video_cos_bucket") or "").strip()
+        region = (settings.get("ai_video_cos_region") or "ap-shanghai").strip()
+        secret_id = credentials.get("video_cos_secret_id") or ""
+        secret_key = credentials.get("video_cos_secret_key") or ""
+        if not bucket or not secret_id or not secret_key:
+            raise MediaAiUnavailable("relay_not_configured")
+        return bucket, region, secret_id, secret_key
+
+    def _cos_client(self) -> Any:
+        bucket, region, secret_id, secret_key = self._cos_config()
+        if self._cos_factory is not None:
+            return self._cos_factory(bucket, region, secret_id, secret_key)
+        from qcloud_cos import CosConfig, CosS3Client
+
+        return CosS3Client(CosConfig(Region=region, SecretId=secret_id, SecretKey=secret_key))
+
+    def _cos_upload(self, path: Path) -> str:
+        import uuid as _uuid
+
+        bucket, _, _, _ = self._cos_config()
+        key = f"video-relay/{_uuid.uuid4().hex}/{path.name}"
+        try:
+            client = self._cos_client()
+            with path.open("rb") as stream:
+                client.put_object(Bucket=bucket, Body=stream, Key=key)
+            return client.get_presigned_url(Method="GET", Bucket=bucket, Key=key, Expired=1800)
+        except Exception as exc:
+            raise RuntimeError("对象存储中转上传失败") from exc
+
+    @staticmethod
+    def _bucket_and_key(url: str) -> tuple[str, str]:
+        from urllib.parse import unquote, urlsplit
+
+        parsed = urlsplit(url)
+        key = unquote(parsed.path.lstrip("/"))
+        host = parsed.netloc.split(":")[0]
+        bucket = host.split(".cos.")[0] if ".cos." in host else ""
+        if not key or not bucket:
+            raise ValueError("invalid cos url")
+        return bucket, key
 
     @staticmethod
     def _default_uploader(path: Path, base: str, secret: str) -> str:
@@ -573,10 +650,13 @@ class QwenVideoAdapter(_VideoChatAdapter):
         settings = self._settings_getter()
         if self._relay.configured():
             url = self._relay.upload(video_path)
-            return self._full_call(
-                {"type": "video_url", "video_url": {"url": url}},
-                transcript_text, focus, model, api_key, base_url, timeout,
-            )
+            try:
+                return self._full_call(
+                    {"type": "video_url", "video_url": {"url": url}},
+                    transcript_text, focus, model, api_key, base_url, timeout,
+                )
+            finally:
+                self._relay.cleanup(url)
         if video_path.stat().st_size > QWEN_URL_SOURCE_LIMIT:
             raise MediaAiUnavailable("video_input")
         try:
@@ -645,10 +725,13 @@ class MiMoVideoAdapter(_VideoChatAdapter):
         settings = self._settings_getter()
         if self._relay.configured():
             url = self._relay.upload(video_path)
-            return self._full_call(
-                {"type": "video_url", "video_url": {"url": url}},
-                transcript_text, focus, model, api_key, base_url, timeout,
-            )
+            try:
+                return self._full_call(
+                    {"type": "video_url", "video_url": {"url": url}},
+                    transcript_text, focus, model, api_key, base_url, timeout,
+                )
+            finally:
+                self._relay.cleanup(url)
         limits = _limits_from(settings, timeout)
         ffmpeg = os.environ.get("YUANZHIKU_FFMPEG_BIN", "ffmpeg")
         segments: list[tuple[Path, int, int]] = [(video_path, 0, 0)]

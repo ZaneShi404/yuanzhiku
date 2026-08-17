@@ -64,10 +64,16 @@ class _StaticRelay:
     def upload(self, path: Path) -> str:
         return f"https://relay.example.com/f/{'a' * 32}"
 
+    def cleanup(self, url: str) -> None:
+        pass
+
 
 class _NoRelay:
     def configured(self) -> bool:
         return False
+
+    def cleanup(self, url: str) -> None:
+        pass
 
 
 def _completion(payload) -> dict:
@@ -200,6 +206,88 @@ def test_relay_client_unconfigured_raises(tmp_path: Path) -> None:
     assert client.configured() is False
     with pytest.raises(MediaAiUnavailable):
         client.upload(tmp_path / "v.mp4")
+
+
+class _FakeCosClient:
+    def __init__(self, bucket: str) -> None:
+        self.bucket = bucket
+        self.uploads: list[tuple[str, str]] = []
+        self.deletes: list[tuple[str, str]] = []
+
+    def put_object(self, *, Bucket: str, Body, Key: str) -> None:
+        self.uploads.append((Bucket, Key))
+        Body.read()
+
+    def get_presigned_url(self, *, Method: str, Bucket: str, Key: str, Expired: int) -> str:
+        return f"https://{Bucket}.cos.ap-shanghai.myqcloud.com/{Key}?sign=presigned"
+
+    def delete_object(self, *, Bucket: str, Key: str) -> None:
+        self.deletes.append((Bucket, Key))
+
+
+def test_cos_relay_upload_and_cleanup(tmp_path: Path) -> None:
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"cos-data")
+    cached: dict[str, _FakeCosClient] = {}
+
+    def factory(bucket: str, region: str, secret_id: str, secret_key: str) -> _FakeCosClient:
+        if bucket not in cached:
+            cached[bucket] = _FakeCosClient(bucket)
+        return cached[bucket]
+
+    relay = RelayClient(
+        lambda: _settings(
+            ai_video_relay_kind="cos",
+            ai_video_cos_bucket="bucket-1250000000",
+            ai_video_cos_region="ap-shanghai",
+        ),
+        lambda: _credentials(video_cos_secret_id="secret-id", video_cos_secret_key="secret-key"),
+        cos_factory=factory,
+    )
+    assert relay.kind() == "cos"
+    assert relay.configured() is True
+    url = relay.upload(video)
+    assert "bucket-1250000000.cos.ap-shanghai.myqcloud.com/video-relay/" in url
+    fake = cached["bucket-1250000000"]
+    assert len(fake.uploads) == 1
+    assert fake.uploads[0][1].startswith("video-relay/")
+    relay.cleanup(url)
+    assert len(fake.deletes) == 1
+    assert fake.deletes[0][0] == "bucket-1250000000"
+    assert fake.deletes[0][1] == fake.uploads[0][1]
+
+
+def test_cos_relay_unconfigured_and_off_kinds(tmp_path: Path) -> None:
+    missing = RelayClient(
+        lambda: _settings(ai_video_relay_kind="cos", ai_video_cos_bucket=""),
+        lambda: _credentials(video_cos_secret_id="id", video_cos_secret_key="key"),
+    )
+    assert missing.configured() is False
+    with pytest.raises(MediaAiUnavailable):
+        missing.upload(tmp_path / "v.mp4")
+    off = RelayClient(lambda: _settings(ai_video_relay_kind="off"), lambda: _credentials())
+    assert off.configured() is False
+    off.cleanup("https://bucket.cos.ap-shanghai.myqcloud.com/video-relay/x")  # 非 cos 形态 no-op
+
+
+def test_cos_settings_roundtrip(client_and_services) -> None:
+    client, services = client_and_services
+    response = client.put("/api/v1/settings/ai", json={
+        "video": {
+            "relay_kind": "cos",
+            "cos_bucket": "bucket-1250000000",
+            "cos_region": "ap-shanghai",
+            "cos_secret_id": "secret-id",
+            "cos_secret_key": "secret-key",
+        },
+    })
+    assert response.status_code == 200, response.text
+    view = response.json()["video"]["relay"]
+    assert view["kind"] == "cos"
+    assert view["cos_bucket"] == "bucket-1250000000"
+    assert view["cos_has_key"] is True
+    # 切换到 cos 后 http 凭据被移除
+    assert view["has_secret"] is False
 
 
 def test_split_video_segments_with_real_ffmpeg(tmp_path: Path) -> None:

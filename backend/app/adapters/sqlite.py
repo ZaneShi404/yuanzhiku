@@ -639,6 +639,9 @@ class SqliteRepository:
                 "ai_video_reencode": "on",
                 "ai_video_chunk_seconds": "600",
                 "ai_video_relay_base_url": "",
+                "ai_video_relay_kind": "http",
+                "ai_video_cos_bucket": "",
+                "ai_video_cos_region": "ap-shanghai",
                 "last_backup_date": "",
                 "last_integrity_sample_date": "",
             }

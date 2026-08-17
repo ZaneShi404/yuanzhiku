@@ -104,7 +104,7 @@
 
 `GET /settings/ai` 扩展三节：`transcriber`（`engine`=auto|local|api、`local_stt_model`=paraformer-zh|paraformer-zh-quant、`stt_timeout_seconds`/`stt_memory_limit_mb`/`stt_disk_limit_mb`）、`local_stt`（模型状态：`model_name`/`model_configured`/`model_available`/`downloaded_at`/`revisions`）、`video`（`provider`=off|qwen|mimo、`model`、`max_bytes`（默认 314572800）、`reencode`、`chunk_seconds`、`qwen`/`mimo` 密钥掩码、`relay`（`base_url`/`has_secret`/`secret_hint`））。
 
-`PUT /settings/ai` 新增局部分组：`transcriber`（引擎/模型/三个 stt 断路器）与 `video`（供应商/模型/上限/重编码开关/分块秒数/中转地址 + `qwen_api_key`/`mimo_api_key`/`relay_secret` 凭据，同分组密钥纪律仅入凭据文件、掩码回显；`provider: "off"` 时移除 qwen/mimo 凭据）。`relay_base_url` 非空必须是 HTTPS 公网地址、无 userinfo、≤2048 字符，否则 `422 request_validation`。凭据文件新增可选键 `video_qwen`/`video_mimo`/`video_relay`（同一原子写入纪律）。
+`PUT /settings/ai` 新增局部分组：`transcriber`（引擎/模型/三个 stt 断路器）与 `video`（供应商/模型/上限/重编码开关/分块秒数/中转地址/中转形态 `relay_kind`=off|http|cos/COS 桶与地域 + `qwen_api_key`/`mimo_api_key`/`relay_secret`/`cos_secret_id`/`cos_secret_key` 凭据，同分组密钥纪律仅入凭据文件、掩码回显；`provider: "off"` 时移除 qwen/mimo 凭据，`relay_kind: "cos"` 时移除 http 中转密钥）。`relay_base_url` 非空必须是 HTTPS 公网地址、无 userinfo、≤2048 字符，否则 `422 request_validation`。凭据文件新增可选键 `video_qwen`/`video_mimo`/`video_relay`（同一原子写入纪律）。
 
 `POST /settings/ai/stt-model` 请求体 `{"action": "download" | "delete"}`：`download` 入 `stt_model_download` 作业异步执行（返回 201 + `job_id`；已有排队/运行中下载时 `409 model_download_busy`；下载失败作业 failed 且消息脱敏，可重试）；`delete` 同步幂等（201），两者均写审计事件。
 

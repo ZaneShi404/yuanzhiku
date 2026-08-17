@@ -306,9 +306,14 @@ def _ai_settings_view(services: "ApplicationServices") -> dict[str, Any]:
             "qwen": {"has_key": bool(credentials.get("video_qwen")), "key_hint": _ai_key_hint(credentials.get("video_qwen"))},
             "mimo": {"has_key": bool(credentials.get("video_mimo")), "key_hint": _ai_key_hint(credentials.get("video_mimo"))},
             "relay": {
+                "kind": settings.get("ai_video_relay_kind", "http"),
                 "base_url": settings.get("ai_video_relay_base_url", ""),
                 "has_secret": bool(credentials.get("video_relay")),
                 "secret_hint": _ai_key_hint(credentials.get("video_relay")),
+                "cos_bucket": settings.get("ai_video_cos_bucket", ""),
+                "cos_region": settings.get("ai_video_cos_region", "ap-shanghai"),
+                "cos_has_key": bool(credentials.get("video_cos_secret_id") and credentials.get("video_cos_secret_key")),
+                "cos_key_hint": _ai_key_hint(credentials.get("video_cos_secret_id")),
             },
         },
         "local_stt": services.stt_manager.status(),
@@ -577,6 +582,12 @@ def create_app(root: str | Path | None = None, *, acquire_lock: bool = True) -> 
                 updates["ai_video_chunk_seconds"] = str(video.chunk_seconds)
             if video.relay_base_url is not None:
                 updates["ai_video_relay_base_url"] = video.relay_base_url
+            if video.relay_kind is not None:
+                updates["ai_video_relay_kind"] = video.relay_kind
+            if video.cos_bucket is not None:
+                updates["ai_video_cos_bucket"] = video.cos_bucket
+            if video.cos_region is not None:
+                updates["ai_video_cos_region"] = video.cos_region
             if video.qwen_api_key:
                 credentials["video_qwen"] = video.qwen_api_key
                 credentials_changed = True
@@ -586,6 +597,15 @@ def create_app(root: str | Path | None = None, *, acquire_lock: bool = True) -> 
             if video.relay_secret:
                 credentials["video_relay"] = video.relay_secret
                 credentials_changed = True
+            if video.cos_secret_id:
+                credentials["video_cos_secret_id"] = video.cos_secret_id
+                credentials_changed = True
+            if video.cos_secret_key:
+                credentials["video_cos_secret_key"] = video.cos_secret_key
+                credentials_changed = True
+            if video.relay_kind == "cos":
+                if credentials.pop("video_relay", None) is not None:
+                    credentials_changed = True
             if video.provider == "off":
                 for key in ("video_qwen", "video_mimo"):
                     if credentials.pop(key, None) is not None:

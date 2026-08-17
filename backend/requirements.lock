@@ -17,3 +17,4 @@ funasr==1.4.2
 modelscope==1.39.1
 torch==2.9.1
 torchaudio==2.9.1
+cos-python-sdk-v5==1.9.44

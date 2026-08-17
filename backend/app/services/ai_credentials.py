@@ -12,7 +12,7 @@ from pathlib import Path
 
 # 前两项为 AI 双分组；后三项为 v1.5 视频直送/中转（REQ-055，决策 17/22），
 # 与分组同纪律：仅文件、掩码回显、原子写入、绝不进数据库/备份/导出/日志。
-AI_CREDENTIAL_GROUPS = ("transcribe", "understand", "video_qwen", "video_mimo", "video_relay")
+AI_CREDENTIAL_GROUPS = ("transcribe", "understand", "video_qwen", "video_mimo", "video_relay", "video_cos_secret_id", "video_cos_secret_key")
 
 
 def read_ai_credentials(path: Path) -> dict[str, str]:

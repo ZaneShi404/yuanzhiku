@@ -373,9 +373,14 @@ class AiVideoSettings(BaseModel):
     reencode: str | None = None
     chunk_seconds: int | None = Field(default=None, ge=60, le=3600)
     relay_base_url: str | None = Field(default=None, max_length=2048)
+    relay_kind: str | None = None
+    cos_bucket: str | None = Field(default=None, max_length=200)
+    cos_region: str | None = Field(default=None, max_length=64)
     qwen_api_key: str | None = Field(default=None, max_length=500)
     mimo_api_key: str | None = Field(default=None, max_length=500)
     relay_secret: str | None = Field(default=None, max_length=500)
+    cos_secret_id: str | None = Field(default=None, max_length=500)
+    cos_secret_key: str | None = Field(default=None, max_length=500)
 
     @field_validator("provider")
     @classmethod
@@ -389,6 +394,13 @@ class AiVideoSettings(BaseModel):
     def valid_reencode(cls, value: str | None) -> str | None:
         if value is not None and value not in ("on", "off"):
             raise ValueError("不支持的重编码开关")
+        return value
+
+    @field_validator("relay_kind")
+    @classmethod
+    def valid_relay_kind(cls, value: str | None) -> str | None:
+        if value is not None and value not in ("off", "http", "cos"):
+            raise ValueError("不支持的中转形态")
         return value
 
     @field_validator("relay_base_url")
