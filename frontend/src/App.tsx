@@ -1554,7 +1554,7 @@ type AiSettings = {
   understand: { provider: string; base_url: string; chat_model: string; has_key: boolean; key_hint: string | null }
   transcriber: { engine: string; local_stt_model: string; stt_timeout_seconds: number; stt_memory_limit_mb: number; stt_disk_limit_mb: number }
   local_stt: { model_name: string; model_available: boolean; downloaded_at: string | null }
-  video: { provider: string; model: string; max_bytes: number; reencode: boolean; chunk_seconds: number; qwen: { has_key: boolean; key_hint: string | null }; mimo: { has_key: boolean; key_hint: string | null }; relay: { base_url: string; has_secret: boolean; secret_hint: string | null } }
+  video: { provider: string; model: string; max_bytes: number; reencode: boolean; chunk_seconds: number; qwen: { has_key: boolean; key_hint: string | null }; mimo: { has_key: boolean; key_hint: string | null }; relay: { kind: string; base_url: string; has_secret: boolean; secret_hint: string | null; cos_bucket: string; cos_region: string; cos_has_key: boolean; cos_key_hint: string | null } }
   timeout_seconds: number
   auto_pipeline: boolean
 }
@@ -1563,19 +1563,19 @@ function AiSettingsSection({ onMessage }: { onMessage: (message: string) => void
   const [transcribe, setTranscribe] = useState({ provider: 'off', base_url: '', model: '', api_key: '' })
   const [understand, setUnderstand] = useState({ provider: 'off', base_url: '', chat_model: '', api_key: '' })
   const [transcriber, setTranscriber] = useState({ engine: 'auto', local_stt_model: 'paraformer-zh', stt_timeout_seconds: '3600', stt_memory_limit_mb: '2048', stt_disk_limit_mb: '1024' })
-  const [video, setVideo] = useState({ provider: 'off', model: '', max_bytes: '314572800', reencode: true, chunk_seconds: '600', relay_base_url: '', relay_secret: '', qwen_api_key: '', mimo_api_key: '' })
+  const [video, setVideo] = useState({ provider: 'off', model: '', max_bytes: '314572800', reencode: true, chunk_seconds: '600', relay_kind: 'http', relay_base_url: '', relay_secret: '', cos_bucket: '', cos_region: 'ap-shanghai', cos_secret_id: '', cos_secret_key: '', qwen_api_key: '', mimo_api_key: '' })
   const [localStt, setLocalStt] = useState<{ model_name: string; model_available: boolean }>({ model_name: 'paraformer-zh', model_available: false })
   const [timeoutSeconds, setTimeoutSeconds] = useState('300')
   const [autoPipeline, setAutoPipeline] = useState(true)
   const [keyHints, setKeyHints] = useState<{ transcribe: string | null; understand: string | null }>({ transcribe: null, understand: null })
-  const [videoHints, setVideoHints] = useState<{ qwen: string | null; mimo: string | null; relay: string | null }>({ qwen: null, mimo: null, relay: null })
+  const [videoHints, setVideoHints] = useState<{ qwen: string | null; mimo: string | null; relay: string | null; cos: string | null }>({ qwen: null, mimo: null, relay: null, cos: null })
   const [testResult, setTestResult] = useState<Record<string, string>>({})
   const [busy, setBusy] = useState('')
   const apply = useCallback((value: AiSettings) => {
     setTranscribe({ provider: value.transcribe.provider, base_url: value.transcribe.base_url, model: value.transcribe.model, api_key: '' })
     setUnderstand({ provider: value.understand.provider, base_url: value.understand.base_url, chat_model: value.understand.chat_model, api_key: '' })
     setTranscriber({ engine: value.transcriber.engine, local_stt_model: value.transcriber.local_stt_model, stt_timeout_seconds: String(value.transcriber.stt_timeout_seconds), stt_memory_limit_mb: String(value.transcriber.stt_memory_limit_mb), stt_disk_limit_mb: String(value.transcriber.stt_disk_limit_mb) })
-    setVideo({ provider: value.video.provider, model: value.video.model, max_bytes: String(value.video.max_bytes), reencode: value.video.reencode, chunk_seconds: String(value.video.chunk_seconds), relay_base_url: value.video.relay.base_url, relay_secret: '', qwen_api_key: '', mimo_api_key: '' })
+    setVideo({ provider: value.video.provider, model: value.video.model, max_bytes: String(value.video.max_bytes), reencode: value.video.reencode, chunk_seconds: String(value.video.chunk_seconds), relay_kind: value.video.relay.kind, relay_base_url: value.video.relay.base_url, relay_secret: '', cos_bucket: value.video.relay.cos_bucket, cos_region: value.video.relay.cos_region, cos_secret_id: '', cos_secret_key: '', qwen_api_key: '', mimo_api_key: '' })
     setLocalStt({ model_name: value.local_stt.model_name, model_available: value.local_stt.model_available })
     setTimeoutSeconds(String(value.timeout_seconds))
     setAutoPipeline(value.auto_pipeline)
@@ -1587,6 +1587,7 @@ function AiSettingsSection({ onMessage }: { onMessage: (message: string) => void
       qwen: value.video.qwen.has_key ? value.video.qwen.key_hint : null,
       mimo: value.video.mimo.has_key ? value.video.mimo.key_hint : null,
       relay: value.video.relay.has_secret ? value.video.relay.secret_hint : null,
+      cos: value.video.relay.cos_has_key ? value.video.relay.cos_key_hint : null,
     })
   }, [])
   useEffect(() => {
@@ -1614,8 +1615,13 @@ function AiSettingsSection({ onMessage }: { onMessage: (message: string) => void
             max_bytes: Number(video.max_bytes) || 314572800,
             reencode: video.reencode ? 'on' : 'off',
             chunk_seconds: Number(video.chunk_seconds) || 600,
+            relay_kind: video.relay_kind,
             relay_base_url: video.relay_base_url,
+            cos_bucket: video.cos_bucket,
+            cos_region: video.cos_region,
             ...(video.relay_secret ? { relay_secret: video.relay_secret } : {}),
+            ...(video.cos_secret_id ? { cos_secret_id: video.cos_secret_id } : {}),
+            ...(video.cos_secret_key ? { cos_secret_key: video.cos_secret_key } : {}),
             ...(video.qwen_api_key ? { qwen_api_key: video.qwen_api_key } : {}),
             ...(video.mimo_api_key ? { mimo_api_key: video.mimo_api_key } : {}),
           },
@@ -1689,9 +1695,14 @@ function AiSettingsSection({ onMessage }: { onMessage: (message: string) => void
         <label className="check-row"><input type="checkbox" checked={video.reencode} onChange={event => setVideo(current => ({ ...current, reencode: event.target.checked }))}/>MiMo 直送前显式重编码</label>
         <label>通义千问密钥<input type="password" autoComplete="off" value={video.qwen_api_key} onChange={event => setVideo(current => ({ ...current, qwen_api_key: event.target.value }))} placeholder={videoHints.qwen ? `已配置（${videoHints.qwen}），输入以替换` : '未配置'}/></label>
         <label>MiMo 密钥<input type="password" autoComplete="off" value={video.mimo_api_key} onChange={event => setVideo(current => ({ ...current, mimo_api_key: event.target.value }))} placeholder={videoHints.mimo ? `已配置（${videoHints.mimo}），输入以替换` : '未配置'}/></label>
-        <label>自备中转地址（可空）<input value={video.relay_base_url} onChange={event => setVideo(current => ({ ...current, relay_base_url: event.target.value }))} placeholder="https://你的域名"/></label>
-        <label>中转密钥<input type="password" autoComplete="off" value={video.relay_secret} onChange={event => setVideo(current => ({ ...current, relay_secret: event.target.value }))} placeholder={videoHints.relay ? `已配置（${videoHints.relay}），输入以替换` : '未配置'}/></label>
-      </div><p className="hint">配置中转后直送优先经中转 URL（MiMo 可吃满 300MB 上限）；未配置时 MiMo 走 base64（超限重编码/分块）、Qwen 走 DashScope 临时上传。直送仅在完整性判定「可能缺失」时发生。</p></fieldset>
+        <label>中转形态<select value={video.relay_kind} onChange={event => setVideo(current => ({ ...current, relay_kind: event.target.value }))}><option value="off">关闭</option><option value="http">自建中转（需已备案域名）</option><option value="cos">腾讯云 COS（未备案可用）</option></select></label>
+        {video.relay_kind === 'http' && <><label>中转地址<input value={video.relay_base_url} onChange={event => setVideo(current => ({ ...current, relay_base_url: event.target.value }))} placeholder="https://你的域名"/></label>
+        <label>中转密钥<input type="password" autoComplete="off" value={video.relay_secret} onChange={event => setVideo(current => ({ ...current, relay_secret: event.target.value }))} placeholder={videoHints.relay ? `已配置（${videoHints.relay}），输入以替换` : '未配置'}/></label></>}
+        {video.relay_kind === 'cos' && <><label>存储桶<input value={video.cos_bucket} onChange={event => setVideo(current => ({ ...current, cos_bucket: event.target.value }))} placeholder="如 my-bucket-1250000000"/></label>
+        <label>地域<input value={video.cos_region} onChange={event => setVideo(current => ({ ...current, cos_region: event.target.value }))} placeholder="ap-shanghai"/></label>
+        <label>SecretId<input type="password" autoComplete="off" value={video.cos_secret_id} onChange={event => setVideo(current => ({ ...current, cos_secret_id: event.target.value }))} placeholder={videoHints.cos ? `已配置（${videoHints.cos}），输入以替换` : '未配置'}/></label>
+        <label>SecretKey<input type="password" autoComplete="off" value={video.cos_secret_key} onChange={event => setVideo(current => ({ ...current, cos_secret_key: event.target.value }))} placeholder="输入以替换"/></label></>}
+      </div><p className="hint">配置中转后直送优先经中转 URL（MiMo 可吃满 300MB 上限）；COS 形态使用预签名 URL（30 分钟）并在拉取后自动删除对象。未配置时 MiMo 走 base64（超限重编码/分块）、Qwen 走 DashScope 临时上传。直送仅在完整性判定「可能缺失」时发生。</p></fieldset>
       <label>AI 调用超时（秒）<input type="number" min="60" max="86400" value={timeoutSeconds} onChange={event => setTimeoutSeconds(event.target.value)}/></label>
       <label className="check-row"><input type="checkbox" checked={autoPipeline} onChange={event => setAutoPipeline(event.target.checked)}/>自动流水线</label>
       <p className="hint">配置 AI 后，导入视频自动串联转写/摘要/分类；文档与粘贴导入后自动分类（内容将发送至所配置端点）。</p>
