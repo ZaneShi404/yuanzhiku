@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 import threading
 import uuid
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import BinaryIO
 
@@ -17,6 +19,8 @@ from app.domain.artifacts import StoredArtifact
 MAX_FILE_BYTES = 2 * 1024 * 1024 * 1024
 MIN_FREE_AFTER = 10 * 1024 * 1024 * 1024
 COPY_CHUNK = 1024 * 1024
+STAGING_MARKER = ".yuanzhiku-staging.json"
+STAGING_TTL_SECONDS = 86_400
 
 
 class StorageLimitError(ValueError):
@@ -49,6 +53,58 @@ class ArtifactStore:
         """Return a short, exclusive-create-ready path below the staging area."""
         self.paths.staging.mkdir(parents=True, exist_ok=True)
         return self.paths.staging / f"{uuid.uuid4().hex}.part"
+
+    def staging_workspace(self, kind: str) -> Path:
+        """带 marker 的一次性作业工作区（加固计划 Task 15A）。
+
+        marker 只含 operation_id、创建时间与 kind，不含正文、URL、本地
+        路径或凭据；sweep 据此区分可自动清理的目录与必须人工决策的遗留。
+        """
+        workspace = self.staging_path().with_suffix("")
+        workspace.mkdir(parents=True)
+        marker = {
+            "operation_id": uuid.uuid4().hex,
+            "created_at": datetime.now(UTC).isoformat(),
+            "kind": kind,
+        }
+        (workspace / STAGING_MARKER).write_text(json.dumps(marker), encoding="utf-8")
+        return workspace
+
+    def sweep_staging(self, *, ttl_seconds: int = STAGING_TTL_SECONDS) -> dict[str, list[str]]:
+        """marker 驱动的 staging 清理（加固计划 Task 15A）。
+
+        只删除同时满足「合法 marker + 超过 TTL」的目录，且全程持有维护
+        锁（与 purge/备份互斥）。无 marker 的遗留内容（如 _dy_probe*）与
+        损坏 marker 只报告、绝不自动删除。返回分类清单（不含绝对路径）。
+        """
+        with self._operation_lock, self._maintenance_lock:
+            report: dict[str, list[str]] = {"removed": [], "kept_active": [], "corrupt_marker": [], "unknown": []}
+            root = self.paths.staging
+            if not root.is_dir():
+                return report
+            for entry in sorted(root.iterdir()):
+                marker_path = entry / STAGING_MARKER if entry.is_dir() else None
+                if marker_path is None or not marker_path.is_file():
+                    report["unknown"].append(entry.name)
+                    continue
+                try:
+                    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+                    if not isinstance(marker, dict) or not isinstance(marker.get("operation_id"), str):
+                        raise ValueError("marker 无效")
+                    created_at = datetime.fromisoformat(str(marker["created_at"]))
+                except (ValueError, OSError, KeyError, TypeError, json.JSONDecodeError):
+                    report["corrupt_marker"].append(entry.name)
+                    continue
+                age_seconds = (datetime.now(UTC) - created_at).total_seconds()
+                if age_seconds < ttl_seconds:
+                    report["kept_active"].append(entry.name)
+                    continue
+                shutil.rmtree(entry, ignore_errors=True)
+                if entry.exists():
+                    report["corrupt_marker"].append(entry.name)
+                else:
+                    report["removed"].append(entry.name)
+            return report
 
     def check_capacity(self, expected_bytes: int) -> None:
         if expected_bytes < 0 or expected_bytes > MAX_FILE_BYTES:

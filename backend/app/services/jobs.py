@@ -494,8 +494,7 @@ class JobService:
         """Execute parsing in a child process with bounded time, RSS and disk."""
         context = multiprocessing.get_context("spawn")
         result_queue = context.Queue(maxsize=1)
-        workspace = self.artifacts.staging_path().with_suffix("")
-        workspace.mkdir(parents=True, exist_ok=False)
+        workspace = self.artifacts.staging_workspace("parse")
         maximum_bytes = self._memory_limit_mb * 1024 * 1024
         process = context.Process(
             target=_parse_worker,
@@ -746,8 +745,7 @@ class JobService:
         cancelled = self._cancel_predicate(job, cancel_event)
         self._update_video_progress(job, 5, "正在提取音轨")
         artifact_path = self.artifacts.artifact_path(job["artifact_sha256"])
-        workspace = self.artifacts.staging_path().with_suffix("")
-        workspace.mkdir(parents=True, exist_ok=False)
+        workspace = self.artifacts.staging_workspace("video_transcribe")
         try:
             try:
                 timeout_seconds = max(60.0, min(86_400.0, float(settings.get("stt_timeout_seconds", "3600"))))
@@ -1166,8 +1164,7 @@ class JobService:
             maximum_memory_bytes=memory_limit_mb * 1024 * 1024,
             maximum_workspace_bytes=disk_limit_mb * 1024 * 1024,
         )
-        workspace = self.artifacts.staging_path().with_suffix("")
-        workspace.mkdir(parents=True, exist_ok=False)
+        workspace = self.artifacts.staging_workspace("video_download")
         cancel_event = threading.Event()
         cancelled = self._cancel_predicate(job, cancel_event)
         try:

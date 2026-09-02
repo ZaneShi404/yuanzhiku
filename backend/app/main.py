@@ -412,6 +412,16 @@ def create_app(
             job["kind"] == "artifact_cleanup" and job["state"] in {"queued", "running", "retry_wait"} for job in jobs
         ):
             services.repository.create_job("artifact_cleanup", None, None, None, None, {}, priority=-150)
+        # marker 驱动的 staging 清理（加固计划 Task 15A）：启动 best-effort
+        # 一次；无 marker 遗留与损坏 marker 只计数报告，绝不自动删除。
+        try:
+            report = services.artifacts.sweep_staging()
+            services.operations.write(
+                "staging_sweep",
+                f"succeeded removed={len(report['removed'])} unknown={len(report['unknown'])} corrupt={len(report['corrupt_marker'])}",
+            )
+        except Exception:
+            services.operations.write("staging_sweep", "failed")
         embedded_worker = os.environ.get("YUANZHIKU_EMBEDDED_WORKER", "true").lower() == "true"
         stop = asyncio.Event()
 
