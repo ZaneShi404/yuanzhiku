@@ -76,7 +76,7 @@ from app.services.imports import ImportService
 from app.services.jobs import JobService
 from app.services.prefill import ALLOWED_SUFFIXES as PREFILL_SUFFIXES
 from app.services.prefill import suggest_document, suggest_text
-from app.services.lifecycle import LifecycleService
+from app.services.lifecycle import ArtifactCleanupPending, LifecycleService
 from app.services.stt_models import SttModelManager
 from app.services.videos import VideoService
 from app.services.search import SearchService
@@ -406,6 +406,12 @@ def create_app(
             services.repository.create_job(
                 "integrity_sample", None, None, None, None, {"date": date_key, "sample_size": 10}, priority=-200
             )
+        # 清理队列启动重试（加固计划 Task 11）：存在未完成任务时入队低优先级
+        # artifact_cleanup 作业（单 worker 串行、租约心跳、可人工重试）。
+        if services.repository.artifact_cleanup_pending() and not any(
+            job["kind"] == "artifact_cleanup" and job["state"] in {"queued", "running", "retry_wait"} for job in jobs
+        ):
+            services.repository.create_job("artifact_cleanup", None, None, None, None, {}, priority=-150)
         embedded_worker = os.environ.get("YUANZHIKU_EMBEDDED_WORKER", "true").lower() == "true"
         stop = asyncio.Event()
 
@@ -1391,6 +1397,13 @@ def create_app(
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ArtifactCleanupPending as exc:
+            # 逻辑 purge 已提交；物理清理未完成（加固计划 Task 11）：
+            # 任务保留，由启动重试与作业页重试继续消化。
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "artifact_cleanup_pending", "message": "永久删除的逻辑数据已清除，部分 artifact 文件清理未完成，将在后台自动重试"},
+            ) from exc
 
     @app.get(f"{api}/backups", tags=["transfers"])
     def list_backups(svc: ApplicationServices = Depends(get_services)) -> list[dict[str, Any]]:

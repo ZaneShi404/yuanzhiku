@@ -114,6 +114,10 @@ CREATE TABLE IF NOT EXISTS jobs (
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_claim ON jobs(state, priority DESC, created_at ASC);
 CREATE INDEX IF NOT EXISTS idx_jobs_running_lease ON jobs(state, lease_expires_at);
+CREATE TABLE IF NOT EXISTS artifact_cleanup_tasks (
+    sha256 TEXT PRIMARY KEY, source_id TEXT, reason TEXT NOT NULL, state TEXT NOT NULL,
+    attempt_count INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS job_attempts (
     id TEXT PRIMARY KEY, job_id TEXT NOT NULL REFERENCES jobs(id), attempt_number INTEGER NOT NULL,
     lease_token TEXT, state TEXT NOT NULL, started_at TEXT NOT NULL, ended_at TEXT, outcome TEXT, UNIQUE(job_id, attempt_number)
@@ -1862,9 +1866,33 @@ class SqliteRepository:
                     (sha256, sha256),
                 ).fetchone()["n"]
                 if not reference_count:
+                    # 清理队列（加固计划 Task 11）：catalog 行删除**之前**先落
+                    # 持久化任务，物理 unlink 由提交后的 sweeper 与启动重试承担。
+                    connection.execute(
+                        "INSERT OR IGNORE INTO artifact_cleanup_tasks(sha256,source_id,reason,state,attempt_count,created_at,updated_at) "
+                        "VALUES(?,?,?,'pending',0,?,?)",
+                        (sha256, source_id, "purge", now(), now()),
+                    )
                     connection.execute("DELETE FROM artifacts WHERE sha256=?", (sha256,))
                     orphaned.append(sha256)
             return orphaned
+
+    def artifact_cleanup_pending(self) -> list[dict[str, Any]]:
+        with self.connection() as connection:
+            return self._rows(connection.execute(
+                "SELECT * FROM artifact_cleanup_tasks WHERE state='pending' ORDER BY created_at ASC"
+            ).fetchall())
+
+    def complete_artifact_cleanup(self, sha256: str) -> None:
+        with self.connection() as connection:
+            connection.execute("DELETE FROM artifact_cleanup_tasks WHERE sha256=?", (sha256,))
+
+    def fail_artifact_cleanup(self, sha256: str) -> None:
+        with self.connection() as connection:
+            connection.execute(
+                "UPDATE artifact_cleanup_tasks SET attempt_count=attempt_count+1, state='pending', updated_at=? WHERE sha256=?",
+                (now(), sha256),
+            )
 
     def rows_for_export(self) -> dict[str, list[dict[str, Any]]]:
         with self.connection() as connection:

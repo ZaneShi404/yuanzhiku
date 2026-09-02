@@ -1410,6 +1410,7 @@ function jobLabel(kind: string) {
     video_summarize: '视频内容摘要',
     video_download: '链接下载',
     source_classify: 'AI 分类',
+    artifact_cleanup: 'artifact 清理重试',
   }
   return labels[kind] || kind
 }

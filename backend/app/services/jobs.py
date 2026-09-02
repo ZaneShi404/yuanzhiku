@@ -277,6 +277,8 @@ class JobService:
                 self._video_summarize(job)
             elif job["kind"] == "source_classify":
                 self._source_classify(job)
+            elif job["kind"] == "artifact_cleanup":
+                self._artifact_cleanup(job)
             elif job["kind"] == "backup":
                 if self.backup_runner is None:
                     self._finish(job, "blocked", "备份服务不可用")
@@ -1043,6 +1045,42 @@ class JobService:
             self._apply_classification(job["source_id"], suggestions)
         if not self.repository.commit_job_success(job["id"], job["lease_token"], message="AI 分类完成"):
             raise JobLeaseLost()
+
+    def _artifact_cleanup(self, job: dict) -> None:
+        """清理队列重试作业（加固计划 Task 11）：幂等 sweeper。
+
+        文件不存在视为成功；unlink 失败保留任务（attempt+1）并使作业失败
+        可重试；全部完成后作业成功。成功审计在物理清理完成后由 sweeper 写入。
+        """
+        if self.videos is None and self.artifacts is None:
+            self._finish(job, "blocked", "清理队列服务不可用", progress=100)
+            return
+        self._update_video_progress(job, 10, "正在重试 artifact 清理")
+        pending = self.repository.artifact_cleanup_pending()
+        if not pending:
+            self._finish(job, "succeeded", "没有待清理的 artifact 任务", progress=100)
+            return
+        completed = 0
+        failed = 0
+        for task in pending:
+            sha256 = task["sha256"]
+            try:
+                self.artifacts.delete(sha256)
+            except Exception:
+                self.repository.fail_artifact_cleanup(sha256)
+                failed += 1
+                continue
+            self.repository.complete_artifact_cleanup(sha256)
+            self.repository.audit("artifact_cleanup", sha256, "succeeded")
+            completed += 1
+            self._update_video_progress(
+                job, min(95, 10 + int(85 * (completed + failed) / max(1, len(pending)))),
+                "正在重试 artifact 清理",
+            )
+        if failed:
+            self._finish(job, "failed", "部分 artifact 清理未完成，可重试", progress=100)
+            return
+        self._finish(job, "succeeded", f"artifact 清理完成（{completed} 项）", progress=100)
 
     def _image_analyze(self, job: dict) -> None:
         if self.images is None:
