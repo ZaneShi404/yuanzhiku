@@ -36,6 +36,7 @@ from app.core.config import DataPaths, InstanceLock, data_paths, database_backen
 from app.core.operations import OperationalLog
 from app.ports.media import DownloadInputInvalid, DownloadUnavailable
 from app.ports.repository import RepositoryPort
+from app.security.local_access import LocalAccessSettings, install_local_access_middleware
 from app.domain.models import (
     AiConnectionTestRequest,
     AiSettingsUpdate,
@@ -372,7 +373,12 @@ def _apply_ai_group(
     return changed
 
 
-def create_app(root: str | Path | None = None, *, acquire_lock: bool = True) -> FastAPI:
+def create_app(
+    root: str | Path | None = None,
+    *,
+    acquire_lock: bool = True,
+    local_access: LocalAccessSettings | None = None,
+) -> FastAPI:
     paths = data_paths(root)
     lock = InstanceLock(paths.lock_file) if acquire_lock else None
     if lock is not None:
@@ -480,6 +486,10 @@ def create_app(root: str | Path | None = None, *, acquire_lock: bool = True) -> 
         allow_methods=["GET", "POST", "PUT", "DELETE"],
         allow_headers=["Content-Type"],
     )
+
+    # 本机访问边界（加固计划 Task 2）：中间件注册晚于 CORS 即位于其外层，
+    # 非法 Host/Origin 在任何容量预检/审计之前被拒绝。
+    install_local_access_middleware(app, local_access or LocalAccessSettings())
 
     @app.middleware("http")
     async def upload_capacity_preflight(request, call_next):

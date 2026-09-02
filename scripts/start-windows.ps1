@@ -78,7 +78,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Unable to select a local port.' }
 $selectedPort = [int]$selectedPort
 $uri = "http://127.0.0.1:$selectedPort"
 
-$arguments = @('-m', 'uvicorn', 'app.main:application', '--factory', '--host', '127.0.0.1', '--port', $selectedPort, '--no-access-log')
+$arguments = @('-m', 'uvicorn', 'app.main:application', '--factory', '--host', '127.0.0.1', '--port', $selectedPort, '--no-access-log', '--no-proxy-headers')
 $process = Start-Process -FilePath $Python -ArgumentList $arguments -WorkingDirectory $ProjectRoot -PassThru
 for ($attempt = 0; $attempt -lt 30; $attempt++) {
     Start-Sleep -Milliseconds 300

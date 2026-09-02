@@ -12,7 +12,7 @@ COPY backend/requirements.lock ./backend/requirements.lock
 RUN pip install --no-cache-dir -r backend/requirements.lock
 COPY backend/ ./backend/
 EXPOSE 8765
-CMD ["python", "-m", "uvicorn", "app.main:application", "--factory", "--host", "0.0.0.0", "--port", "8765", "--no-access-log"]
+CMD ["python", "-m", "uvicorn", "app.main:application", "--factory", "--host", "0.0.0.0", "--port", "8765", "--no-access-log", "--no-proxy-headers"]
 
 FROM nginx:1.27.4-alpine AS web
 COPY frontend/nginx.conf /etc/nginx/conf.d/default.conf
