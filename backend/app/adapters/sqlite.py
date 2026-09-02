@@ -754,6 +754,7 @@ class SqliteRepository:
         media_type: str | None, byte_size: int, job_payload: dict[str, Any], priority: int,
         audit_event: str, source_date: str | None = None, job_kind: str = "parse",
         download_provenance: dict[str, Any] | None = None,
+        source_id: str | None = None, version_id: str | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
         """Persist every logical ingest record in one transaction.
 
@@ -763,9 +764,13 @@ class SqliteRepository:
         most one provenance row. The caller compensates the physical artifact
         only when this transaction fails and it created the content-addressed
         file itself.
+
+        确定性身份（加固计划 Task 7）：传入 source_id/version_id 时为
+        insert-or-return 重放——已存在且 artifact 一致即返回既有行；不一致
+        抛完整性错误，绝不产生重复来源。
         """
-        source_id = identifier()
-        version_id = identifier()
+        source_id = source_id or identifier()
+        version_id = version_id or identifier()
         job_id = identifier()
         stamp = now()
         with self.connection() as connection:
@@ -773,6 +778,24 @@ class SqliteRepository:
                 "INSERT OR IGNORE INTO artifacts(sha256, byte_size, stored_at) VALUES(?, ?, ?)",
                 (artifact_sha256, byte_size, stamp),
             )
+            existing_source = self._row(connection.execute("SELECT * FROM sources WHERE id=?", (source_id,)).fetchone())
+            if existing_source is not None:
+                existing_version = self._row(connection.execute(
+                    "SELECT * FROM content_versions WHERE id=?", (version_id,)
+                ).fetchone())
+                if (
+                    existing_version is None
+                    or existing_version["source_id"] != source_id
+                    or existing_version["artifact_sha256"] != artifact_sha256
+                ):
+                    raise RuntimeError("来源身份冲突：该 ID 已被其他内容占用")
+                source = existing_source
+                version = existing_version
+                job = self._row(connection.execute(
+                    "SELECT * FROM jobs WHERE source_id=? AND kind=? ORDER BY created_at DESC LIMIT 1",
+                    (source_id, job_kind),
+                ).fetchone()) or {}
+                return source, version, job
             connection.execute(
                 """INSERT INTO sources(id,source_type,title,author,language,notes,source_date,rights,domains_json,genres_json,tags_json,processing_state,imported_at,updated_at,deleted_at)
                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)""",
@@ -996,6 +1019,7 @@ class SqliteRepository:
         parent_id: str | None,
         chunks: list[tuple[str, str]],
         evidence: list[dict[str, Any]],
+        representation_id: str | None = None,
     ) -> dict[str, Any]:
         with self.connection() as connection:
             version = connection.execute(
@@ -1014,10 +1038,21 @@ class SqliteRepository:
                 ).fetchone())
                 if representation is not None and representation["text_content"] != text:
                     raise ValueError("同一抽取身份的表示内容不一致")
+            if representation is None and representation_id is not None and kind != "extraction":
+                # 确定性身份（加固计划 Task 7）：insert-or-return 重放。
+                representation = self._row(connection.execute(
+                    "SELECT * FROM representations WHERE id=?", (representation_id,)
+                ).fetchone())
+                if representation is not None and (
+                    representation["content_version_id"] != version_id
+                    or representation["kind"] != kind
+                    or representation["text_content"] != text
+                ):
+                    raise ValueError("同一表示身份的内容不一致")
             if representation is None:
-                representation_id = identifier()
+                representation_id = representation_id or identifier()
                 stamp = now()
-                insert = "INSERT OR IGNORE INTO" if kind == "extraction" else "INSERT INTO"
+                insert = "INSERT OR IGNORE INTO" if kind == "extraction" or representation_id else "INSERT INTO"
                 connection.execute(
                     f"{insert} representations(id,content_version_id,kind,parser_name,config_hash,"
                     "parent_representation_id,text_content,created_at) VALUES(?,?,?,?,?,?,?,?)",
@@ -1309,16 +1344,22 @@ class SqliteRepository:
             connection.execute("UPDATE knowledge SET status='published', published_at=? WHERE id=?", (now(), knowledge_id))
         return self.get_knowledge(knowledge_id)
 
-    def create_job(self, kind: str, source_id: str | None, version_id: str | None, artifact_sha256: str | None, config_hash: str | None, payload: dict[str, Any], priority: int = 0) -> dict[str, Any]:
-        job_id = identifier()
+    def create_job(self, kind: str, source_id: str | None, version_id: str | None, artifact_sha256: str | None, config_hash: str | None, payload: dict[str, Any], priority: int = 0, job_id: str | None = None) -> dict[str, Any]:
+        # insert-or-return（加固计划 Task 7）：确定性 ID 重放时返回既有行，
+        # 语义不一致抛完整性错误；INSERT OR IGNORE 经翻译层落到 PostgreSQL
+        # 的 ON CONFLICT DO NOTHING。
+        job_id = job_id or identifier()
         stamp = now()
         with self.connection() as connection:
             connection.execute(
-                """INSERT INTO jobs(id,kind,source_id,content_version_id,artifact_sha256,config_hash,payload_json,priority,state,progress,message,attempt_count,max_attempts,created_at,updated_at)
+                """INSERT OR IGNORE INTO jobs(id,kind,source_id,content_version_id,artifact_sha256,config_hash,payload_json,priority,state,progress,message,attempt_count,max_attempts,created_at,updated_at)
                    VALUES(?,?,?,?,?,?,?,?,? ,0,NULL,0,?,?,?)""",
                 (job_id, kind, source_id, version_id, artifact_sha256, config_hash, json.dumps(payload), priority, "queued", self._configured_max_attempts(connection), stamp, stamp),
             )
-            return self._row(connection.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()) or {}
+            job = self._row(connection.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()) or {}
+            if job.get("kind") != kind:
+                raise RuntimeError("作业身份冲突：该 ID 已被其他类型的作业占用")
+            return job
 
     def list_jobs(self) -> list[dict[str, Any]]:
         with self.connection() as connection:

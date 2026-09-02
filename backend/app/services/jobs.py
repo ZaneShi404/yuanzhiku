@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from app.domain.media import MediaProcessingLimits, MediaTranscriptSegment, video_time_range_locator
+from app.domain.identity import derived_identifier
 from app.domain.models import TAXONOMY_DOMAIN_VALUES, TAXONOMY_GENRE_VALUES, sanitize_download_url
 from app.domain.parsing import ParsedDocument
 from app.ports.parser import DocumentParserPort
@@ -572,7 +573,11 @@ class JobService:
         return self.repository.get_settings().get("ai_auto_pipeline", "on") == "on"
 
     def _enqueue_chained(self, kind: str, job: dict) -> None:
-        """自动流水线串联后继作业；同版本同 kind 已有排队/运行中作业时不重复入队。"""
+        """自动流水线串联后继作业（加固计划 Task 7）。
+
+        同版本同 kind 已有排队/运行中作业时不重复入队（REQ-051 语义保留）；
+        否则以父作业 ID + kind 派生确定性 child ID insert-or-return——重放
+        不产生重复后继。"""
         for existing in self.repository.list_jobs():
             if (
                 existing["kind"] == kind
@@ -584,6 +589,7 @@ class JobService:
         self.repository.create_job(
             kind, job["source_id"], job["content_version_id"], job["artifact_sha256"],
             self.media_ai.config_hash(operation), {}, priority=100,
+            job_id=derived_identifier("job", job["id"], kind),
         )
 
     def _apply_classification(self, source_id: str, suggestions: dict[str, Any]) -> None:
@@ -763,6 +769,7 @@ class JobService:
                 parent_id=None,
                 chunks=self.documents.search_chunk_pairs(transcript.text),
                 evidence=evidence,
+                representation_id=derived_identifier("representation", job["id"], "transcription"),
             )
             message = "语音转写完成"
             if fallback_reason:
@@ -925,6 +932,7 @@ class JobService:
             parent_id=transcription["id"],
             chunks=self.documents.search_chunk_pairs(text),
             evidence=evidence,
+            representation_id=derived_identifier("representation", job["id"], "summary"),
         )
         # AI 建议自动写入来源元数据（REQ-051 修订，只填空缺），用户可事后修改。
         if job["source_id"]:
@@ -1133,6 +1141,8 @@ class JobService:
                     source_date=payload.get("source_date") if isinstance(payload.get("source_date"), str) else None,
                     original_name=result.filename,
                     media_type=result.media_type,
+                    source_id=derived_identifier("source", job["id"], "source"),
+                    version_id=derived_identifier("source", job["id"], "version"),
                 )
             self.repository.audit("video_download", ingested["source"]["id"], "succeeded")
             self._finish(job, "succeeded", "链接下载完成，已排入本地视频分析", progress=100)

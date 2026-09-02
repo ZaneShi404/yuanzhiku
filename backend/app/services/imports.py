@@ -235,6 +235,8 @@ class ImportService:
         source_date: str | None,
         original_name: str,
         media_type: str,
+        source_id: str | None = None,
+        version_id: str | None = None,
     ) -> dict:
         """Persist a downloaded video and its provenance in one transaction.
 
@@ -277,6 +279,8 @@ class ImportService:
                         "cookie_used": 1 if cookie_used else 0,
                         "config_hash": config_hash,
                     },
+                    source_id=source_id,
+                    version_id=version_id,
                 )
             except Exception:
                 if stored.was_new and self.repository.delete_artifact_if_unreferenced(stored.sha256):
