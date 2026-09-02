@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "tsc -b && vite build",
-    "lint": "tsc -b --pretty false"
+    "lint": "tsc -b --pretty false",
+    "test": "tsc -p tsconfig.test.json && node --test \".test-dist/tests/*.test.js\""
   },
   "dependencies": {
     "@vitejs/plugin-react": "4.3.4",
@@ -16,6 +17,7 @@
     "vite": "6.0.7"
   },
   "devDependencies": {
+    "@types/node": "^24.0.0",
     "@types/react": "18.3.18",
     "@types/react-dom": "18.3.5",
     "typescript": "5.7.2"

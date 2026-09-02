@@ -11,6 +11,7 @@ tests/runtime/*
 
 # Generated frontend output
 /frontend/dist/
+/frontend/.test-dist/
 
 # Local application data and transient files
 data/

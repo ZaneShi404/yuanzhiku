@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { ApiError, API, isAbort, request, uploadFile } from './api'
+import { LatestRequestGate } from './asyncGate'
 import {
   ArchiveRestore, BookOpen, Box, Brain, Check, ChevronDown,
   CircleAlert, ExternalLink, FileText, FolderOpen, HardDriveDownload, Import,
@@ -150,7 +152,6 @@ type Page = 'library' | 'import' | 'search' | 'knowledge' | 'jobs' | 'external' 
 type SourceScope = 'active' | 'deleted'
 type TaxonomyOption = { value: string; label: string }
 type Taxonomy = { domains: TaxonomyOption[]; genres: TaxonomyOption[] }
-const API = '/api/v1'
 const rights = [
   ['owned', '本人拥有'], ['authorized', '已获授权'], ['permitted', '已获许可'],
   ['open_license', '开放许可'], ['other', '其他'],
@@ -163,77 +164,6 @@ const knowledgeTypes = [
   ['fact', '事实'], ['opinion', '观点'], ['instruction', '指令'], ['case', '案例'],
   ['citation', '引文'], ['unverified', '未核验'],
 ] as const
-
-class ApiError extends Error {
-  status: number
-  code: string
-  conflicts: string[]
-  reason?: string
-
-  constructor(status: number, code: string, message: string, conflicts: string[] = [], reason?: string) {
-    super(message)
-    this.name = 'ApiError'
-    this.status = status
-    this.code = code
-    this.conflicts = conflicts
-    this.reason = reason
-  }
-}
-
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null
-}
-
-async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const response = await fetch(`${API}${path}`, {
-    ...options,
-    headers: {
-      ...(options.body instanceof FormData ? {} : { 'Content-Type': 'application/json' }),
-      ...options.headers,
-    },
-  })
-  if (!response.ok) {
-    const payload: unknown = await response.json().catch(() => ({}))
-    const detail = isObject(payload) && isObject(payload.detail) ? payload.detail : {}
-    const message = typeof detail.message === 'string' ? detail.message : '本地请求失败'
-    const code = typeof detail.code === 'string' ? detail.code : `http_${response.status}`
-    const conflicts = Array.isArray(detail.conflicts)
-      ? detail.conflicts.filter((item): item is string => typeof item === 'string')
-      : []
-    const reason = typeof detail.reason === 'string' ? detail.reason : undefined
-    throw new ApiError(response.status, code, message, conflicts, reason)
-  }
-  const text = await response.text()
-  return (text ? JSON.parse(text) : undefined) as T
-}
-
-async function uploadFile(path: string, body: FormData, onProgress: (value: number) => void): Promise<unknown> {
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest()
-    xhr.open('POST', `${API}${path}`)
-    xhr.responseType = 'json'
-    xhr.upload.addEventListener('progress', event => {
-      if (event.lengthComputable) onProgress(Math.round((event.loaded / event.total) * 100))
-    })
-    xhr.addEventListener('load', () => {
-      const payload: unknown = xhr.response || (() => {
-        try { return JSON.parse(xhr.responseText) } catch { return {} }
-      })()
-      if (xhr.status >= 200 && xhr.status < 300) {
-        resolve(payload)
-        return
-      }
-      const detail = isObject(payload) && isObject(payload.detail) ? payload.detail : {}
-      reject(new ApiError(
-        xhr.status,
-        typeof detail.code === 'string' ? detail.code : `http_${xhr.status}`,
-        typeof detail.message === 'string' ? detail.message : '文件导入失败',
-      ))
-    })
-    xhr.addEventListener('error', () => reject(new ApiError(0, 'network_error', '本地请求失败')))
-    xhr.send(body)
-  })
-}
 
 function formatDate(value?: string | null) {
   return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '-'
@@ -632,16 +562,21 @@ function SourceDetail({
       setBusyAction(null)
     }
   }
+  const detailGate = useRef(new LatestRequestGate())
   const loadRepresentations = useCallback(async () => {
     if (!version) {
       setRepresentations([])
       return
     }
+    // 异步栅栏（加固计划 Task 10）：快速切换来源/版本时，陈旧响应不得覆盖当前选择。
+    const { epoch, signal } = detailGate.current.begin(`representations:${version.id}`)
     try {
-      const items = await request<Representation[]>(`/documents/${version.id}/representations`)
+      const items = await request<Representation[]>(`/documents/${version.id}/representations`, { signal })
+      if (!detailGate.current.isCurrent(`representations:${version.id}`, epoch)) return
       setRepresentations(items)
       setRepresentationId(current => items.some(item => item.id === current) ? current : (items.at(-1)?.id || ''))
     } catch (error) {
+      if (isAbort(error)) return
       onMessage(error instanceof Error ? error.message : '读取表示失败')
     }
   }, [onMessage, version])
@@ -652,13 +587,18 @@ function SourceDetail({
       setCitations({})
       return
     }
+    const key = `evidence:${representationId}`
+    const { epoch, signal } = detailGate.current.begin(key)
     const loadEvidence = async () => {
       try {
-        const items = await request<Evidence[]>(`/representations/${representationId}/evidence`)
+        const items = await request<Evidence[]>(`/representations/${representationId}/evidence`, { signal })
+        if (!detailGate.current.isCurrent(key, epoch)) return
         setEvidence(items)
-        const groups = await Promise.all(items.map(async item => [item.id, await request<Citation[]>(`/citations?evidence_id=${encodeURIComponent(item.id)}`)] as const))
+        const groups = await Promise.all(items.map(async item => [item.id, await request<Citation[]>(`/citations?evidence_id=${encodeURIComponent(item.id)}`, { signal })] as const))
+        if (!detailGate.current.isCurrent(key, epoch)) return
         setCitations(Object.fromEntries(groups))
       } catch (error) {
+        if (isAbort(error)) return
         onMessage(error instanceof Error ? error.message : '读取证据失败')
       }
     }
@@ -1387,15 +1327,20 @@ function SearchPage({
   const [sort, setSort] = useState('relevance')
   const [filters, setFilters] = useState({ source_type: '', genre: '', tag: '', author: '', language: '', processing_state: '', source_date_from: '', source_date_to: '', imported_at_from: '', imported_at_to: '', topic_id: '' })
   const [domainFilters, setDomainFilters] = useState<string[]>([])
+  const searchGate = useRef(new LatestRequestGate())
   const search = async (event?: React.FormEvent) => {
     event?.preventDefault()
     const params = new URLSearchParams({ q: query, include_historical: String(includeHistorical), include_incomplete: String(includeIncomplete), sort })
     for (const [key, value] of Object.entries(filters)) if (value) params.set(key, value)
     for (const value of domainFilters) params.append('domains', value)
+    // 异步栅栏（加固计划 Task 10）：仅最新一次检索落地，慢的旧响应被丢弃。
+    const { epoch, signal } = searchGate.current.begin('search')
     try {
-      const response = await request<{ items: SearchItem[] }>(`/search?${params.toString()}`)
+      const response = await request<{ items: SearchItem[] }>(`/search?${params.toString()}`, { signal })
+      if (!searchGate.current.isCurrent('search', epoch)) return
       setResults(response.items)
     } catch (error) {
+      if (isAbort(error)) return
       onMessage(error instanceof Error ? error.message : '检索失败')
     }
   }
@@ -1420,9 +1365,13 @@ function KnowledgePage({ knowledge, focusedId, onRefresh, onMessage }: { knowled
   const [kind, setKind] = useState('unverified')
   const [statement, setStatement] = useState('')
   const [evidenceIds, setEvidenceIds] = useState('')
+  const [creating, setCreating] = useState(false)
+  const [publishingId, setPublishingId] = useState<string | null>(null)
   const selected = knowledge.find(item => item.id === focusedId) || null
   const create = async (event: React.FormEvent) => {
     event.preventDefault()
+    if (creating) return
+    setCreating(true)
     try {
       await request('/knowledge', { method: 'POST', body: JSON.stringify({ kind, statement, evidence_ids: parseTags(evidenceIds) }) })
       setStatement('')
@@ -1431,18 +1380,24 @@ function KnowledgePage({ knowledge, focusedId, onRefresh, onMessage }: { knowled
       onMessage('知识草稿已创建')
     } catch (error) {
       onMessage(error instanceof Error ? error.message : '知识草稿创建失败')
+    } finally {
+      setCreating(false)
     }
   }
   const publish = async (id: string) => {
+    if (publishingId) return
+    setPublishingId(id)
     try {
       await request(`/knowledge/${id}/publish`, { method: 'POST' })
       await onRefresh()
       onMessage('知识已发布')
     } catch (error) {
       onMessage(error instanceof Error ? error.message : '知识发布失败')
+    } finally {
+      setPublishingId(null)
     }
   }
-  return <div className="page split-page"><section><PageHeader title="知识"/><form className="form-stack compact-form" onSubmit={create}><label>知识类型<select value={kind} onChange={event => setKind(event.target.value)}>{knowledgeTypes.map(item => <option key={item[0]} value={item[0]}>{item[1]}</option>)}</select></label><label>陈述<textarea required value={statement} onChange={event => setStatement(event.target.value)}/></label><label>evidence ID（可选，逗号分隔）<input value={evidenceIds} onChange={event => setEvidenceIds(event.target.value)}/></label><button className="button primary">创建草稿</button></form></section><section className="card-column"><h2>{selected ? '选中知识' : '知识列表'}</h2>{knowledge.length ? knowledge.map(item => <article className={item.id === selected?.id ? 'knowledge-item selected' : 'knowledge-item'} key={item.id}><div><span className="result-kind">{labelFor(knowledgeTypes, item.kind)}</span><Status value={item.status}/></div><p>{item.statement}</p><small>{item.evidence_ids.length} 条 evidence · {formatDate(item.created_at)}</small>{item.status !== 'published' && <button type="button" className="button secondary" onClick={() => void publish(item.id)}>发布</button>}</article>) : <Empty icon={<Brain size={36}/>} text="尚无知识项" />}</section></div>
+  return <div className="page split-page"><section><PageHeader title="知识"/><form className="form-stack compact-form" onSubmit={create}><label>知识类型<select value={kind} onChange={event => setKind(event.target.value)}>{knowledgeTypes.map(item => <option key={item[0]} value={item[0]}>{item[1]}</option>)}</select></label><label>陈述<textarea required value={statement} onChange={event => setStatement(event.target.value)}/></label><label>evidence ID（可选，逗号分隔）<input value={evidenceIds} onChange={event => setEvidenceIds(event.target.value)}/></label><button className="button primary" disabled={creating}>{creating ? '正在创建' : '创建草稿'}</button></form></section><section className="card-column"><h2>{selected ? '选中知识' : '知识列表'}</h2>{knowledge.length ? knowledge.map(item => <article className={item.id === selected?.id ? 'knowledge-item selected' : 'knowledge-item'} key={item.id}><div><span className="result-kind">{labelFor(knowledgeTypes, item.kind)}</span><Status value={item.status}/></div><p>{item.statement}</p><small>{item.evidence_ids.length} 条 evidence · {formatDate(item.created_at)}</small>{item.status !== 'published' && <button type="button" className="button secondary" disabled={publishingId === item.id} onClick={() => void publish(item.id)}>{publishingId === item.id ? '正在发布' : '发布'}</button>}</article>) : <Empty icon={<Brain size={36}/>} text="尚无知识项" />}</section></div>
 }
 
 function jobLabel(kind: string) {
