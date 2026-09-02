@@ -376,67 +376,84 @@ class TransferService:
         self.repository.audit("export", None, "succeeded")
         return {"archive_name": archive_path.name, "archive_path": str(archive_path), "manifest_sha256": manifest_sha256, "entry_count": len(manifest["entries"])}
 
-    def verify_archive(self, archive_path: Path) -> dict[str, Any]:
+    def verify_archive(self, archive_path: Path, *, expected_manifest_sha256: str | None = None) -> dict[str, Any]:
         if not archive_path.is_file():
             return {"valid": False, "errors": ["归档不存在"]}
-        errors: list[str] = []
         try:
             with zipfile.ZipFile(archive_path) as archive:
-                members = self._safe_members(archive)
-                names = {member.filename for member in members}
-                if "manifest.json" not in names:
-                    return {"valid": False, "errors": ["缺少 manifest"]}
-                manifest = json.loads(archive.read("manifest.json"))
-                if not isinstance(manifest, dict):
-                    raise ValueError("manifest 无效")
-                schema_version = manifest.get("schema_version")
-                archive_type = manifest.get("archive_type")
-                if schema_version not in SUPPORTED_ARCHIVE_SCHEMA_VERSIONS:
-                    errors.append("不支持的 manifest schema")
-                if archive_type not in {"backup", "export"}:
-                    errors.append("不支持的归档类型")
-                if schema_version == ARCHIVE_SCHEMA_VERSION and manifest.get("database_backend") not in {"sqlite", "postgresql"}:
-                    errors.append("归档数据库类型无效")
-                entries = self._entry_map(manifest)
-                declared_names = set(entries)
-                if archive_type == "backup" and schema_version == ARCHIVE_SCHEMA_VERSION:
-                    if manifest["database_backend"] == "sqlite" and "state/knowledge.db" not in declared_names:
-                        errors.append("SQLite 备份缺少状态快照")
-                    if manifest["database_backend"] == "postgresql" and "state/knowledge.db" in declared_names:
-                        errors.append("PostgreSQL 备份不得包含 SQLite 状态")
-                if names != declared_names | {"manifest.json"}:
-                    errors.append("归档成员未由 manifest 完整声明")
-                if "records.json" not in declared_names:
-                    errors.append("归档缺少逻辑记录")
-                if archive_type == "export" and "state/knowledge.db" in declared_names:
-                    errors.append("便携导出不得包含本地 SQLite 状态")
-                for path, entry in entries.items():
-                    if path not in names:
-                        errors.append("manifest 条目缺失")
-                        continue
-                    actual_hash, actual_size = self._sha256_member(archive, path)
-                    if actual_hash != entry["sha256"]:
-                        errors.append("条目哈希不匹配")
-                    if actual_size != entry["byte_size"]:
-                        errors.append("条目字节数不匹配")
-                    if path.startswith("artifacts/"):
-                        parts = path.split("/")
-                        if len(parts) != 3 or parts[1] != parts[2][:2] or not re.fullmatch(r"[0-9a-f]{64}", parts[2]) or actual_hash != parts[2]:
-                            errors.append("artifact 归档路径或哈希无效")
-                if not errors:
-                    records_payload = self._records_payload(archive)
-                    records = self._backup_records(records_payload) if archive_type == "backup" else self._export_records(records_payload)
-                    if archive_type == "backup" and "state/knowledge.db" in declared_names:
-                        self._validate_sqlite_snapshot_records(archive, records, records_payload["schema_version"])
-                    expected_artifacts = {name for name, _ in self._artifact_members(records)}
-                    actual_artifacts = {path for path in declared_names if path.startswith("artifacts/")}
-                    allowed_names = {"records.json", *expected_artifacts}
-                    if archive_type == "backup":
-                        allowed_names.add("state/knowledge.db")
-                    if declared_names - allowed_names:
-                        errors.append("归档包含不允许的成员")
-                    if actual_artifacts != expected_artifacts:
-                        errors.append("逻辑记录与 artifact 成员不一致")
+                return self._verify_open_archive(archive, expected_manifest_sha256)
+        except (zipfile.BadZipFile, OSError):
+            return {"valid": False, "errors": ["归档无法验证"]}
+
+    def _verify_open_archive(self, archive: zipfile.ZipFile, expected_manifest_sha256: str | None) -> dict[str, Any]:
+        """对**已打开**的归档句柄执行全部校验（加固计划 Task 12）。
+
+        expected_manifest_sha256 锚定备份目录记录：manifest.json 原始字节的
+        SHA-256 必须一致，否则在解析任何内容之前整体判无效——自洽但被替换
+        的归档不能通过。调用方在整个验证-提取窗口内保持同一句柄打开。
+        """
+        errors: list[str] = []
+        try:
+            manifest_bytes = archive.read("manifest.json")
+            if expected_manifest_sha256 is not None:
+                actual_manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
+                if actual_manifest_sha256 != expected_manifest_sha256:
+                    return {"valid": False, "errors": ["manifest 与备份目录记录不一致"]}
+            members = self._safe_members(archive)
+            names = {member.filename for member in members}
+            if "manifest.json" not in names:
+                return {"valid": False, "errors": ["缺少 manifest"]}
+            manifest = json.loads(manifest_bytes)
+            if not isinstance(manifest, dict):
+                raise ValueError("manifest 无效")
+            schema_version = manifest.get("schema_version")
+            archive_type = manifest.get("archive_type")
+            if schema_version not in SUPPORTED_ARCHIVE_SCHEMA_VERSIONS:
+                errors.append("不支持的 manifest schema")
+            if archive_type not in {"backup", "export"}:
+                errors.append("不支持的归档类型")
+            if schema_version == ARCHIVE_SCHEMA_VERSION and manifest.get("database_backend") not in {"sqlite", "postgresql"}:
+                errors.append("归档数据库类型无效")
+            entries = self._entry_map(manifest)
+            declared_names = set(entries)
+            if archive_type == "backup" and schema_version == ARCHIVE_SCHEMA_VERSION:
+                if manifest["database_backend"] == "sqlite" and "state/knowledge.db" not in declared_names:
+                    errors.append("SQLite 备份缺少状态快照")
+                if manifest["database_backend"] == "postgresql" and "state/knowledge.db" in declared_names:
+                    errors.append("PostgreSQL 备份不得包含 SQLite 状态")
+            if names != declared_names | {"manifest.json"}:
+                errors.append("归档成员未由 manifest 完整声明")
+            if "records.json" not in declared_names:
+                errors.append("归档缺少逻辑记录")
+            if archive_type == "export" and "state/knowledge.db" in declared_names:
+                errors.append("便携导出不得包含本地 SQLite 状态")
+            for path, entry in entries.items():
+                if path not in names:
+                    errors.append("manifest 条目缺失")
+                    continue
+                actual_hash, actual_size = self._sha256_member(archive, path)
+                if actual_hash != entry["sha256"]:
+                    errors.append("条目哈希不匹配")
+                if actual_size != entry["byte_size"]:
+                    errors.append("条目字节数不匹配")
+                if path.startswith("artifacts/"):
+                    parts = path.split("/")
+                    if len(parts) != 3 or parts[1] != parts[2][:2] or not re.fullmatch(r"[0-9a-f]{64}", parts[2]) or actual_hash != parts[2]:
+                        errors.append("artifact 归档路径或哈希无效")
+            if not errors:
+                records_payload = self._records_payload(archive)
+                records = self._backup_records(records_payload) if archive_type == "backup" else self._export_records(records_payload)
+                if archive_type == "backup" and "state/knowledge.db" in declared_names:
+                    self._validate_sqlite_snapshot_records(archive, records, records_payload["schema_version"])
+                expected_artifacts = {name for name, _ in self._artifact_members(records)}
+                actual_artifacts = {path for path in declared_names if path.startswith("artifacts/")}
+                allowed_names = {"records.json", *expected_artifacts}
+                if archive_type == "backup":
+                    allowed_names.add("state/knowledge.db")
+                if declared_names - allowed_names:
+                    errors.append("归档包含不允许的成员")
+                if actual_artifacts != expected_artifacts:
+                    errors.append("逻辑记录与 artifact 成员不一致")
         except (zipfile.BadZipFile, json.JSONDecodeError, UnicodeDecodeError, OSError, KeyError, TypeError):
             errors.append("归档无法验证")
         except ValueError as exc:
@@ -467,7 +484,12 @@ class TransferService:
         record = next((item for item in self.repository.list_backups() if item["id"] == backup_id), None)
         if record is None:
             raise KeyError("备份不存在")
-        return self._restore_archive(self.paths.backups / record["archive_name"], target_root, target_database_url)
+        # 目录锚定（加固计划 Task 12）：restore 只接受 manifest 字节哈希与
+        # 备份目录记录一致的归档；替换攻击在验证阶段整批拒绝。
+        return self._restore_archive(
+            self.paths.backups / record["archive_name"], target_root, target_database_url,
+            expected_manifest_sha256=record["manifest_sha256"],
+        )
 
     def _target_paths(self, target_root: str) -> DataPaths:
         target = DataPaths(Path(target_root).expanduser().resolve())
@@ -826,22 +848,27 @@ class TransferService:
         cls._validate_derived_evidence_chain(records)
         return records
 
-    def _restore_archive(self, archive_path: Path, target_root: str, target_database_url: str | None = None) -> dict[str, Any]:
-        verification = self.verify_archive(archive_path)
-        if not verification["valid"]:
-            errors = verification["errors"]
-            if len(errors) == 1 and errors[0] in {
-                "逻辑记录无效",
-                "逻辑记录不完整",
-                "备份目录记录无效",
-                "视频记录无效",
-                "artifact 记录无效",
-                "SQLite 状态快照无效",
-                "SQLite 状态快照与逻辑记录不一致",
-            }:
-                raise ValueError(errors[0])
-            raise ValueError("归档验证失败")
+    def _restore_archive(
+        self, archive_path: Path, target_root: str, target_database_url: str | None = None,
+        *, expected_manifest_sha256: str | None = None,
+    ) -> dict[str, Any]:
+        # 单句柄纪律（加固计划 Task 12）：验证与提取共用同一个打开的 ZipFile，
+        # 验证后不存在关闭再重开的窗口。
         with zipfile.ZipFile(archive_path) as archive:
+            verification = self._verify_open_archive(archive, expected_manifest_sha256)
+            if not verification["valid"]:
+                errors = verification["errors"]
+                if len(errors) == 1 and errors[0] in {
+                    "逻辑记录无效",
+                    "逻辑记录不完整",
+                    "备份目录记录无效",
+                    "视频记录无效",
+                    "artifact 记录无效",
+                    "SQLite 状态快照无效",
+                    "SQLite 状态快照与逻辑记录不一致",
+                }:
+                    raise ValueError(errors[0])
+                raise ValueError("归档验证失败")
             manifest = json.loads(archive.read("manifest.json"))
             archive_type = manifest.get("archive_type")
             if archive_type not in {"backup", "export"}:
@@ -872,23 +899,45 @@ class TransferService:
                 else:
                     target_repository.insert_export_rows(records)
                 artifact_hashes = [row["sha256"] for row in records["artifacts"] if isinstance(row.get("sha256"), str)]
-            else:
-                target = self._target_paths(target_root)
-                target.create()
-                self._extract_artifacts(archive, manifest, target)
-                destination = target.database
+                restored_store = ArtifactStore(target)
+                invalid = [sha256 for sha256 in artifact_hashes if not restored_store.verify(sha256)]
+                if invalid:
+                    shutil.rmtree(target.root, ignore_errors=True)
+                    raise ValueError("还原后的 artifact 哈希不匹配")
+                return {"target_data_root": str(target.root), "restored_artifacts": len(artifact_hashes), "archive_type": archive_type}
+            # SQLite 恢复走同卷 staging（加固计划 Task 12）：DB 初始化、外键
+            # 检查与 artifact 全量校验全部通过后原子 rename 发布；任何异常
+            # 路径 finally 清理 staging，绝不留半目标。
+            target = self._target_paths(target_root)
+            staging_root = target.root.parent / f"{target.root.name}.restore-{uuid.uuid4().hex[:8]}.part"
+            try:
+                staging_root.mkdir(parents=True)
+                staging = DataPaths(staging_root)
+                staging.create()
+                self._extract_artifacts(archive, manifest, staging)
+                destination = staging.database
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 with archive.open("state/knowledge.db") as source, destination.open("xb") as output:
                     shutil.copyfileobj(source, output)
-                restored_repo = SqliteRepository(target.database)
+                restored_repo = SqliteRepository(staging.database)
                 restored_repo.initialize()
+                with restored_repo.connection() as connection:
+                    foreign_key_violations = connection.execute("PRAGMA foreign_key_check").fetchall()
+                if foreign_key_violations:
+                    raise ValueError("还原快照外键校验失败")
                 artifact_hashes = [row["sha256"] for row in restored_repo.rows_for_export()["artifacts"]]
-        restored_store = ArtifactStore(target)
-        invalid = [sha256 for sha256 in artifact_hashes if not restored_store.verify(sha256)]
-        if invalid:
-            shutil.rmtree(target.root)
-            raise ValueError("还原后的 artifact 哈希不匹配")
-        return {"target_data_root": str(target.root), "restored_artifacts": len(artifact_hashes), "archive_type": manifest["archive_type"]}
+                restored_store = ArtifactStore(staging)
+                invalid = [sha256 for sha256 in artifact_hashes if not restored_store.verify(sha256)]
+                if invalid:
+                    raise ValueError("还原后的 artifact 哈希不匹配")
+                if target.root.exists():
+                    # _target_paths 已保证既存目标为空目录；rename 前移除。
+                    target.root.rmdir()
+                os.replace(staging_root, target.root)
+                return {"target_data_root": str(target.root), "restored_artifacts": len(artifact_hashes), "archive_type": archive_type}
+            finally:
+                if staging_root.exists():
+                    shutil.rmtree(staging_root, ignore_errors=True)
 
     @staticmethod
     def _extract_artifacts(archive: zipfile.ZipFile, manifest: dict[str, Any], target: DataPaths) -> None:
