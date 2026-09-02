@@ -1254,6 +1254,10 @@ def test_check_tree_cli_exit_codes(runtime_root: Path) -> None:
 
 def test_manifest_git_state_shape_validation(runtime_root: Path, capsys: pytest.CaptureFixture[str]) -> None:
     repository = _write_fixture_repository(runtime_root / "repository")
+    # 密封化（加固计划批次一修复）：fixture 自带无提交的 .git，使
+    # _git_state 稳定返回 unavailable-dirty 并打印警告——否则 git -C 会
+    # 向上解析到主仓库，警告与否随主仓库工作树是否干净漂移。
+    subprocess.run(["git", "init", "-q", str(repository)], capture_output=True, check=False)
     archive, _ = _build_mutable_fixture_archive(repository, "20260730T010238Z")
 
     assert "警告" in capsys.readouterr().out
