@@ -1537,6 +1537,85 @@ class SqliteRepository:
             )
             return True
 
+    def commit_job_success(
+        self,
+        job_id: str,
+        lease_token: str,
+        *,
+        message: str,
+        progress: int = 100,
+        settings: dict[str, str | int] | None = None,
+        version_id: str | None = None,
+        completeness: str | None = None,
+        source_id: str | None = None,
+        processing: str | None = None,
+        child_jobs: list[dict[str, Any]] | None = None,
+        audit_event: str | None = None,
+        audit_entity_id: str | None = None,
+    ) -> bool:
+        """最终租约栅栏下的原子成功提交（加固计划 Task 8）。
+
+        同一事务内完成：job 终态（WHERE state='running' AND lease_token 且
+        租约未过期——租约被接管或过期时整体无效返回 False）、版本完整性、
+        来源处理状态、链式后继作业（确定性 ID，INSERT OR IGNORE）、settings、
+        attempt 结束与审计事件。任何一步失败整体回滚，不留部分提交。
+        """
+        with self.connection() as connection:
+            if self.backend == "sqlite":
+                connection.execute("BEGIN IMMEDIATE")
+            stamp = now()
+            fields = [
+                "state='succeeded'", f"progress={max(0, min(100, int(progress)))}",
+                "message=?", "lease_token=NULL", "lease_expires_at=NULL",
+                "completed_at=?", "updated_at=?", "heartbeat_at=?",
+            ]
+            values: list[Any] = [message, stamp, stamp, stamp]
+            updated = connection.execute(
+                f"UPDATE jobs SET {', '.join(fields)} "
+                "WHERE id=? AND state='running' AND lease_token=? "
+                f"AND {self._lease_is_active_sql()}",
+                [*values, job_id, lease_token],
+            ).rowcount
+            if not updated:
+                return False
+            if completeness and version_id:
+                connection.execute(
+                    "UPDATE content_versions SET completeness=? WHERE id=?",
+                    (completeness, version_id),
+                )
+            if processing and source_id:
+                connection.execute(
+                    "UPDATE sources SET processing_state=?, updated_at=? WHERE id=?",
+                    (processing, stamp, source_id),
+                )
+            for child in child_jobs or []:
+                connection.execute(
+                    """INSERT OR IGNORE INTO jobs(id,kind,source_id,content_version_id,artifact_sha256,config_hash,payload_json,priority,state,progress,message,attempt_count,max_attempts,created_at,updated_at)
+                       VALUES(?,?,?,?,?,?,?,?,? ,0,NULL,0,?,?,?)""",
+                    (
+                        child["job_id"], child["kind"], child.get("source_id"), child.get("version_id"),
+                        child.get("artifact_sha256"), child.get("config_hash"), json.dumps(child.get("payload") or {}),
+                        child.get("priority", 100), "queued", self._configured_max_attempts(connection), stamp, stamp,
+                    ),
+                )
+            if settings:
+                for key, value in settings.items():
+                    connection.execute(
+                        "UPDATE settings SET value=?, updated_at=? WHERE key=?",
+                        (str(value), stamp, key),
+                    )
+            connection.execute(
+                "UPDATE job_attempts SET state='succeeded', ended_at=?, outcome='succeeded' "
+                "WHERE job_id=? AND lease_token=? AND ended_at IS NULL",
+                (stamp, job_id, lease_token),
+            )
+            if audit_event:
+                connection.execute(
+                    "INSERT INTO audit_events(id, event_type, entity_id, result, created_at) VALUES(?, ?, ?, ?, ?)",
+                    (identifier(), audit_event, audit_entity_id, "succeeded", stamp),
+                )
+            return True
+
     def touch_job(self, job_id: str, lease_token: str) -> bool:
         with self.connection() as connection:
             stamp = now()

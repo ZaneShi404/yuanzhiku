@@ -197,7 +197,9 @@ def test_periodic_job_marks_daily_setting_only_after_fenced_completion(runtime_r
         services.documents,
         backup_runner=lambda: {"state": "complete"},
     )
-    monkeypatch.setattr(services.repository, "update_job", lambda *_args, **_kwargs: False)
+    # Task 8 后成功路径经 commit_job_success 的最终租约栅栏提交；
+    # 栅栏拒绝（返回 False）时作业保持 running、日设置不得写入。
+    monkeypatch.setattr(services.repository, "commit_job_success", lambda *_args, **_kwargs: False)
 
     result = worker.run_once()
 

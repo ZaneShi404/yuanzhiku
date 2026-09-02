@@ -288,7 +288,10 @@ class JobService:
                         if isinstance(payload.get("date"), str)
                         else None
                     )
-                    self._finish(job, "succeeded", "备份完成", progress=100, settings=settings)
+                    if not self.repository.commit_job_success(
+                        job["id"], job["lease_token"], message="备份完成", settings=settings,
+                    ):
+                        raise JobLeaseLost()
             elif job["kind"] == "integrity_sample":
                 if self.integrity_runner is None:
                     self._finish(job, "blocked", "完整性抽样服务不可用")
@@ -308,7 +311,10 @@ class JobService:
                         if isinstance(payload.get("date"), str)
                         else None
                     )
-                    self._finish(job, "succeeded", "空闲完整性抽样完成", progress=100, settings=settings)
+                    if not self.repository.commit_job_success(
+                        job["id"], job["lease_token"], message="空闲完整性抽样完成", settings=settings,
+                    ):
+                        raise JobLeaseLost()
             else:
                 self._finish(job, "failed", "未知作业类型")
         except JobLeaseLost:
@@ -426,8 +432,18 @@ class JobService:
         if not self.repository.touch_job(job["id"], job["lease_token"]):
             raise JobLeaseLost()
 
-    def _run_with_lease_heartbeat(self, job: dict, runner: Callable[[], object]) -> object:
-        """Run non-parser work while renewing the claim at a bounded interval."""
+    def _run_with_lease_heartbeat(
+        self,
+        job: dict,
+        runner: Callable[[], object],
+        cancel_event: threading.Event | None = None,
+    ) -> object:
+        """Run non-cancel work while renewing the claim at a bounded interval.
+
+        心跳失败（租约丢失/接管）时置位 cancel_event 通知协作 runner 提前
+        退出，并抛 JobLeaseLost；不合作的线程即使稍后返回，其结果的最终
+        提交也会被 commit_job_success 的租约栅栏拒绝（加固计划 Task 8）。
+        """
         result: list[object] = []
         failure: list[BaseException] = []
 
@@ -441,13 +457,21 @@ class JobService:
         worker.start()
         lease_seconds = self._lease_seconds()
         interval = max(1.0, min(30.0, lease_seconds / 3))
-        while worker.is_alive():
-            worker.join(timeout=interval)
-            if worker.is_alive():
-                self._heartbeat(job)
+        try:
+            while worker.is_alive():
+                worker.join(timeout=interval)
+                if worker.is_alive():
+                    self._heartbeat(job)
+        except JobLeaseLost:
+            if cancel_event is not None:
+                cancel_event.set()
+            raise
         if failure:
             raise failure[0]
         return result[0] if result else None
+
+    def _cancel_predicate(self, job: dict, event: threading.Event) -> Callable[[], bool]:
+        return lambda: event.is_set() or self.repository.job_cancel_requested(job["id"])
 
     def _lease_seconds(self) -> int:
         try:
@@ -550,13 +574,34 @@ class JobService:
         if self.repository.job_cancel_requested(job["id"]):
             self._finish(job, "cancelled", "视频分析已取消")
             return
-        if self._finish(job, "succeeded", "本地视频分析完成", progress=100):
-            self.repository.set_version_completeness(job["content_version_id"], "complete")
-            self.repository.update_processing(job["source_id"], "succeeded")
-            # 自动流水线（REQ-051 修订）：任一转写路径可用（本地模型已下载或
-            # 转写组已配置）时分析完成自动串联转写；均不可用时不入队。
-            if self._auto_pipeline_enabled() and self._transcriber_available():
-                self._enqueue_chained("video_transcribe", job)
+        # 最终租约栅栏（加固计划 Task 8）：完整性与来源状态、链式后继作业
+        # 与作业终态在同一事务内提交；租约丢失时整体无效。
+        child_jobs = (
+            self._chained_child_if_due("video_transcribe", job)
+            if self._auto_pipeline_enabled() and self._transcriber_available() and job["content_version_id"]
+            else []
+        )
+        if not self.repository.commit_job_success(
+            job["id"], job["lease_token"],
+            message="本地视频分析完成",
+            version_id=job["content_version_id"], completeness="complete",
+            source_id=job["source_id"], processing="succeeded",
+            child_jobs=child_jobs,
+        ):
+            raise JobLeaseLost()
+
+    def _chained_child_job(self, kind: str, job: dict) -> dict[str, Any]:
+        operation = {"video_transcribe": "transcribe", "video_summarize": "summarize", "source_classify": "classify"}[kind]
+        return {
+            "kind": kind,
+            "source_id": job["source_id"],
+            "version_id": job["content_version_id"],
+            "artifact_sha256": job["artifact_sha256"],
+            "config_hash": self.media_ai.config_hash(operation) if self.media_ai else None,
+            "payload": {},
+            "priority": 100,
+            "job_id": derived_identifier("job", job["id"], kind),
+        }
 
     def _update_video_progress(self, job: dict, progress: int, message: str) -> None:
         if not self.repository.update_job(job["id"], job["lease_token"], progress=progress, message=message):
@@ -572,25 +617,25 @@ class JobService:
     def _auto_pipeline_enabled(self) -> bool:
         return self.repository.get_settings().get("ai_auto_pipeline", "on") == "on"
 
-    def _enqueue_chained(self, kind: str, job: dict) -> None:
-        """自动流水线串联后继作业（加固计划 Task 7）。
-
-        同版本同 kind 已有排队/运行中作业时不重复入队（REQ-051 语义保留）；
-        否则以父作业 ID + kind 派生确定性 child ID insert-or-return——重放
-        不产生重复后继。"""
+    def _chained_child_if_due(self, kind: str, job: dict) -> list[dict[str, Any]]:
+        """构造链式后继作业行（加固计划 Task 7/8）：同版本同 kind 已有排队/
+        运行中作业时不重复入队（REQ-051 语义）；否则返回确定性 child 行，
+        由调用方在 commit_job_success 同事务写入。"""
         for existing in self.repository.list_jobs():
             if (
                 existing["kind"] == kind
                 and existing["content_version_id"] == job["content_version_id"]
                 and existing["state"] in {"queued", "running", "retry_wait"}
             ):
-                return
-        operation = {"video_transcribe": "transcribe", "video_summarize": "summarize", "source_classify": "classify"}[kind]
-        self.repository.create_job(
-            kind, job["source_id"], job["content_version_id"], job["artifact_sha256"],
-            self.media_ai.config_hash(operation), {}, priority=100,
-            job_id=derived_identifier("job", job["id"], kind),
-        )
+                return []
+        return [self._chained_child_job(kind, job)]
+
+    def _enqueue_chained(self, kind: str, job: dict) -> None:
+        for child in self._chained_child_if_due(kind, job):
+            self.repository.create_job(
+                child["kind"], child["source_id"], child["version_id"], child["artifact_sha256"],
+                child["config_hash"], child["payload"], priority=child["priority"], job_id=child["job_id"],
+            )
 
     def _apply_classification(self, source_id: str, suggestions: dict[str, Any]) -> None:
         """AI 分类建议自动写入来源元数据，只填空缺：领域/体裁仅在当前为空时写入，
@@ -655,13 +700,15 @@ class JobService:
             self._finish(job, "failed", "本地转写模型操作无效")
             return
         self._update_video_progress(job, 10, "正在下载本地转写模型")
+        cancel_event = threading.Event()
         try:
             self._run_with_lease_heartbeat(
                 job,
                 lambda: self.stt_manager.download(
-                    cancelled=lambda: self.repository.job_cancel_requested(job["id"]),
+                    cancelled=self._cancel_predicate(job, cancel_event),
                     heartbeat=lambda: self._heartbeat(job),
                 ),
+                cancel_event,
             )
         except RuntimeError as exc:
             if self.repository.job_cancel_requested(job["id"]):
@@ -672,8 +719,12 @@ class JobService:
         if self.repository.job_cancel_requested(job["id"]):
             self._finish(job, "cancelled", "本地转写模型下载已取消")
             return
-        self.repository.audit("stt_model_download", None, "succeeded")
-        self._finish(job, "succeeded", "本地转写模型下载完成", progress=100)
+        if not self.repository.commit_job_success(
+            job["id"], job["lease_token"],
+            message="本地转写模型下载完成",
+            audit_event="stt_model_download",
+        ):
+            raise JobLeaseLost()
 
     def _video_transcribe(self, job: dict) -> None:
         """语音转写双路径（REQ-054）：本地 FunASR 默认，auto 失败降级 API。
@@ -689,7 +740,8 @@ class JobService:
         api = self.transcribers.get("api")
         settings = self.repository.get_settings()
         engine = settings.get("ai_transcriber_engine", "auto")
-        cancelled = lambda: self.repository.job_cancel_requested(job["id"])
+        cancel_event = threading.Event()
+        cancelled = self._cancel_predicate(job, cancel_event)
         self._update_video_progress(job, 5, "正在提取音轨")
         artifact_path = self.artifacts.artifact_path(job["artifact_sha256"])
         workspace = self.artifacts.staging_path().with_suffix("")
@@ -725,7 +777,7 @@ class JobService:
             transcript = None
             try:
                 transcript = self._run_with_lease_heartbeat(
-                    job, lambda: transcriber.transcribe(chunks, cancelled)
+                    job, lambda: transcriber.transcribe(chunks, cancelled), cancel_event
                 )
             except Exception:
                 if cancelled():
@@ -734,7 +786,7 @@ class JobService:
                     raise
                 self._update_video_progress(job, 30, "本地转写不可用，正在降级使用 API 转写")
                 transcript = self._run_with_lease_heartbeat(
-                    job, lambda: api.transcribe(chunks, cancelled)
+                    job, lambda: api.transcribe(chunks, cancelled), cancel_event
                 )
                 transcriber = api
                 engine_used = "api"
@@ -774,10 +826,14 @@ class JobService:
             message = "语音转写完成"
             if fallback_reason:
                 message = "本地转写不可用，已使用 API 转写"
-            self._finish(job, "succeeded", message, progress=100)
-            # 自动流水线（REQ-051 修订）：理解组已配置时转写完成自动串联摘要。
-            if self._auto_pipeline_enabled() and self.media_ai is not None and self.media_ai.capability().get("understand_enabled"):
-                self._enqueue_chained("video_summarize", job)
+            # 最终租约栅栏：转写完成与链式摘要作业同事务提交（Task 8）。
+            children = (
+                self._chained_child_if_due("video_summarize", job)
+                if self._auto_pipeline_enabled() and self.media_ai is not None and self.media_ai.capability().get("understand_enabled")
+                else []
+            )
+            if not self.repository.commit_job_success(job["id"], job["lease_token"], message=message, child_jobs=children):
+                raise JobLeaseLost()
         finally:
             shutil.rmtree(workspace, ignore_errors=True)
 
@@ -789,7 +845,8 @@ class JobService:
         if self.media_ai is None or not self.media_ai.capability().get("understand_enabled"):
             self._finish(job, "blocked", "未配置媒体 AI 服务", progress=100)
             return
-        cancelled = lambda: self.repository.job_cancel_requested(job["id"])
+        cancel_event = threading.Event()
+        cancelled = self._cancel_predicate(job, cancel_event)
         try:
             payload = json.loads(job["payload_json"])
         except (TypeError, ValueError):
@@ -834,7 +891,9 @@ class JobService:
             "max_silence_ms": max_silence_ms,
         }
         self._update_video_progress(job, 15, "正在判断内容完整性")
-        assessment = self._run_with_lease_heartbeat(job, lambda: self.media_ai.assess_completeness(transcript_text, context))
+        assessment = self._run_with_lease_heartbeat(
+            job, lambda: self.media_ai.assess_completeness(transcript_text, context), cancel_event
+        )
         if cancelled():
             self._finish(job, "cancelled", "媒体 AI 处理已取消")
             return
@@ -858,6 +917,7 @@ class JobService:
                             (source or {}).get("title") or "",
                             cancelled,
                         ),
+                        cancel_event,
                     )
                     video_direct = True
                 except MediaAiUnavailable:
@@ -892,6 +952,7 @@ class JobService:
                     },
                     cancelled,
                 ),
+                cancel_event,
             )
             frame_descriptions = None
         if cancelled():
@@ -941,7 +1002,8 @@ class JobService:
                 "genres": result.get("suggested_genres") or [],
                 "tags": result.get("suggested_tags") or [],
             })
-        self._finish(job, "succeeded", "内容摘要完成", progress=100)
+        if not self.repository.commit_job_success(job["id"], job["lease_token"], message="内容摘要完成"):
+            raise JobLeaseLost()
 
     def _source_classify(self, job: dict) -> None:
         """文档/粘贴 AI 分类（REQ-051 修订）：正文发理解组产出领域/体裁/标签建议，
@@ -951,7 +1013,8 @@ class JobService:
         if self.media_ai is None or not self.media_ai.capability().get("understand_enabled"):
             self._finish(job, "blocked", "未配置媒体 AI 服务", progress=100)
             return
-        cancelled = lambda: self.repository.job_cancel_requested(job["id"])
+        cancel_event = threading.Event()
+        cancelled = self._cancel_predicate(job, cancel_event)
         version_id = job["content_version_id"]
         extraction = self._latest_representation(version_id, "extraction")
         if extraction is None or not str(extraction["text_content"] or "").strip():
@@ -971,13 +1034,15 @@ class JobService:
                     "taxonomy_genres": list(TAXONOMY_GENRE_VALUES),
                 },
             ),
+            cancel_event,
         )
         if cancelled():
             self._finish(job, "cancelled", "媒体 AI 处理已取消")
             return
         if job["source_id"]:
             self._apply_classification(job["source_id"], suggestions)
-        self._finish(job, "succeeded", "AI 分类完成", progress=100)
+        if not self.repository.commit_job_success(job["id"], job["lease_token"], message="AI 分类完成"):
+            raise JobLeaseLost()
 
     def _image_analyze(self, job: dict) -> None:
         if self.images is None:
@@ -1010,9 +1075,13 @@ class JobService:
         if self.repository.job_cancel_requested(job["id"]):
             self._finish(job, "cancelled", "图片分析已取消")
             return
-        if self._finish(job, "succeeded", "本地图片分析完成", progress=100):
-            self.repository.set_version_completeness(job["content_version_id"], "complete")
-            self.repository.update_processing(job["source_id"], "succeeded")
+        if not self.repository.commit_job_success(
+            job["id"], job["lease_token"],
+            message="本地图片分析完成",
+            version_id=job["content_version_id"], completeness="complete",
+            source_id=job["source_id"], processing="succeeded",
+        ):
+            raise JobLeaseLost()
 
     def _video_download(self, job: dict) -> None:
         """Restricted link download flow (REQ-047): payload 校验 → 工具可用性 →
@@ -1061,6 +1130,8 @@ class JobService:
         )
         workspace = self.artifacts.staging_path().with_suffix("")
         workspace.mkdir(parents=True, exist_ok=False)
+        cancel_event = threading.Event()
+        cancelled = self._cancel_predicate(job, cancel_event)
         try:
             cookie_copy: Path | None = None
             if use_cookie:
@@ -1145,7 +1216,13 @@ class JobService:
                     version_id=derived_identifier("source", job["id"], "version"),
                 )
             self.repository.audit("video_download", ingested["source"]["id"], "succeeded")
-            self._finish(job, "succeeded", "链接下载完成，已排入本地视频分析", progress=100)
+            # 最终租约栅栏（Task 8）：来源/版本/provenance/后继 video_analyze 已由
+            # create_ingest 同事务写入；此处仅提交作业终态本身。
+            if not self.repository.commit_job_success(
+                job["id"], job["lease_token"],
+                message="链接下载完成，已排入本地视频分析",
+            ):
+                raise JobLeaseLost()
         finally:
             # 作业结束（无论成败/取消）：回环代理由适配器随作业关闭；
             # staging 与 Cookie 拷贝在这里统一清理。
@@ -1218,14 +1295,22 @@ class JobService:
             evidence=evidence_items,
         ) or not self.artifacts.verify(job["artifact_sha256"]):
             raise RuntimeError("输出、证据、索引或 artifact 校验失败")
-        if self._finish(job, "succeeded", "本地解析完成", progress=100):
-            self.repository.set_version_completeness(job["content_version_id"], "complete")
-            self.repository.update_processing(job["source_id"], "succeeded")
-            # 自动流水线（REQ-051 修订）：parse 仅覆盖文档/粘贴，理解组已配置时
-            # 自动串联 AI 分类；image_analyze 无正文文本，不参与自动分类。
+        # 最终租约栅栏（Task 8）：解析完成、完整性与来源状态、链式分类作业
+        # 同事务提交。
+        children = (
+            self._chained_child_if_due("source_classify", job)
             if (
                 self.media_ai is not None
                 and self._auto_pipeline_enabled()
                 and self.media_ai.capability().get("understand_enabled")
-            ):
-                self._enqueue_chained("source_classify", job)
+            )
+            else []
+        )
+        if not self.repository.commit_job_success(
+            job["id"], job["lease_token"],
+            message="本地解析完成",
+            version_id=job["content_version_id"], completeness="complete",
+            source_id=job["source_id"], processing="succeeded",
+            child_jobs=children,
+        ):
+            raise JobLeaseLost()
