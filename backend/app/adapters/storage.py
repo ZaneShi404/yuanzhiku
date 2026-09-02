@@ -23,6 +23,10 @@ class StorageLimitError(ValueError):
     pass
 
 
+class ArtifactIntegrityError(RuntimeError):
+    """内容寻址命中目标的实际内容与地址不一致且修复失败；消息不含内容。"""
+
+
 class ArtifactStore:
     def __init__(self, paths: DataPaths) -> None:
         self.paths = paths
@@ -58,6 +62,58 @@ class ArtifactStore:
         with self.operation():
             return self._store_stream(stream, expected_bytes)
 
+    def _hash_file(self, path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as existing:
+            for chunk in iter(lambda: existing.read(COPY_CHUNK), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def _verify_target(self, destination: Path, sha256: str, size: int) -> bool:
+        """命中目标与（哈希、尺寸）逐字节一致才可视为有效去重。"""
+        try:
+            if not destination.is_file() or destination.stat().st_size != size:
+                return False
+            return self._hash_file(destination) == sha256
+        except OSError:
+            return False
+
+    def _repair_hit(self, stage: Path, destination: Path, sha256: str, size: int) -> None:
+        """损坏命中修复（加固计划 Task 6）：隔离旧目标 → 已验证 staging 原子
+        替换 → 复验 → 清理隔离副本；失败尽力恢复旧目标并抛受控异常。"""
+        quarantine = destination.parent / f"{destination.name}.quarantine-{uuid.uuid4().hex}"
+        try:
+            os.replace(destination, quarantine)
+            os.replace(stage, destination)
+            if not self._verify_target(destination, sha256, size):
+                raise ArtifactIntegrityError("内容寻址对象校验失败且修复未通过")
+        except ArtifactIntegrityError:
+            stage.unlink(missing_ok=True)
+            self._restore_quarantine(quarantine, destination)
+            raise
+        except Exception as exc:
+            stage.unlink(missing_ok=True)
+            self._restore_quarantine(quarantine, destination)
+            raise ArtifactIntegrityError("内容寻址对象修复失败") from exc
+        finally:
+            # 成功或已恢复时清理隔离副本；恢复失败时保留旧目标供检查，
+            # 绝不删除仅存的副本。
+            if quarantine.exists():
+                if quarantine.is_dir():
+                    shutil.rmtree(quarantine, ignore_errors=True)
+                else:
+                    quarantine.unlink(missing_ok=True)
+
+    @staticmethod
+    def _restore_quarantine(quarantine: Path, destination: Path) -> bool:
+        if not quarantine.exists() or destination.exists():
+            return quarantine.exists() and destination.exists()
+        try:
+            os.replace(quarantine, destination)
+            return True
+        except OSError:
+            return False
+
     def _store_stream(self, stream: BinaryIO, expected_bytes: int | None = None) -> StoredArtifact:
         if expected_bytes is not None:
             self.check_capacity(expected_bytes)
@@ -82,7 +138,11 @@ class ArtifactStore:
             destination = self.artifact_path(sha256)
             destination.parent.mkdir(parents=True, exist_ok=True)
             if destination.exists():
-                stage.unlink(missing_ok=True)
+                # CAS 命中不再盲信：逐字节校验；损坏即用本次已验证字节修复。
+                if self._verify_target(destination, sha256, size):
+                    stage.unlink(missing_ok=True)
+                    return StoredArtifact(sha256, size, destination, False)
+                self._repair_hit(stage, destination, sha256, size)
                 return StoredArtifact(sha256, size, destination, False)
             os.replace(stage, destination)
             return StoredArtifact(sha256, size, destination, True)
