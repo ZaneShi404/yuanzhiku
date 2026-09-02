@@ -48,6 +48,18 @@ class ReimportConflict(ValueError):
         self.report = report
 
 
+def select_verification_sample(hashes: list[str], sample_size: int, utc_date: str) -> list[str]:
+    """日期轮转抽样（加固计划 Task 13）。
+
+    按 sha256(f"{utc_date}:{sha}") 摘要排序取前 N：同一天结果可复现，
+    跨日期顺序轮转，避免固定抽前 N 永远检查同一子集。
+    """
+    if sample_size >= len(hashes):
+        return list(hashes)
+    ranked = sorted(hashes, key=lambda sha: hashlib.sha256(f"{utc_date}:{sha}".encode("utf-8")).digest())
+    return ranked[:max(1, sample_size)]
+
+
 class TransferService:
     def __init__(self, paths: DataPaths, repository: RepositoryPort, artifacts: ArtifactStore) -> None:
         self.paths = paths
@@ -475,7 +487,10 @@ class TransferService:
 
     def verify_artifacts(self, full: bool, sample_size: int) -> dict[str, Any]:
         hashes = [row["sha256"] for row in self.repository.rows_for_export()["artifacts"]]
-        selected = hashes if full else hashes[:sample_size]
+        if full:
+            selected = hashes
+        else:
+            selected = select_verification_sample(hashes, sample_size, datetime.now(UTC).date().isoformat())
         failures = [sha256 for sha256 in selected if not self.artifacts.verify(sha256)]
         self.repository.audit("integrity_verify", None, "failed" if failures else "succeeded")
         return {"checked": len(selected), "full": full, "valid": not failures, "failures": failures}
@@ -1007,8 +1022,33 @@ class TransferService:
                 raise ReimportConflict({"conflicts": sorted(set(conflicts)), "reason": "逻辑链或唯一约束冲突，已拒绝且未写入"})
             artifact_entries = self._entry_map(manifest)
             created_artifacts: list[str] = []
+            repaired_artifacts: list[str] = []
             try:
                 with self.artifacts.operation():
+                    # 物理修复（加固计划 Task 13）：冲突预检完成后遍历归档声明的
+                    # 全部 artifact——目标缺失则从归档复制，损坏则经 Task 6 的
+                    # CAS 修复路径（隔离→替换→复验）恢复；归档缺成员即失败。
+                    for artifact in records["artifacts"]:
+                        sha256 = artifact["sha256"]
+                        if not isinstance(sha256, str) or self.artifacts.verify(sha256):
+                            continue
+                        name = f"artifacts/{sha256[:2]}/{sha256}"
+                        if name not in artifact_entries:
+                            raise ValueError("导入缺少 artifact")
+                        stage = self.artifacts.staging_path()
+                        try:
+                            actual_hash, actual_size = self._sha256_member(archive, name)
+                            if actual_hash != sha256 or actual_size != artifact_entries[name]["byte_size"]:
+                                raise ValueError("导入 artifact 哈希或大小不匹配")
+                            with archive.open(name) as source, stage.open("xb") as output:
+                                shutil.copyfileobj(source, output)
+                            if self._sha256_path(stage) != sha256:
+                                raise ValueError("导入 artifact 哈希不匹配")
+                            with stage.open("rb") as verified_stream:
+                                self.artifacts.store_stream(verified_stream, actual_size)
+                            repaired_artifacts.append(sha256)
+                        finally:
+                            stage.unlink(missing_ok=True)
                     for artifact in pending["artifacts"]:
                         sha256 = artifact["sha256"]
                         if self.artifacts.verify(sha256):
@@ -1041,4 +1081,4 @@ class TransferService:
                 raise
         imported_count = sum(len(rows) for rows in pending.values())
         self.repository.audit("reimport", None, "succeeded")
-        return {"imported": True, "report": {"conflicts": [], "inserted_records": imported_count, "imported_artifacts": len(pending["artifacts"])}}
+        return {"imported": True, "report": {"conflicts": [], "inserted_records": imported_count, "imported_artifacts": len(pending["artifacts"]), "repaired_artifacts": len(repaired_artifacts)}}
