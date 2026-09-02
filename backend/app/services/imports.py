@@ -3,9 +3,16 @@
 from __future__ import annotations
 
 import io
+import zipfile
 from pathlib import Path
 from typing import BinaryIO
 
+from app.domain.input_limits import (
+    InputContentInvalid,
+    InputTooLarge,
+    validate_docx_members,
+    validate_document_head,
+)
 from app.ports.repository import RepositoryPort
 from app.ports.storage import ArtifactStoragePort
 from app.domain.models import PasteImportRequest, SourceType
@@ -33,6 +40,46 @@ class ImportService:
     def __init__(self, repository: RepositoryPort, artifacts: ArtifactStoragePort) -> None:
         self.repository = repository
         self.artifacts = artifacts
+
+    @staticmethod
+    def _inspect_document_stream(suffix: str, stream: BinaryIO) -> None:
+        """入库前内容校验（加固计划 Task 5）；校验后流位置回到起点。
+
+        PDF 校验 %PDF- 魔数；TXT/Markdown 全量拒绝 NUL；DOCX 以 zip 中央
+        目录做结构/成员上限校验（元数据可伪造，真实解压炸弹由解析作业的
+        内存/磁盘断路器兜底）。失败抛 InputContentInvalid/InputTooLarge。
+        """
+        try:
+            stream.seek(0)
+        except (OSError, AttributeError) as exc:
+            raise InputContentInvalid("文档内容校验失败") from exc
+        chunk_size = 1024 * 1024
+        try:
+            if suffix == ".docx":
+                # ZipFile 关闭时不会关闭底层流；UploadFile 的 SpooledTemporaryFile 可 seek。
+                with zipfile.ZipFile(stream) as archive:
+                    validate_docx_members(archive.infolist())
+                stream.seek(0)
+                return
+            first = stream.read(chunk_size)
+            validate_document_head(suffix, first)
+            if suffix in {".txt", ".md", ".markdown"}:
+                while True:
+                    chunk = stream.read(chunk_size)
+                    if not chunk:
+                        break
+                    if b"\x00" in chunk:
+                        raise InputContentInvalid("文本文件包含非法空字节")
+            stream.seek(0)
+        except (InputContentInvalid, InputTooLarge):
+            stream.seek(0)
+            raise
+        except zipfile.BadZipFile as exc:
+            stream.seek(0)
+            raise InputContentInvalid("DOCX 结构不完整") from exc
+        except OSError as exc:
+            stream.seek(0)
+            raise InputContentInvalid("文档内容校验失败") from exc
 
     def _persist_ingest(
         self,
@@ -78,6 +125,8 @@ class ImportService:
         }
 
     def paste(self, request: PasteImportRequest) -> dict:
+        if "\x00" in request.text:
+            raise InputContentInvalid("粘贴文本包含非法空字节")
         encoded = request.text.encode("utf-8")
         if len(encoded) > 10 * 1024 * 1024:
             raise ValueError("粘贴 UTF-8 文本不能超过 10MB")
@@ -248,6 +297,7 @@ class ImportService:
         suffix = Path(filename).suffix.lower()
         if suffix not in ALLOWED_SUFFIXES:
             raise ValueError("仅支持 PDF、DOCX、Markdown 和 TXT")
+        self._inspect_document_stream(suffix, stream)
         if expected_bytes is not None:
             self.artifacts.check_capacity(expected_bytes)
         if not title.strip():

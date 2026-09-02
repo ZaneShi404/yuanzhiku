@@ -34,6 +34,7 @@ from app.adapters.local_stt import LocalFunasrTranscriber
 from app.adapters.video_ai import MiMoVideoAdapter, QwenVideoAdapter, RelayClient
 from app.core.config import DataPaths, InstanceLock, data_paths, database_backend, database_url
 from app.core.operations import OperationalLog
+from app.domain.input_limits import InputContentInvalid, InputTooLarge, MAX_JSON_BODY_BYTES
 from app.ports.media import DownloadInputInvalid, DownloadUnavailable
 from app.ports.repository import RepositoryPort
 from app.security.local_access import LocalAccessSettings, install_local_access_middleware
@@ -492,6 +493,23 @@ def create_app(
     install_local_access_middleware(app, local_access or LocalAccessSettings())
 
     @app.middleware("http")
+    async def json_body_size_preflight(request, call_next):
+        # JSON 请求体上限（加固计划 Task 5）：解析前按 Content-Length 预检。
+        if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+            content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+            if content_type == "application/json":
+                try:
+                    length = int(request.headers.get("content-length", "0"))
+                except ValueError:
+                    length = 0
+                if length > MAX_JSON_BODY_BYTES:
+                    return JSONResponse(
+                        status_code=413,
+                        content={"detail": {"code": "request_too_large", "message": "JSON 请求体超过大小上限"}},
+                    )
+        return await call_next(request)
+
+    @app.middleware("http")
     async def upload_capacity_preflight(request, call_next):
         if request.method == "POST" and request.url.path in {"/api/v1/imports/file", "/api/v1/imports/image", "/api/v1/videos/local"}:
             content_length = request.headers.get("content-length")
@@ -732,6 +750,10 @@ def create_app(
     def import_paste(request: PasteImportRequest, svc: ApplicationServices = Depends(get_services)) -> dict[str, Any]:
         try:
             return svc.imports.paste(request)
+        except InputTooLarge as exc:
+            raise HTTPException(status_code=413, detail={"code": "request_too_large", "message": str(exc)}) from exc
+        except InputContentInvalid as exc:
+            raise HTTPException(status_code=422, detail={"code": "invalid_file_content", "message": str(exc)}) from exc
         except (StorageLimitError, ValueError) as exc:
             raise HTTPException(status_code=413, detail=str(exc)) from exc
 
@@ -760,6 +782,10 @@ def create_app(
             validated = PasteImportRequest(title=title or file.filename or "未命名文档", text="x", rights=rights, language=language, source_date=source_date, domains=domain_values, genres=genre_values, tags=tag_values)
             expected_bytes = file.size if isinstance(file.size, int) and file.size >= 0 else None
             return svc.imports.file(file.file, file.filename or "upload.bin", file.content_type, validated.title, rights.value, author, language, notes, validated.domains, validated.genres, validated.tags, expected_bytes, validated.source_date.isoformat() if validated.source_date else None)
+        except InputTooLarge as exc:
+            raise HTTPException(status_code=413, detail={"code": "request_too_large", "message": str(exc)}) from exc
+        except InputContentInvalid as exc:
+            raise HTTPException(status_code=422, detail={"code": "invalid_file_content", "message": str(exc)}) from exc
         except (ValueError, StorageLimitError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         finally:

@@ -10,6 +10,8 @@ from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
 
+from app.domain.input_limits import normalize_tags, validate_id_list
+
 
 class RightsCategory(str, Enum):
     OWNED = "owned"
@@ -121,6 +123,11 @@ class PasteImportRequest(BaseModel):
     def valid_genres(cls, value: list[str]) -> list[str]:
         return validate_taxonomy_genres(value)
 
+    @field_validator("tags")
+    @classmethod
+    def valid_tags(cls, value: list[str]) -> list[str]:
+        return normalize_tags(value)
+
 
 class SourceMetadataUpdate(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=500)
@@ -154,6 +161,13 @@ class SourceMetadataUpdate(BaseModel):
             return value
         return validate_taxonomy_genres(value)
 
+    @field_validator("tags")
+    @classmethod
+    def valid_tags(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return value
+        return normalize_tags(value)
+
 
 class RelationCreate(BaseModel):
     related_source_id: str
@@ -172,6 +186,11 @@ class KnowledgeCreate(BaseModel):
     statement: str = Field(min_length=1, max_length=20_000)
     evidence_ids: list[str] = Field(default_factory=list)
 
+    @field_validator("evidence_ids")
+    @classmethod
+    def valid_evidence_ids(cls, value: list[str]) -> list[str]:
+        return validate_id_list(value, field="evidence_ids")
+
 
 class ManualRepresentationCreate(BaseModel):
     text: str = Field(min_length=1, max_length=10 * 1024 * 1024)
@@ -185,6 +204,11 @@ class ExternalCardCreate(BaseModel):
     notes: str | None = Field(default=None, max_length=4000)
     tags: list[str] = Field(default_factory=list)
 
+    @field_validator("tags")
+    @classmethod
+    def valid_tags(cls, value: list[str]) -> list[str]:
+        return normalize_tags(value)
+
 
 class DouyinCardCreate(ExternalCardCreate):
     pass
@@ -193,6 +217,11 @@ class DouyinCardCreate(ExternalCardCreate):
 class TopicCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     source_ids: list[str] = Field(default_factory=list)
+
+    @field_validator("source_ids")
+    @classmethod
+    def valid_source_ids(cls, value: list[str]) -> list[str]:
+        return validate_id_list(value, field="source_ids")
 
 
 class TopicRename(BaseModel):
