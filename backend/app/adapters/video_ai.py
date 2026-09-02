@@ -25,7 +25,7 @@ from typing import Any, Callable
 
 from app.adapters.media import LocalFfmpegMediaAnalyzer
 from app.domain.media import MediaProcessingLimits
-from app.domain.models import TAXONOMY_DOMAIN_VALUES, TAXONOMY_GENRE_VALUES
+from app.domain.models import TAXONOMY_DOMAIN_VALUES, TAXONOMY_GENRE_VALUES, validate_ai_base_url
 from app.ports.media import MediaAiUnavailable, MediaProcessingCancelled
 from app.ports.media import VideoUnderstandingPort
 
@@ -259,8 +259,9 @@ class RelayClient:
     def _default_uploader(path: Path, base: str, secret: str) -> str:
         import httpx
 
+        # trust_env=False：绝不信任环境代理变量（加固计划 Task 4a）。
         with path.open("rb") as stream:
-            with httpx.Client(timeout=600.0) as client:
+            with httpx.Client(timeout=600.0, trust_env=False) as client:
                 response = client.post(
                     f"{base}/upload",
                     headers={"Authorization": f"Bearer {secret}"},
@@ -613,7 +614,8 @@ class QwenVideoAdapter(_VideoChatAdapter):
             import httpx
 
             def fetch(model: str) -> dict:
-                with httpx.Client(timeout=60.0) as client:
+                # trust_env=False：绝不信任环境代理变量（加固计划 Task 4a）。
+                with httpx.Client(timeout=60.0, trust_env=False) as client:
                     response = client.get(
                         "https://dashscope.aliyuncs.com/api/v1/uploads",
                         params={"action": "getPolicy", "model": model},
@@ -626,10 +628,19 @@ class QwenVideoAdapter(_VideoChatAdapter):
                 return data
 
             def uploader(policy: dict, path: Path) -> str:
+                # 供应商返回的上传主机逐次校验（REQ-052 修订，加固计划
+                # Task 4a）：仅 HTTPS/公网/无 userinfo；失败脱敏且零出站。
+                upload_host = str(policy.get("upload_host") or policy.get("uploadHost") or "").strip()
+                try:
+                    validate_ai_base_url(upload_host)
+                except ValueError as exc:
+                    raise RuntimeError("视频临时上传失败") from None
+                if not upload_host:
+                    raise RuntimeError("视频临时上传失败")
                 with path.open("rb") as stream:
-                    with httpx.Client(timeout=600.0) as client:
+                    with httpx.Client(timeout=600.0, trust_env=False) as client:
                         response = client.post(
-                            str(policy.get("upload_host") or policy.get("uploadHost")),
+                            upload_host,
                             data=policy,
                             files={"file": (path.name, stream, "application/octet-stream")},
                         )
@@ -637,7 +648,7 @@ class QwenVideoAdapter(_VideoChatAdapter):
                     raise RuntimeError("视频临时上传失败")
                 key = policy.get("key") or policy.get("object")
                 upload_dir = policy.get("upload_dir") or policy.get("dir") or ""
-                parsed = urllib.parse.urlparse(str(policy.get("upload_host")))
+                parsed = urllib.parse.urlparse(upload_host)
                 return f"https://{parsed.netloc}/{upload_dir.rstrip('/')}/{key}"
 
             self._policy_fetcher, self._oss_uploader = fetch, uploader

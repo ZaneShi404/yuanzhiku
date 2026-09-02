@@ -5,6 +5,9 @@ services:
     environment:
       # 必填：应用侧 ai_video_relay_secret 与本值一致
       VIDEO_RELAY_SECRET: ${VIDEO_RELAY_SECRET:?请设置中转密钥}
+      # 必填：对外可达的固定公网地址（含 https），返回给供应商的拉取 URL
+      # 只由该值与随机 token 构造，不信任 X-Forwarded-* 转发头
+      VIDEO_RELAY_PUBLIC_BASE_URL: ${VIDEO_RELAY_PUBLIC_BASE_URL:?请设置对外公网地址}
       VIDEO_RELAY_MAX_BYTES: "314572800"
       VIDEO_RELAY_TTL_SECONDS: "1800"
     volumes:

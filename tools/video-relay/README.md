@@ -7,7 +7,9 @@ URL** 交给 MiMo/Qwen 拉取；TTL 到期自动删除。与知识库应用完�
 
 ## 安全模型
 
-- 上传必须带 `Authorization: Bearer <VIDEO_RELAY_SECRET>`；
+- 上传必须带 `Authorization: Bearer <VIDEO_RELAY_SECRET>`（恒时比较）；
+- 返回的拉取 URL 只由必填的 `VIDEO_RELAY_PUBLIC_BASE_URL` 与随机 token
+  构造，**不信任 `X-Forwarded-*` 等客户端可伪造的转发头**；
 - token 为 64 位十六进制随机串（能力 URL），仅能定位本服务存储的单个文件，
   无目录列举、无路径穿越（token 只允许 `[0-9a-f]{32,}` 后按文件名映射）；
 - 文件 TTL（默认 30 分钟）到期由后台线程清理；服务重启即清理过期文件；
@@ -21,11 +23,14 @@ URL** 交给 MiMo/Qwen 拉取；TTL 到期自动删除。与知识库应用完�
 
 ```bash
 cd tools/video-relay
-VIDEO_RELAY_SECRET='<生成一个高强度随机串>' docker compose up -d --build
+VIDEO_RELAY_SECRET='<生成一个高强度随机串>' \
+VIDEO_RELAY_PUBLIC_BASE_URL='https://你的域名' \
+  docker compose up -d --build
 ```
 
 - 生成密钥：`openssl rand -hex 32`；
-- 修改环境变量：`docker compose down && VIDEO_RELAY_SECRET=... docker compose up -d`（改密钥会使旧 token 全部失效——上传鉴权密钥变了，旧文件仍按 TTL 清理）。
+- `VIDEO_RELAY_PUBLIC_BASE_URL` 必填：对外可达的固定 HTTPS 地址（与前置反代域名一致）；改它会立即使已发出去的旧 URL 失效（旧文件仍按 TTL 清理）；
+- 修改环境变量：`docker compose down && VIDEO_RELAY_SECRET=... VIDEO_RELAY_PUBLIC_BASE_URL=... docker compose up -d`（改密钥会使旧 token 全部失效——上传鉴权密钥变了，旧文件仍按 TTL 清理）。
 
 ### 反向代理（1Panel / OpenResty）
 

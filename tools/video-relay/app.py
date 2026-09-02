@@ -11,6 +11,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import os
 import re
 import threading
@@ -23,11 +25,27 @@ from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 
 SECRET = os.environ.get("VIDEO_RELAY_SECRET", "")
+# 必填（加固计划 Task 4a）：返回 URL 只由该值与随机 token 构造，
+# 绝不信任 X-Forwarded-Proto/Host 等客户端可伪造的转发头。
+PUBLIC_BASE_URL = os.environ.get("VIDEO_RELAY_PUBLIC_BASE_URL", "").strip().rstrip("/")
 MAX_BYTES = int(os.environ.get("VIDEO_RELAY_MAX_BYTES", "314572800"))
 TTL_SECONDS = int(os.environ.get("VIDEO_RELAY_TTL_SECONDS", "1800"))
 TOKEN_DIR = Path(os.environ.get("VIDEO_RELAY_TOKEN_DIR", "/data/tokens"))
 
 TOKEN_PATTERN = re.compile(r"^[0-9a-f]{32,}$")
+
+if not SECRET:
+    raise RuntimeError("必须设置 VIDEO_RELAY_SECRET 环境变量")
+if not PUBLIC_BASE_URL:
+    raise RuntimeError("必须设置 VIDEO_RELAY_PUBLIC_BASE_URL 环境变量（如 https://relay.example.com）")
+
+
+def secret_matches(authorization: str) -> bool:
+    """恒时比较 Bearer 凭据；绝不提前返回泄露长度差异。"""
+    expected = f"Bearer {SECRET}"
+    left = hashlib.sha256(authorization.encode("utf-8")).digest()
+    right = hashlib.sha256(expected.encode("utf-8")).digest()
+    return hmac.compare_digest(left, right)
 
 
 def _cleanup() -> None:
@@ -51,8 +69,6 @@ def _cleanup_loop() -> None:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    if not SECRET:
-        raise RuntimeError("必须设置 VIDEO_RELAY_SECRET 环境变量")
     _cleanup()
     threading.Thread(target=_cleanup_loop, name="token-cleanup", daemon=True).start()
     yield
@@ -70,8 +86,7 @@ app = FastAPI(
 
 @app.post("/upload")
 async def upload(request: Request, file: UploadFile = File(...)) -> dict[str, str]:
-    authorization = request.headers.get("authorization", "")
-    if authorization != f"Bearer {SECRET}":
+    if not secret_matches(request.headers.get("authorization", "")):
         raise HTTPException(status_code=401, detail="unauthorized")
     token = uuid.uuid4().hex + uuid.uuid4().hex
     TOKEN_DIR.mkdir(parents=True, exist_ok=True)
@@ -89,9 +104,7 @@ async def upload(request: Request, file: UploadFile = File(...)) -> dict[str, st
         raise
     finally:
         await file.close()
-    scheme = request.headers.get("x-forwarded-proto", request.url.scheme)
-    host = request.headers.get("x-forwarded-host") or request.headers.get("host", "")
-    return {"url": f"{scheme}://{host}/f/{token}"}
+    return {"url": f"{PUBLIC_BASE_URL}/f/{token}"}
 
 
 @app.get("/f/{token}")

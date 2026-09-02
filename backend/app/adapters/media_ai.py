@@ -94,8 +94,9 @@ def _httpx_models_probe(base_url: str, api_key: str, timeout: float) -> None:
     import httpx
 
     base = (base_url.strip() or "https://api.openai.com/v1").rstrip("/")
+    # trust_env=False：绝不信任环境代理变量（加固计划 Task 4a）。
     try:
-        with httpx.Client(timeout=timeout) as client:
+        with httpx.Client(timeout=timeout, trust_env=False) as client:
             response = client.get(f"{base}/models", headers={"Authorization": f"Bearer {api_key}"})
     except httpx.HTTPError as exc:
         raise RuntimeError("网络不可达或连接超时") from exc
