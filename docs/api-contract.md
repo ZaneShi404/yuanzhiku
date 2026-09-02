@@ -75,6 +75,7 @@
 | `413` | `cookie_file_too_large` | 平台 cookies.txt 超过 1MB |
 | `502` | `probe_failed` | 链接元数据探测失败：链接失效、平台拒绝或探测超时（仅 `/videos/link/probe`） |
 | `503` | `downloader_unavailable` | yt-dlp 或 FFmpeg 缺失、下载器未配置 |
+| `503` | `credential_store_corrupt` | AI 凭据文件损坏（任何读取凭据的端点：`GET/PUT /settings/ai`、连通性测试、媒体 AI 作业等）；原文件保持不变，修复或删除后重试 |
 | `404` | 沿用框架 | 资源不存在 |
 | `500` | `internal_error` | 本地服务内部错误 |
 

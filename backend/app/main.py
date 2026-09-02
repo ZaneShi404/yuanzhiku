@@ -21,6 +21,7 @@ from starlette.requests import Request
 from app.adapters.sqlite import SqliteRepository
 from app.adapters.storage import ArtifactStore, StorageLimitError
 from app.adapters.parsers import LocalDocumentParser
+from app.core.permissions import secure_private_file
 from app.adapters.downloader import (
     DOWNLOAD_PLATFORMS,
     DOWNLOAD_REGISTRY,
@@ -67,7 +68,7 @@ from app.domain.models import (
 )
 from app.services.documents import DocumentService
 from app.services.external_cards import ExternalCardService
-from app.services.ai_credentials import read_ai_credentials, write_ai_credentials
+from app.services.ai_credentials import CredentialStoreCorrupt, read_ai_credentials, write_ai_credentials
 from app.services.images import ImageService
 from app.services.imports import ImportService
 from app.services.jobs import JobService
@@ -87,6 +88,7 @@ class ApplicationServices:
         self.operations = OperationalLog(paths.logs)
         self.operations.prune()
         _migrate_legacy_download_cookie(paths, self.operations)
+        _secure_existing_private_files(paths, self.operations)
         selected_database_url = database_url(paths)
         selected_backend = database_backend(selected_database_url)
         if selected_backend == "postgresql":
@@ -203,11 +205,29 @@ def _migrate_legacy_download_cookie(paths: DataPaths, operations: OperationalLog
                 continue
             content = "\n".join(header_lines + lines) + "\n"
             (paths.download_cookies / f"{platform}.txt").write_text(content, encoding="utf-8")
+            secure_private_file(paths.download_cookies / f"{platform}.txt")
         legacy.unlink()
         operations.write("legacy_cookie_migration", "succeeded")
     except Exception:
         # 迁移失败不阻断启动；事件不含任何行内容。
         operations.write("legacy_cookie_migration", "failed")
+
+
+def _secure_existing_private_files(paths: DataPaths, operations: OperationalLog) -> None:
+    """启动时对既有凭据与按平台 Cookie 文件补设私密权限（加固计划 Task 1）。
+
+    尽力而为：失败不阻断启动，仅记操作日志事件（不含路径内容与文件内容）。
+    """
+    targets = [paths.ai_credentials_file]
+    targets.extend(path for path in paths.download_cookies.glob("*.txt") if path.is_file())
+    try:
+        for target in targets:
+            if target.exists():
+                secure_private_file(target)
+    except Exception:
+        operations.write("secret_permission_retrofit", "failed")
+        return
+    operations.write("secret_permission_retrofit", "succeeded")
 
 
 def _source_view(source: dict[str, Any] | None) -> dict[str, Any]:
@@ -445,6 +465,14 @@ def create_app(root: str | Path | None = None, *, acquire_lock: bool = True) -> 
             content={"detail": {"code": "request_validation", "message": "请求字段无效"}},
         )
 
+    @app.exception_handler(CredentialStoreCorrupt)
+    async def credential_store_corrupt(_, __: CredentialStoreCorrupt) -> JSONResponse:
+        # 凭据文件损坏（加固计划 Task 1）：明确 503，绝不覆盖或删除原文件。
+        return JSONResponse(
+            status_code=503,
+            content={"detail": {"code": "credential_store_corrupt", "message": "凭据存储文件损坏，请手动恢复或删除该文件后重新配置"}},
+        )
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
@@ -672,7 +700,9 @@ def create_app(root: str | Path | None = None, *, acquire_lock: bool = True) -> 
         try:
             with staging.open("wb") as target:
                 target.write(content)
+            secure_private_file(staging)
             os.replace(staging, destination)
+            secure_private_file(destination)
         finally:
             staging.unlink(missing_ok=True)
         return Response(status_code=204)

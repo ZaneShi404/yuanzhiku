@@ -96,6 +96,12 @@ class DataPaths:
             self.staging, self.models, self.backups, self.exports, self.logs, self.ai_state,
         ):
             path.mkdir(parents=True, exist_ok=True)
+        # 私密目录加固仅限凭据与 Cookie 两处（加固计划 Task 1）：
+        # 不递归触碰 artifacts、backups 或整个数据根。
+        from app.core.permissions import secure_private_directory
+
+        secure_private_directory(self.ai_state)
+        secure_private_directory(self.download_cookies)
 
 
 def data_paths(root: str | Path | None = None) -> DataPaths:
