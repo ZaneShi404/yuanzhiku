@@ -1350,20 +1350,20 @@ def create_app(
 
     @app.post(f"{api}/jobs/delete", tags=["jobs"])
     def delete_jobs(request: JobsDeleteRequest, svc: ApplicationServices = Depends(get_services)) -> dict[str, Any]:
-        # 批量删除作业记录：运行中的作业拒绝（409）；不存在的 id 幂等跳过。
-        existing = {job["id"]: job for job in svc.repository.list_jobs()}
+        # 批量删除作业记录（加固计划 Task 9）：事务内 barrier——任一作业处于
+        # running 时整批拒绝（409）；不存在的 id 幂等跳过；只审计实际删除的 id。
+        before = {job["id"]: job for job in svc.repository.list_jobs()}
+        result = svc.repository.delete_jobs_if_not_running(request.job_ids)
+        if result.running_ids:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "job_running", "message": "运行中的作业不能删除"},
+            )
         for job_id in request.job_ids:
-            job = existing.get(job_id)
-            if job is not None and job["state"] == "running":
-                raise HTTPException(
-                    status_code=409,
-                    detail={"code": "job_running", "message": "运行中的作业不能删除"},
-                )
-        deleted = svc.repository.delete_jobs(request.job_ids)
-        for job_id in request.job_ids:
-            if job_id in existing:
+            job = before.get(job_id)
+            if job is not None and job["state"] != "running":
                 svc.repository.audit("job_delete", job_id, "succeeded")
-        return {"deleted": deleted}
+        return {"deleted": result.deleted}
 
     @app.post(f"{api}/jobs/run-once", tags=["jobs"])
     def run_one_job(svc: ApplicationServices = Depends(get_services)) -> dict[str, Any]:

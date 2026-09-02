@@ -8,9 +8,19 @@ from enum import Enum
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
+from dataclasses import dataclass as _dataclass
+
 from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
 
 from app.domain.input_limits import normalize_tags, validate_id_list
+
+
+@_dataclass(frozen=True)
+class DeleteJobsResult:
+    """批量删除作业的原子结果（加固计划 Task 9）。"""
+
+    deleted: int
+    running_ids: tuple[str, ...] = ()
 
 
 class RightsCategory(str, Enum):

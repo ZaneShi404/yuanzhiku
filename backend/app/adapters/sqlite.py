@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Iterator
 from urllib.parse import urlsplit, urlunsplit
 
-from app.domain.models import split_legacy_categories
+from app.domain.models import DeleteJobsResult, split_legacy_categories
 
 
 def now() -> str:
@@ -1671,6 +1671,33 @@ class SqliteRepository:
                 connection.execute("DELETE FROM job_attempts WHERE job_id=?", (job_id,))
                 total += connection.execute("DELETE FROM jobs WHERE id=?", (job_id,)).rowcount
             return total
+
+    def delete_jobs_if_not_running(self, job_ids: list[str]) -> DeleteJobsResult:
+        """事务内检查并整批删除（加固计划 Task 9）。
+
+        BEGIN IMMEDIATE（SQLite）/ FOR UPDATE（PostgreSQL）消除 claim 与
+        delete 的 TOCTOU：任一作业处于 running 时整批不删除；不存在的 id
+        幂等跳过；attempts 与 jobs 同事务删除。
+        """
+        unique = list(dict.fromkeys(job_ids))
+        if not unique:
+            return DeleteJobsResult(deleted=0)
+        with self.connection() as connection:
+            if self.backend == "sqlite":
+                connection.execute("BEGIN IMMEDIATE")
+            placeholders = ",".join("?" * len(unique))
+            selection = f"SELECT id FROM jobs WHERE id IN ({placeholders})"
+            if self.backend == "postgresql":
+                selection += " FOR UPDATE"
+            running = tuple(
+                row["id"]
+                for row in connection.execute(selection + " AND state='running'", unique).fetchall()
+            )
+            if running:
+                return DeleteJobsResult(deleted=0, running_ids=running)
+            connection.execute(f"DELETE FROM job_attempts WHERE job_id IN ({placeholders})", unique)
+            deleted = connection.execute(f"DELETE FROM jobs WHERE id IN ({placeholders})", unique).rowcount
+            return DeleteJobsResult(deleted=deleted)
 
     def create_external_card(self, card_type: str, url: str, title: str, author: str | None, notes: str | None, tags: list[str]) -> dict[str, Any]:
         card_id = identifier()

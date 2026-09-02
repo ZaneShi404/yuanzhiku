@@ -315,3 +315,33 @@ def test_jobs_delete_skips_missing_ids_and_validates_input(runtime_root: Path) -
         assert invalid.status_code == 422
         invalid_type = client.post("/api/v1/jobs/delete", json={"job_ids": ["ok", 123]})
         assert invalid_type.status_code == 422
+
+
+def test_delete_jobs_if_not_running_atomic_barrier(runtime_root: Path) -> None:
+    """Task 9（加固计划）：claim/delete 屏障——running 作业绝不能被删除。
+
+    结果只允许：先删除成功且之后不可 claim，或先 claim 则整批拒绝。
+    """
+    repository = SqliteRepository(data_paths(runtime_root).database)
+    repository.initialize()
+    job_a = repository.create_job("backup", None, None, None, None, {"date": "2030-01-02"})
+    job_b = repository.create_job("backup", None, None, None, None, {"date": "2030-01-03"})
+    claimed = repository.claim_next_job()  # 先创建者先被领取（priority 相同按 created_at）
+    assert claimed is not None and claimed["id"] == job_a["id"]
+    running_id = job_a["id"]
+
+    result = repository.delete_jobs_if_not_running([running_id, job_b["id"], "missing-id"])
+
+    assert result.deleted == 0
+    assert running_id in result.running_ids
+    assert repository.get_job(running_id) is not None, "任一 running 时整批不得删除"
+    assert repository.get_job(job_b["id"]) is not None
+
+    # 领取中的作业被取消并结束后即可删除；不存在的 id 幂等跳过。
+    assert repository.request_cancel(running_id) is not None
+    repository.update_job(running_id, claimed["lease_token"], state="cancelled", done=True)
+    result = repository.delete_jobs_if_not_running([running_id, job_b["id"], "missing-id"])
+    assert result.deleted == 2
+    assert result.running_ids == ()
+    assert repository.get_job(running_id) is None
+    assert repository.get_job(job_b["id"]) is None
