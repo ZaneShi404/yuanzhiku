@@ -149,9 +149,9 @@ def test_compose_assigns_migrations_to_one_shot_service_and_web_uses_built_outpu
     dockerignore = DOCKERIGNORE_PATH.read_text(encoding="utf-8")
 
     assert 'image: yuanzhiku-application:local' in compose
-    assert compose.count('image: yuanzhiku-application:local') == 3
+    assert compose.count('image: yuanzhiku-application:local') == 4
     assert 'command: ["python", "-m", "app.migrate"]' in compose
-    assert compose.count("condition: service_completed_successfully") == 2
+    assert compose.count("condition: service_completed_successfully") == 5
     assert "frontend/dist:/usr/share/nginx/html" not in compose
     assert "target: web" in compose
     assert "COPY frontend/package.json frontend/package-lock.json ./" in dockerfile
@@ -168,3 +168,30 @@ def test_default_database_url_retains_local_sqlite(runtime_root: Path, monkeypat
 
     assert isinstance(services.repository, SqliteRepository)
     assert (runtime_root / "state" / "knowledge.db").is_file()
+
+
+def test_compose_hardening_static_contract() -> None:
+    """Task 14（加固计划）：Compose 服务与数据库权限收紧的静态契约。"""
+    compose = COMPOSE_PATH.read_text(encoding="utf-8")
+    # 代码中没有任何 Redis 消费者：base Compose 不得再包含 Redis。
+    assert "redis" not in compose.lower()
+    # PostgreSQL 主机端口只存在于显式 debug 文件；base 不发布数据库端口。
+    assert "54329" not in compose
+    assert "56379" not in compose
+    assert "6379" not in compose
+    # 禁止固定密码：口令一律经必填环境变量注入。
+    assert "yuanzhiku_local_only" not in compose
+    assert "YUANZHIKU_DB_ADMIN_PASSWORD" in compose
+    assert "YUANZHIKU_DB_APP_PASSWORD" in compose
+    # admin/app 角色分离：migrate 用 admin URL，api/worker 用 app URL。
+    assert "yuanzhiku_admin" in compose and "yuanzhiku_app" in compose
+    assert "grant-postgres-app-role.py" in compose
+    debug_path = COMPOSE_PATH.parent / "docker-compose.debug.yml"
+    assert debug_path.is_file(), "需要显式的 debug 端口覆盖文件"
+    debug = debug_path.read_text(encoding="utf-8")
+    assert "127.0.0.1:54329:5432" in debug
+    grant = (COMPOSE_PATH.parent / "scripts" / "grant-postgres-app-role.py").read_text(encoding="utf-8")
+    assert "sql.Identifier" in grant, "角色/对象名必须经 Identifier 参数化"
+    assert "CREATE ROLE" in grant and "GRANT" in grant
+    assert (COMPOSE_PATH.parent / "scripts" / "new-compose-secrets.ps1").is_file()
+    assert "/.env" in (COMPOSE_PATH.parent / ".gitignore").read_text(encoding="utf-8")

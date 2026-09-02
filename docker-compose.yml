@@ -3,25 +3,24 @@ services:
     image: yuanzhiku-application:local
     environment:
       YUANZHIKU_DATA_ROOT: /data
-      YUANZHIKU_DATABASE_URL: postgresql+psycopg://yuanzhiku:yuanzhiku_local_only@postgres:5432/yuanzhiku
+      # 应用角色（最小权限，由 grant 服务在迁移后授予）
+      YUANZHIKU_DATABASE_URL: postgresql+psycopg://yuanzhiku_app:${YUANZHIKU_DB_APP_PASSWORD:?Set YUANZHIKU_DB_APP_PASSWORD}@postgres:5432/yuanzhiku
       YUANZHIKU_EMBEDDED_WORKER: "false"
     volumes:
       - ${YUANZHIKU_COMPOSE_DATA_ROOT:?Set to tests/runtime/compose-<run-id> for integration tests}:/data
-    ports:
-      - "127.0.0.1:8765:8765"
     depends_on:
       postgres:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
-      redis:
-        condition: service_started
+      grant:
+        condition: service_completed_successfully
     restart: "no"
   worker:
     image: yuanzhiku-application:local
     environment:
       YUANZHIKU_DATA_ROOT: /data
-      YUANZHIKU_DATABASE_URL: postgresql+psycopg://yuanzhiku:yuanzhiku_local_only@postgres:5432/yuanzhiku
+      YUANZHIKU_DATABASE_URL: postgresql+psycopg://yuanzhiku_app:${YUANZHIKU_DB_APP_PASSWORD:?Set YUANZHIKU_DB_APP_PASSWORD}@postgres:5432/yuanzhiku
       YUANZHIKU_EMBEDDED_WORKER: "false"
     volumes:
       - ${YUANZHIKU_COMPOSE_DATA_ROOT:?Set to tests/runtime/compose-<run-id> for integration tests}:/data
@@ -31,8 +30,8 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
-      redis:
-        condition: service_started
+      grant:
+        condition: service_completed_successfully
     restart: "no"
   migrate:
     image: yuanzhiku-application:local
@@ -41,11 +40,27 @@ services:
       dockerfile: Dockerfile
       target: application
     environment:
-      YUANZHIKU_DATABASE_URL: postgresql+psycopg://yuanzhiku:yuanzhiku_local_only@postgres:5432/yuanzhiku
+      # 迁移使用管理员角色（唯一以 admin 连接的组件）
+      YUANZHIKU_DATABASE_URL: postgresql+psycopg://yuanzhiku_admin:${YUANZHIKU_DB_ADMIN_PASSWORD:?Set YUANZHIKU_DB_ADMIN_PASSWORD}@postgres:5432/yuanzhiku
     command: ["python", "-m", "app.migrate"]
     depends_on:
       postgres:
         condition: service_healthy
+    restart: "no"
+  grant:
+    image: yuanzhiku-application:local
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: application
+    environment:
+      YUANZHIKU_DB_ADMIN_URL: postgresql+psycopg://yuanzhiku_admin:${YUANZHIKU_DB_ADMIN_PASSWORD:?Set YUANZHIKU_DB_ADMIN_PASSWORD}@postgres:5432/yuanzhiku
+      YUANZHIKU_DB_APP_USER: yuanzhiku_app
+      YUANZHIKU_DB_APP_PASSWORD: ${YUANZHIKU_DB_APP_PASSWORD:?Set YUANZHIKU_DB_APP_PASSWORD}
+    command: ["python", "scripts/grant-postgres-app-role.py"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
     restart: "no"
   web:
     build:
@@ -62,21 +77,13 @@ services:
     image: postgres:17.2-alpine
     environment:
       POSTGRES_DB: yuanzhiku
-      POSTGRES_USER: yuanzhiku
-      POSTGRES_PASSWORD: yuanzhiku_local_only
+      POSTGRES_USER: yuanzhiku_admin
+      POSTGRES_PASSWORD: ${YUANZHIKU_DB_ADMIN_PASSWORD:?Set YUANZHIKU_DB_ADMIN_PASSWORD}
     volumes:
       - ${YUANZHIKU_COMPOSE_DATA_ROOT:?Set to tests/runtime/compose-<run-id> for integration tests}/postgres:/var/lib/postgresql/data
-    ports:
-      - "127.0.0.1:54329:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U yuanzhiku -d yuanzhiku"]
+      test: ["CMD-SHELL", "pg_isready -U yuanzhiku_admin -d yuanzhiku"]
       interval: 5s
       timeout: 5s
       retries: 12
-    restart: "no"
-  redis:
-    image: redis:7.4.2-alpine
-    command: ["redis-server", "--save", "", "--appendonly", "no"]
-    ports:
-      - "127.0.0.1:56379:6379"
     restart: "no"

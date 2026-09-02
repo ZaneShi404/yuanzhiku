@@ -1,0 +1,7 @@
+# 调试用途覆盖文件（加固计划 Task 14）：仅此文件发布 PostgreSQL 主机端口，
+# 且只绑定 127.0.0.1。用法：
+#   docker compose -f docker-compose.yml -f docker-compose.debug.yml up
+services:
+  postgres:
+    ports:
+      - "127.0.0.1:54329:5432"
