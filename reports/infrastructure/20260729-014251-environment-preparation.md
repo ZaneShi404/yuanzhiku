@@ -22,7 +22,7 @@ Scope: local Windows development/container prerequisites for the V1 Compose stac
 | Windows | Windows 10 Home China, build 26200, x64 |
 | Node.js | Present: `v24.18.0` (`D:\Node\node.exe`) |
 | npm | Present: `11.16.0` |
-| Python | Present: `Python 3.13.0` (`C:\Users\localuser\AppData\Local\Programs\Python\Python313\python.exe`) |
+| Python | Present: `Python 3.13.0` (`C:\Users\<localuser>\AppData\Local\Programs\Python\Python313\python.exe`) |
 | Python launcher | Present: `Python 3.13.0` |
 | FFmpeg | Not installed; not required by inspected V1 configuration |
 | WSL | Installed: WSL `2.7.1.1.0`, kernel `6.1.1833.2-2`; no Linux distribution installed |
@@ -64,7 +64,7 @@ Scope: local Windows development/container prerequisites for the V1 Compose stac
    The package selected was Docker Desktop `4.84.0`. Winget remained running
    while its temporary download file stayed at 0 bytes. The command was stopped
    and the incomplete cache directory
-   `C:\Users\localuser\AppData\Local\Temp\WinGet\Docker.DockerDesktop.4.84.0`
+   `C:\Users\<localuser>\AppData\Local\Temp\WinGet\Docker.DockerDesktop.4.84.0`
    was removed. No Docker service, binaries, images, or containers were left.
 
 ## Blockers and Deferred Work
