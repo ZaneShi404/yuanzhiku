@@ -871,6 +871,17 @@ def _validate_report_register(member_map: dict[str, Member]) -> None:
         "archive_run_id", "archive_manifest_sha256", "supersedes_report_id", "snapshot_chain",
         "recommended_snapshot_run_id", "summary",
     }
+    def _archived_enums_within_contract(archived: Any, contract: dict) -> bool:
+        if not isinstance(archived, dict) or set(archived) != set(contract):
+            return False
+        for key, current_values in contract.items():
+            archived_values = archived.get(key)
+            if not isinstance(archived_values, list):
+                return False
+            if not set(archived_values).issubset(set(current_values)):
+                return False
+        return True
+
     expected_enums = {
         "report_kind": sorted(REPORT_KINDS),
         "author_role": sorted(REPORT_AUTHOR_ROLES),
@@ -902,7 +913,10 @@ def _validate_report_register(member_map: dict[str, Member]) -> None:
             "same_stem_required": True,
         }
         or not isinstance(schema.get("enums"), dict)
-        or {key: sorted(value) for key, value in schema["enums"].items() if isinstance(value, list)} != expected_enums
+        # 封存归档冻结其构建时的 schema：枚举演进是追加式的，因此归档枚举
+        # 只须为当前执行枚举的子集（新报告类型加入后，旧封存档案依旧有效；
+        # 归档若含当前不认识的枚举值则仍然拒绝）。
+        or not _archived_enums_within_contract(schema["enums"], expected_enums)
         or schema.get("safety") != expected_safety
         or set(schema) != {
             "schema_version", "artifact_type", "purpose", "file_pair", "required_fields",

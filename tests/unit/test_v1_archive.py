@@ -741,8 +741,11 @@ def test_verifier_rejects_report_schema_contract_drift(runtime_root: Path) -> No
     archive, _ = _build_mutable_fixture_archive(repository, "20260730T010232Z")
     schema_path = archive / "baseline/docs/v1-archive/report-schema-v1.json"
     original = json.loads(schema_path.read_text(encoding="utf-8"))
+    # 枚举演进为追加式（审计修订）：归档枚举须为当前执行枚举的子集——
+    # 收窄/缺键仍拒绝仅当缺键或含未知值；以下漂移用例全部保持被拒。
     mutations = (
-        lambda schema: schema["enums"].__setitem__("verdict", ["accepted"]),
+        lambda schema: schema["enums"].__setitem__("verdict", ["accepted", "mysterious_value"]),
+        lambda schema: schema["enums"].pop("verdict"),
         lambda schema: schema["optional_fields"].pop(),
         lambda schema: schema["file_pair"].__setitem__("same_stem_required", False),
         lambda schema: schema["safety"]["forbidden_content"].pop(),
