@@ -76,6 +76,9 @@
 | `502` | `probe_failed` | 链接元数据探测失败：链接失效、平台拒绝或探测超时（仅 `/videos/link/probe`） |
 | `503` | `downloader_unavailable` | yt-dlp 或 FFmpeg 缺失、下载器未配置 |
 | `503` | `credential_store_corrupt` | AI 凭据文件损坏（任何读取凭据的端点：`GET/PUT /settings/ai`、连通性测试、媒体 AI 作业等）；原文件保持不变，修复或删除后重试 |
+| `403` | `untrusted_host` | 请求 Host 头非本机回环主机（127.0.0.1/localhost/::1；测试环境另有 `testserver`）——DNS rebinding 与非本机访问边界 |
+| `403` | `untrusted_origin` | 写方法（POST/PUT/PATCH/DELETE）携带的本机以外或 `null` 的 Origin——跨站写入边界；GET 与未携带 Origin 的本地 CLI 请求不受影响 |
+| `503` | `artifact_cleanup_pending` | `POST /sources/{id}/purge` 的逻辑删除已提交，但部分 artifact 文件物理清理未完成；清理任务持久保留，由启动重试与作业页重试继续消化 |
 | `404` | 沿用框架 | 资源不存在 |
 | `500` | `internal_error` | 本地服务内部错误 |
 

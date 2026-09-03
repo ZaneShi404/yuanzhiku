@@ -14,6 +14,10 @@
 
 操作日志只记录事件类型、ID、结果和时间，按日保留 30 天，不写正文、路径、令牌或请求体（`REQ-003`, `REQ-042`）。任何运行、恢复或排障步骤都不得获取来源 URL、调用网页视频平台或以程序方式处理抖音；外部卡始终只保留用户输入的元数据。
 
+本机访问边界（加固计划）：应用除仅绑定 127.0.0.1 外，还对请求做两层校验——Host 头必须为本机回环主机（否则 `403 untrusted_host`，阻断 DNS rebinding 与非本机访问），写方法（POST/PUT/PATCH/DELETE）携带的 Origin 必须为本机同源或开发前端来源（否则 `403 untrusted_origin`，阻断跨站写入）；GET 与未携带 Origin 的本地 CLI/curl 请求保持原有成功语义。排障时若本地工具突然收到 403，检查其 Host/Origin 头而非关闭边界。凭据文件与 Cookie 文件的 ACL 收紧语义见上文「媒体 AI」段。
+
+永久删除与清理队列（加固计划）：`POST /sources/{id}/purge` 的逻辑数据删除在一个事务内提交，受引用的 artifact 文件物理删除改为幂等清理队列（`artifact_cleanup_tasks`）消化——unlink 失败（如文件被占用）时任务保留、purge 请求返回 `503 artifact_cleanup_pending`，启动时自动入队低优先级 `artifact_cleanup` 作业重试，也可在作业页手动重试；文件不存在视为清理成功。共享引用的 artifact 不进入清理队列。
+
 
 本地转写（v1.5，`REQ-054`）：转写路径策略 `ai_transcriber_engine`（auto/local/api，默认 auto，设置页「本地转写」区）——auto 本地优先、本地不可用或转写失败自动降级 API 转写（作业消息注明「本地转写不可用，已使用 API 转写」，表示的 parser_name/config_hash 记录引擎与降级事实）；无任何可用路径时作业 blocked「未配置任何可用转写路径：请下载本地转写模型或配置转写 API」。本地模型经 `POST /settings/ai/stt-model`（action=download/delete）管理：download 入 `stt_model_download` 作业异步执行（单 worker、失败可重试、409 防重复），delete 同步幂等；模型文件位于 `data/models/stt/`，不进入备份/导出/reimport（归档只白名单写入 `state/knowledge.db`、`records.json`、manifest 与 artifacts，`data/models` 天然不入档）；下载/删除写审计事件。模型缺失或损坏时按路径策略降级或 blocked，重下即可。
 

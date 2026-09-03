@@ -24,3 +24,5 @@
 | 视频超上限被截断造成理解失真 | 上限 = min(ai_video_max_bytes, 供应商能力声明)；超限按分块直送（每段完整发送），某段仍超限该段跳过并在摘要标记注明，绝不静默截断/降采样；MiMo 直送前重编码为显式开关+标记+审计策略，保留语音可懂度 | REQ-055 |
 | 本地转写质量差导致完整性误判 | 完整性判断独立于转写路径（规则+LLM 不变）；引擎标记与降级原因可审计 | REQ-054, REQ-051 |
 | 本地转写拖垮 worker（CPU/内存） | 独立断路器设置组；单 worker 串行；推理循环内协作取消 | REQ-054 |
+| 本机其他进程或浏览器跨站写入/DNS rebinding 触达 API | 服务仅绑定 127.0.0.1；Host 头必须为回环主机（其余 403 untrusted_host）；写方法携带的 Origin 必须为本机同源或开发前端来源（其余 403 untrusted_origin）；凭据/Cookie 文件 ACL 收紧为仅当前账户+SYSTEM+Administrators（POSIX 0600/0700） | REQ-002, REQ-003, REQ-052 |
+| purge 后 artifact 文件残留（unlink 失败成为无登记孤儿） | 删除 catalog 行前先落持久化清理任务（artifact_cleanup_tasks）；逻辑提交后幂等 sweeper 消化，失败保留任务并以 503 artifact_cleanup_pending 呈现；启动低优先级作业自动重试；共享引用 artifact 不入队 | REQ-034, REQ-040..042 |
