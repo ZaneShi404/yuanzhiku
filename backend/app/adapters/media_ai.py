@@ -425,6 +425,13 @@ class ConfiguredMediaAi(MediaAiPort):
             f"体裁清单：{'、'.join(genres)}",
         ]
         user_lines.append(f"转写内容：\n{transcript[:MAX_TRANSCRIPT_PROMPT_CHARS]}")
+        # v1.7（REQ-057）：关键帧联络表画面理解条目（兜底/增强路径）作为摘要参照。
+        visual_entries = inputs.get("visual_entries")
+        if isinstance(visual_entries, list) and visual_entries:
+            lines = [str(item).strip()[:300] for item in visual_entries if isinstance(item, str) and item.strip()][:32]
+            if lines:
+                user_lines.append("画面理解（关键帧联络表，供参照）：")
+                user_lines.extend(lines)
         payload = self._chat_json(config, system, "\n".join(user_lines))
         summary = str(payload.get("summary") or "").strip()
         if not summary:

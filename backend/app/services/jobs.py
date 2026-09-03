@@ -15,6 +15,8 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable
 
+from app.adapters.media import transcript_anchor_points
+from app.adapters.video_ai import SHEET_CELL_MAX_WIDTH, SHEET_PROMPT_VERSION, build_contact_sheet
 from app.domain.media import MediaProcessingLimits, MediaTranscriptSegment, video_time_range_locator
 from app.domain.identity import derived_identifier
 from app.domain.models import TAXONOMY_DOMAIN_VALUES, TAXONOMY_GENRE_VALUES, sanitize_download_url
@@ -166,12 +168,14 @@ def _summary_text(
     result: dict[str, Any],
     assessment: dict[str, Any],
     frame_descriptions: list[dict[str, Any]] | None,
-    tier: int,
+    tier: int | float,
     visual_gap: bool,
     applied: bool,
     *,
     video_direct: bool = False,
     degraded_reason: str | None = None,
+    frame_fallback: bool = False,
+    enriched: bool = False,
 ) -> str:
     """摘要表示正文：摘要 + 完整性附录 + 补充理解附录 + 建议标记行（前端解析用）。"""
     lines = [str(result["summary"]).strip(), "", "---"]
@@ -184,7 +188,11 @@ def _summary_text(
     reason = str(assessment.get("reason") or "").strip()
     if reason:
         lines.append(f"判断依据：{reason}")
-    if degraded_reason:
+    if frame_fallback:
+        lines.append("补充理解方式：视频直送不可行，已按关键帧联络表补充画面理解")
+    elif enriched:
+        lines.append("补充理解方式：画面理解增强（关键帧联络表）")
+    elif degraded_reason:
         lines.append(f"补充理解方式：{degraded_reason}")
     elif video_direct:
         lines.append("补充理解方式：视频直送多模态模型")
@@ -205,6 +213,8 @@ def _summary_text(
             "tier": tier,
             "visual_gap": visual_gap,
             "video_direct": video_direct,
+            "frame_fallback": frame_fallback,
+            "enriched": enriched,
             "applied": applied,
         },
         ensure_ascii=False,
@@ -557,6 +567,158 @@ class JobService:
                 ranges.append((max(0, int(locator.get("start_ms") or 0)), max(0, int(locator.get("end_ms") or 0))))
         ranges.sort()
         return ranges
+
+    def _sheet_cell_windows(
+        self, version_id: str, transcription: dict, sheet_frames: int, duration_ms: int,
+    ) -> list[tuple[int, int]]:
+        """联络表格子时间窗（REQ-057.1，决策 25）：候选 = 当前分析帧时间 ∪
+        转写语义锚点（段边界/静音中点），相邻 <1s 合并，超上限按时间均匀抽稀；
+        窗格为 [t_i, t_{i+1})（末格到片尾）——格子即证据时间范围。"""
+        ranges = self._transcription_ranges(transcription)
+        effective_duration = duration_ms or max((end for _, end in ranges), default=0)
+        if effective_duration <= 0:
+            return []
+        times: set[int] = set()
+        analysis = self.repository.video_analysis_for_version(version_id)
+        if analysis is not None:
+            for frame in analysis.get("frames") or []:
+                try:
+                    time_ms = int(frame["time_ms"])
+                except (TypeError, ValueError, KeyError):
+                    continue
+                if 0 < time_ms < effective_duration:
+                    times.add(time_ms)
+        for anchor, _ in transcript_anchor_points(ranges, effective_duration):
+            times.add(anchor)
+        ordered = sorted(times)
+        merged: list[int] = []
+        for time_ms in ordered:
+            if not merged or time_ms - merged[-1] >= 1_000:
+                merged.append(time_ms)
+        if len(merged) > sheet_frames:
+            span = len(merged) - 1
+            picked: list[int] = []
+            for index in range(sheet_frames):
+                position = round(index * span / (sheet_frames - 1)) if sheet_frames > 1 else 0
+                if not picked or position != len(picked) - 1:
+                    picked.append(merged[position])
+            merged = picked
+        windows = [
+            (merged[index], merged[index + 1]) for index in range(len(merged) - 1)
+        ]
+        if merged:
+            windows.append((merged[-1], effective_duration))
+        return windows
+
+    def _run_frame_understanding(
+        self,
+        job: dict,
+        adapter: Any,
+        transcription: dict,
+        transcript_text: str,
+        cancelled: Callable[[], bool],
+        cancel_event: threading.Event,
+        duration_ms: int,
+    ) -> list[dict[str, Any]] | None:
+        """联络表帧理解（REQ-057.1，决策 25/27）：构建缩略图网格 → 单次多模态
+        调用 → 带窗格时间定位的画面条目。不可行/失败返回 None（作业层按原
+        降级语义记录），绝不伪造条目；瞬态缩略图随作业 staging 清理，绝不入
+        video_frames/artifact。"""
+        try:
+            sheet_frames = max(8, min(48, int(self.repository.get_settings().get("ai_video_sheet_frames", "24"))))
+        except (TypeError, ValueError):
+            sheet_frames = 24
+        cells = self._sheet_cell_windows(job["content_version_id"], transcription, sheet_frames, duration_ms)
+        if not cells:
+            return None
+        self._update_video_progress(job, 30, "正在构建关键帧联络表")
+        settings = self.repository.get_settings()
+        try:
+            timeout_seconds = max(60.0, min(86_400.0, float(settings.get("ai_timeout_seconds", "300"))))
+        except (TypeError, ValueError):
+            timeout_seconds = 300.0
+        try:
+            memory_limit_mb = max(64, min(32_768, int(settings.get("video_memory_limit_mb", "2048"))))
+            disk_limit_mb = max(64, min(32_768, int(settings.get("video_disk_limit_mb", "1024"))))
+        except (TypeError, ValueError):
+            memory_limit_mb, disk_limit_mb = 2048, 1024
+        limits = MediaProcessingLimits(
+            timeout_seconds=timeout_seconds,
+            maximum_memory_bytes=memory_limit_mb * 1024 * 1024,
+            maximum_workspace_bytes=disk_limit_mb * 1024 * 1024,
+            deadline_monotonic=time.monotonic() + timeout_seconds,
+        )
+        workspace = self.artifacts.staging_workspace("video_summarize")
+        try:
+            sheet_image = build_contact_sheet(
+                self.artifacts.artifact_path(job["artifact_sha256"]),
+                [start for start, _ in cells],
+                workspace,
+                limits,
+                cancelled,
+                ffmpeg=os.environ.get("YUANZHIKU_FFMPEG_BIN", "ffmpeg"),
+                heartbeat=lambda: self._heartbeat(job),
+            )
+            self._update_video_progress(job, 45, "正在理解关键帧画面")
+            return self._run_with_lease_heartbeat(
+                job,
+                lambda: adapter.understand_frames(sheet_image, cells, transcript_text, cancelled),
+                cancel_event,
+            )
+        except MediaProcessingCancelled:
+            raise
+        except Exception:
+            if cancelled():
+                raise MediaProcessingCancelled() from None
+            return None
+        finally:
+            shutil.rmtree(workspace, ignore_errors=True)
+
+    def _persist_visual_understanding(
+        self,
+        job: dict,
+        transcription: dict,
+        entries: list[dict[str, Any]],
+        parser_name: str,
+        config_hash: str,
+    ) -> None:
+        """画面理解条目落库（REQ-057.4，决策 27）：独立 visual_understanding
+        表示（父链挂转写），逐条 video_time_range 证据，进入全文检索。"""
+        lines: list[str] = []
+        evidence: list[dict] = []
+        for entry in entries:
+            start_ms = max(0, int(entry.get("start_ms") or 0))
+            end_ms = max(start_ms + 1, int(entry.get("end_ms") or start_ms + 1))
+            description = str(entry.get("description") or "").strip()
+            if not description:
+                continue
+            line = f"- [{_format_ms(start_ms)}–{_format_ms(end_ms)}] {description}"
+            visible_text = str(entry.get("visible_text") or "").strip()
+            if visible_text:
+                line += f"（画面文字：{visible_text}）"
+            lines.append(line)
+            excerpt = description[:300]
+            evidence.append({
+                "locator": video_time_range_locator(start_ms, end_ms),
+                "excerpt": excerpt,
+                "excerpt_hash": hashlib.sha256(excerpt.encode("utf-8")).hexdigest(),
+                "is_validated": True,
+            })
+        if not lines:
+            return
+        text = "画面理解（关键帧联络表）：\n" + "\n".join(lines)
+        self.repository.persist_representation_bundle(
+            version_id=job["content_version_id"],
+            artifact_sha256=job["artifact_sha256"],
+            kind="visual_understanding",
+            parser_name=parser_name,
+            config_hash=config_hash,
+            text=text,
+            parent_id=transcription["id"],
+            chunks=self.documents.search_chunk_pairs(text),
+            evidence=evidence,
+            representation_id=derived_identifier("representation", job["id"], "visual_understanding"),
+        )
 
     def _video_analyze(self, job: dict) -> None:
         if self.videos is None:
@@ -934,14 +1096,22 @@ class JobService:
             self._finish(job, "cancelled", "媒体 AI 处理已取消")
             return
         want_direct = force_tier2 or assessment.get("verdict") == "likely_incomplete"
+        settings = self.repository.get_settings()
+        frames_fallback_enabled = settings.get("ai_video_frames_fallback", "on") == "on"
+        frames_enrich_enabled = settings.get("ai_video_frames_enrich", "off") == "on"
+        adapter = self.video_adapter_provider() if self.video_adapter_provider else None
+        image_input = bool(adapter is not None and adapter.capability().get("image_input"))
         video_direct = False
         degraded_reason: str | None = None
         direct_result: dict[str, Any] | None = None
+        visual_entries: list[dict[str, Any]] = []
+        frame_fallback = False
+        enriched = False
         if want_direct:
-            # 两级补充理解（REQ-055 修订，用户裁定 2026-08-16）：视频直送时
-            # 多模态 API 直接产出补充转写/理解 + 摘要 + 建议分类（偏差 A）；
-            # 直送不可行/失败直接 visual_gap（偏差 B：关键帧视觉路径已移除）。
-            adapter = self.video_adapter_provider() if self.video_adapter_provider else None
+            # 三级补充理解（REQ-055.2 v1.7 修订，决策 26，用户裁定 2026-09-04）：
+            # ① 视频直送（主路径，偏差 A 三合一）→ ② 联络表帧理解兜底（REQ-057.2）
+            # → ③ visual_gap（直送与帧理解皆不可行才标记）。偏差 B（2026-08-16
+            # 彻底移除关键帧视觉路径）由本版有意识修订。
             if adapter is not None and adapter.capability().get("video_input"):
                 self._update_video_progress(job, 30, "正在直送视频给多模态模型")
                 try:
@@ -965,7 +1135,24 @@ class JobService:
                     degraded_reason = "视频直送失败，画面信息未补充"
             else:
                 degraded_reason = "未配置视频直送，画面信息未补充"
-        visual_gap = bool(want_direct and not video_direct)
+            if not video_direct and frames_fallback_enabled and image_input:
+                entries = self._run_frame_understanding(
+                    job, adapter, transcription, transcript_text, cancelled, cancel_event, duration_ms,
+                )
+                if entries:
+                    visual_entries = entries
+                    frame_fallback = True
+                    degraded_reason = None
+        elif frames_enrich_enabled and image_input:
+            # v1.7 帧理解增强（REQ-057.3）：转写完整时的可选画面补充（tier 1.5），
+            # 开关关闭或帧理解不可行时行为与 v1.6 tier1 完全一致。
+            entries = self._run_frame_understanding(
+                job, adapter, transcription, transcript_text, cancelled, cancel_event, duration_ms,
+            )
+            if entries:
+                visual_entries = entries
+                enriched = True
+        visual_gap = bool(want_direct and not video_direct and not frame_fallback)
         self._update_video_progress(job, 65, "正在生成内容摘要")
         if video_direct:
             assert direct_result is not None
@@ -977,38 +1164,53 @@ class JobService:
             }
             frame_descriptions = direct_result.get("supplements") or []
         else:
+            summary_inputs: dict[str, Any] = {
+                "transcript_text": transcript_text,
+                "title": (source or {}).get("title") or "",
+                "taxonomy_domains": list(TAXONOMY_DOMAIN_VALUES),
+                "taxonomy_genres": list(TAXONOMY_GENRE_VALUES),
+            }
+            if visual_entries:
+                # v1.7（REQ-057）：画面理解条目作为纯文本合成的参照输入。
+                summary_inputs["visual_entries"] = [
+                    f"[{_format_ms(int(entry['time_ms']))}–{_format_ms(int(entry['end_ms']))}] {entry['description']}"
+                    + (f"（画面文字：{entry['visible_text']}）" if entry.get("visible_text") else "")
+                    for entry in visual_entries
+                ]
             result = self._run_with_lease_heartbeat(
                 job,
-                lambda: self.media_ai.summarize(
-                    {
-                        "transcript_text": transcript_text,
-                        "title": (source or {}).get("title") or "",
-                        "taxonomy_domains": list(TAXONOMY_DOMAIN_VALUES),
-                        "taxonomy_genres": list(TAXONOMY_GENRE_VALUES),
-                    },
-                    cancelled,
-                ),
+                lambda: self.media_ai.summarize(summary_inputs, cancelled),
                 cancel_event,
             )
-            frame_descriptions = None
+            frame_descriptions = visual_entries or None
         if cancelled():
             self._finish(job, "cancelled", "媒体 AI 处理已取消")
             return
         self._update_video_progress(job, 85, "正在写入摘要表示")
-        tier = 2 if video_direct else 1
-        settings = self.repository.get_settings()
+        tier = 2 if (video_direct or frame_fallback) else (1.5 if enriched else 1)
         chat_model = settings.get("ai_chat_model", "").strip() or "qwen-plus"
+        video_provider = settings.get("ai_video_provider", "off")
+        video_model = settings.get("ai_video_model", "").strip() or "default"
         parser_name = f"ai-{settings.get('ai_understand_provider', 'off')}-{chat_model}"
         if video_direct:
-            parser_name += f"+video-{settings.get('ai_video_provider', 'off')}-{settings.get('ai_video_model', '').strip() or 'default'}"
+            parser_name += f"+video-{video_provider}-{video_model}"
+        elif frame_fallback or enriched:
+            parser_name += f"+frames-{video_provider}-{video_model}"
         config_hash = self.media_ai.config_hash("summarize")
-        if video_direct:
-            adapter = self.video_adapter_provider() if self.video_adapter_provider else None
+        if video_direct or frame_fallback or enriched:
             if adapter is not None:
-                config_hash = hashlib.sha256(f"{config_hash}:{adapter.config_hash()}".encode("utf-8")).hexdigest()
+                extra = f"{adapter.config_hash()}" if video_direct else (
+                    f"sheet:{SHEET_PROMPT_VERSION}:{SHEET_CELL_MAX_WIDTH}:{settings.get('ai_video_sheet_frames', '24')}"
+                )
+                config_hash = hashlib.sha256(f"{config_hash}:{extra}".encode("utf-8")).hexdigest()
+        if visual_entries:
+            self._persist_visual_understanding(
+                job, transcription, visual_entries, parser_name=f"sheet-{video_provider}-{video_model}", config_hash=config_hash,
+            )
         text = _summary_text(
             result, assessment, frame_descriptions, tier, visual_gap, applied=True,
             video_direct=video_direct, degraded_reason=degraded_reason,
+            frame_fallback=frame_fallback, enriched=enriched,
         )
         # 摘要针对全片内容：证据以整段 video_time_range 定位（REQ-016 同转写纪律）。
         summary_end_ms = duration_ms or max((end for _, end in ranges), default=0) or 1000

@@ -298,6 +298,10 @@ def _ai_settings_view(services: "ApplicationServices") -> dict[str, Any]:
         video_chunk_seconds = int(settings.get("ai_video_chunk_seconds", "600"))
     except (TypeError, ValueError):
         video_chunk_seconds = 600
+    try:
+        video_sheet_frames = int(settings.get("ai_video_sheet_frames", "24"))
+    except (TypeError, ValueError):
+        video_sheet_frames = 24
     return {
         "transcribe": {
             "provider": settings.get("ai_transcribe_provider", "off"),
@@ -326,6 +330,9 @@ def _ai_settings_view(services: "ApplicationServices") -> dict[str, Any]:
             "max_bytes": video_max_bytes,
             "reencode": settings.get("ai_video_reencode", "on") == "on",
             "chunk_seconds": video_chunk_seconds,
+            "frames_fallback": settings.get("ai_video_frames_fallback", "on") == "on",
+            "frames_enrich": settings.get("ai_video_frames_enrich", "off") == "on",
+            "sheet_frames": video_sheet_frames,
             "qwen": {"has_key": bool(credentials.get("video_qwen")), "key_hint": _ai_key_hint(credentials.get("video_qwen"))},
             "mimo": {"has_key": bool(credentials.get("video_mimo")), "key_hint": _ai_key_hint(credentials.get("video_mimo"))},
             "relay": {
@@ -653,6 +660,12 @@ def create_app(
                 updates["ai_video_reencode"] = video.reencode
             if video.chunk_seconds is not None:
                 updates["ai_video_chunk_seconds"] = str(video.chunk_seconds)
+            if video.frames_fallback is not None:
+                updates["ai_video_frames_fallback"] = video.frames_fallback
+            if video.frames_enrich is not None:
+                updates["ai_video_frames_enrich"] = video.frames_enrich
+            if video.sheet_frames is not None:
+                updates["ai_video_sheet_frames"] = str(video.sheet_frames)
             if video.relay_base_url is not None:
                 updates["ai_video_relay_base_url"] = video.relay_base_url
             if video.relay_kind is not None:

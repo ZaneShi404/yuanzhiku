@@ -404,13 +404,17 @@ class AiTranscriberSettings(BaseModel):
 
 
 class AiVideoSettings(BaseModel):
-    """视频直送与自备中转配置（REQ-055，决策 17/20/21/22）；字段缺省表示保持不变。"""
+    """视频直送与自备中转配置（REQ-055，决策 17/20/21/22）与帧级画面理解
+    （v1.7 REQ-057，决策 25/26）；字段缺省表示保持不变。"""
 
     provider: str | None = None
     model: str | None = Field(default=None, max_length=100)
     max_bytes: int | None = Field(default=None, ge=1_048_576, le=536_870_912)
     reencode: str | None = None
     chunk_seconds: int | None = Field(default=None, ge=60, le=3600)
+    frames_fallback: str | None = None
+    frames_enrich: str | None = None
+    sheet_frames: int | None = Field(default=None, ge=8, le=48)
     relay_base_url: str | None = Field(default=None, max_length=2048)
     relay_kind: str | None = None
     cos_bucket: str | None = Field(default=None, max_length=200)
@@ -433,6 +437,20 @@ class AiVideoSettings(BaseModel):
     def valid_reencode(cls, value: str | None) -> str | None:
         if value is not None and value not in ("on", "off"):
             raise ValueError("不支持的重编码开关")
+        return value
+
+    @field_validator("frames_fallback")
+    @classmethod
+    def valid_frames_fallback(cls, value: str | None) -> str | None:
+        if value is not None and value not in ("on", "off"):
+            raise ValueError("不支持的帧理解兜底开关")
+        return value
+
+    @field_validator("frames_enrich")
+    @classmethod
+    def valid_frames_enrich(cls, value: str | None) -> str | None:
+        if value is not None and value not in ("on", "off"):
+            raise ValueError("不支持的帧理解增强开关")
         return value
 
     @field_validator("relay_kind")

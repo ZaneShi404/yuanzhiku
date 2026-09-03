@@ -19,6 +19,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 from typing import Any, Callable
@@ -63,6 +64,21 @@ _SUMMARY_SYSTEM_PROMPT = (
     "suggested_domains 只能从给定领域清单取值（0到3个）；suggested_genres 只能从给定体裁清单取值（0到1个）；"
     "suggested_tags 为自由短标签（0到8个，每个不超过20字）。"
 )
+
+_SHEET_SYSTEM_PROMPT = (
+    "你是视频画面理解助手。输入是一张关键帧联络表网格：单元格按 1 到 N 编号"
+    "（从左到右、从上到下），随附文本给出每个格子对应的时间窗与视频的语音转写节选。"
+    "请找出值得关注的画面（仅以画面呈现的信息：产品名、演示步骤、图表、画面文字、"
+    "操作界面等），只输出 JSON："
+    '{"moments": [{"cell": 格子编号(1到N), "content": "画面要点", "visible_text": "画面中的文字或空串"}]}。'
+    "只描述你在格子里真实看到的画面；格子中没有值得关注的信息就不要输出对应条目；"
+    "绝不臆造格子编号或画面内容。"
+)
+
+# 联络表构建参数（v1.7 REQ-057.1，决策 25；帧数上限为设置项 ai_video_sheet_frames）。
+SHEET_PROMPT_VERSION = "1"
+SHEET_CELL_MAX_WIDTH = 320
+SHEET_COLUMNS = 6
 
 
 def _parse_json_text(content: str) -> dict[str, Any]:
@@ -289,6 +305,74 @@ def _limits_from(settings: dict[str, str], timeout_seconds: float) -> MediaProce
     except (TypeError, ValueError):
         disk = 1024
     return MediaProcessingLimits(timeout_seconds, memory * 1024 * 1024, disk * 1024 * 1024)
+
+
+def _format_cell_range(start_ms: int, end_ms: int) -> str:
+    def _mmss(value: int) -> str:
+        seconds = max(0, value // 1000)
+        return f"{seconds // 60}:{seconds % 60:02d}"
+
+    return f"{_mmss(start_ms)}-{_mmss(end_ms)}"
+
+
+def build_contact_sheet(
+    video_path: Path,
+    cell_times_ms: list[int],
+    workspace: Path,
+    limits: MediaProcessingLimits,
+    cancelled: Callable[[], bool],
+    *,
+    ffmpeg: str,
+    heartbeat: Callable[[], None],
+) -> Path:
+    """联络表构建（v1.7 REQ-057.1，决策 25）：按时间点抽取单格缩略图并拼为
+    带编号网格。单格缩放 ≤SHEET_CELL_MAX_WIDTH 宽；列数固定 SHEET_COLUMNS，
+    格子按 1..N 编号（左到右、上到下），编号与作业层提供的 cells 时间窗一一
+    对应。全部瞬态文件位于作业 staging，随作业清理，绝不入 video_frames/artifact。
+    """
+    if not cell_times_ms:
+        raise RuntimeError("关键帧联络表构建失败")
+    workspace.mkdir(parents=True, exist_ok=True)
+    cell_paths: list[Path] = []
+    for index, time_ms in enumerate(cell_times_ms):
+        if cancelled():
+            raise MediaProcessingCancelled()
+        destination = workspace / f"sheet-cell-{index + 1:02d}.jpg"
+        LocalFfmpegMediaAnalyzer._run(
+            [
+                ffmpeg, "-nostdin", "-v", "error",
+                "-ss", f"{time_ms / 1000:.3f}", "-i", str(video_path),
+                "-frames:v", "1",
+                # filtergraph 中逗号是链分隔符：min(320,iw) 的逗号必须转义。
+                "-vf", f"scale=min({SHEET_CELL_MAX_WIDTH}\\,iw):-2",
+                "-q:v", "3", "-y", str(destination),
+            ],
+            limits, cancelled, heartbeat, workspace=workspace,
+        )
+        if not destination.is_file() or destination.stat().st_size == 0:
+            raise RuntimeError("关键帧联络表构建失败")
+        cell_paths.append(destination)
+    from PIL import Image, ImageDraw
+
+    images = [Image.open(path).convert("RGB") for path in cell_paths]
+    try:
+        cell_width = max(image.width for image in images)
+        cell_height = max(image.height for image in images)
+        label_height = 18
+        rows = math.ceil(len(images) / SHEET_COLUMNS)
+        sheet = Image.new("RGB", (SHEET_COLUMNS * cell_width, rows * (cell_height + label_height)), (24, 24, 24))
+        draw = ImageDraw.Draw(sheet)
+        for index, image in enumerate(images):
+            x = (index % SHEET_COLUMNS) * cell_width
+            y = (index // SHEET_COLUMNS) * (cell_height + label_height)
+            sheet.paste(image, (x + (cell_width - image.width) // 2, y + label_height))
+            draw.text((x + 4, y + 2), str(index + 1), fill=(255, 255, 255))
+        destination = workspace / "contact-sheet.jpg"
+        sheet.save(destination, "JPEG", quality=80)
+        return destination
+    finally:
+        for image in images:
+            image.close()
 
 
 def reencode_video(
@@ -553,6 +637,77 @@ class _VideoChatAdapter(VideoUnderstandingPort):
         final = self._summary_call(lines, transcript_text, focus, model, api_key, base_url, timeout)
         return {**final, "supplements": entries}
 
+    def _sheet_call(
+        self,
+        sheet_image: Path,
+        cells: list[tuple[int, int]],
+        transcript_text: str,
+        model: str,
+        api_key: str,
+        base_url: str | None,
+        timeout: float,
+    ) -> list[dict[str, Any]]:
+        """联络表单次多模态调用（决策 25）：格子编号即时间定位，越界条目一律
+        丢弃（绝不伪造定位），有效条目为零时按失败处理交作业层降级。"""
+        encoded = base64.b64encode(sheet_image.read_bytes()).decode("ascii")
+        cell_lines = [
+            f"格子 {index + 1}：{_format_cell_range(start_ms, end_ms)}"
+            for index, (start_ms, end_ms) in enumerate(cells)
+        ]
+        user = "\n".join([
+            "联络表时间窗对照：",
+            *cell_lines,
+            f"语音转写（节选）：{transcript_text[:6000] or '（无）'}",
+        ])
+        response = self._chat(
+            [
+                {"role": "system", "content": _SHEET_SYSTEM_PROMPT},
+                {"role": "user", "content": [
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encoded}"}},
+                    {"type": "text", "text": user},
+                ]},
+            ],
+            model, base_url, api_key, timeout,
+        )
+        payload = _parse_json_text(_message_content(response))
+        raw = payload.get("moments")
+        entries: list[dict[str, Any]] = []
+        if isinstance(raw, list):
+            for item in raw:
+                if not isinstance(item, dict):
+                    continue
+                description = str(item.get("content") or "").strip()[:500]
+                if not description:
+                    continue
+                try:
+                    cell_number = int(item.get("cell"))
+                except (TypeError, ValueError):
+                    continue
+                if not 1 <= cell_number <= len(cells):
+                    continue
+                start_ms, end_ms = cells[cell_number - 1]
+                entries.append({
+                    "start_ms": start_ms,
+                    "end_ms": max(start_ms + 1, end_ms),
+                    "time_ms": start_ms,
+                    "description": description,
+                    "visible_text": str(item.get("visible_text") or "").strip()[:300],
+                })
+        return entries
+
+    def understand_frames(
+        self,
+        sheet_image: Path,
+        cells: list[tuple[int, int]],
+        transcript_text: str,
+        cancelled: Callable[[], bool],
+    ) -> list[dict[str, Any]]:
+        model, api_key, base_url, timeout = self._config()
+        entries = self._sheet_call(sheet_image, cells, transcript_text, model, api_key, base_url, timeout)
+        if not entries:
+            raise RuntimeError("视频画面理解结果无法解析")
+        return entries
+
     @staticmethod
     def _probe_duration_ms(path: Path, limits: MediaProcessingLimits, cancelled: Callable[[], bool]) -> int:
         try:
@@ -587,6 +742,8 @@ class QwenVideoAdapter(_VideoChatAdapter):
         enabled = settings.get("ai_video_provider", "off") == "qwen" and bool(credentials.get("video_qwen"))
         return {
             "video_input": enabled,
+            # qwen-vl 系列原生图像输入（官方文档）；E5 真实冒烟为独立验收门禁。
+            "image_input": enabled,
             "max_bytes": QWEN_URL_SOURCE_LIMIT,
             "audio_in_video": False,
             "duration_limits": f"2s-{QWEN_DEFAULT_DURATION_SECONDS}s（qwen-vl-plus）",
@@ -712,6 +869,8 @@ class MiMoVideoAdapter(_VideoChatAdapter):
         enabled = settings.get("ai_video_provider", "off") == "mimo" and bool(credentials.get("video_mimo"))
         return {
             "video_input": enabled,
+            # mimo-v2.5 全模态含图像输入（官方文档）；E5 真实冒烟为独立验收门禁。
+            "image_input": enabled,
             "max_bytes": MIMO_BASE64_SOURCE_LIMIT,
             "audio_in_video": True,
             "duration_limits": "1M 上下文（mimo-v2.5）",

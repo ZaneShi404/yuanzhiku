@@ -442,7 +442,7 @@ def test_summarize_job_cascade_tiers_and_visual_gap(client_and_services, monkeyp
     marker = re.search(r"<!--yuanzhiku:suggestions (\{.*\}) -->", text)
     assert marker is not None
     suggestions = json.loads(marker.group(1))
-    assert suggestions == {"domains": ["technical"], "genres": ["lecture"], "tags": ["量子", "入门"], "tier": 1, "visual_gap": True, "video_direct": False, "applied": True}
+    assert suggestions == {"domains": ["technical"], "genres": ["lecture"], "tags": ["量子", "入门"], "tier": 1, "visual_gap": True, "video_direct": False, "frame_fallback": False, "enriched": False, "applied": True}
     assert text.count("<!--yuanzhiku:suggestions") == 1
 
     # 强制深度理解（force_tier2）但无视频直送适配器 → 同样 visual_gap，摘要仍 tier1。

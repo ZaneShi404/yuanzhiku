@@ -89,7 +89,8 @@ class VideoUnderstandingPort(Protocol):
 
     def capability(self) -> dict[str, object]: ...
 
-    # {"video_input", "max_bytes", "audio_in_video", "duration_limits", "reencode"}
+    # {"video_input", "image_input"(v1.7), "max_bytes", "audio_in_video",
+    #  "duration_limits", "reencode"}
     def config_hash(self) -> str: ...
 
     def understand_video(
@@ -99,6 +100,23 @@ class VideoUnderstandingPort(Protocol):
         focus: str,
         cancelled: Callable[[], bool],
     ) -> list[dict[str, Any]]: ...
+
+    def understand_frames(
+        self,
+        sheet_image: Path,
+        cells: list[tuple[int, int]],
+        transcript_text: str,
+        cancelled: Callable[[], bool],
+    ) -> list[dict[str, Any]]:
+        """帧级画面理解（v1.7 REQ-057，决策 25）：联络表单次多模态调用。
+
+        ``sheet_image`` 为作业层预构建的缩略图网格（单元格按 1..N 编号）；
+        ``cells`` 为每个格子的证据时间窗 (start_ms, end_ms)。输出条目契约：
+        {"start_ms": int, "end_ms": int, "description": str, "visible_text":
+        str, "time_ms": int(=start_ms，摘要附录复用)}；模型引用的格子号必须
+        落在 1..N 内，越界条目一律丢弃（绝不伪造定位）。
+        """
+        ...
 
 
 class MediaAiPort(Protocol):
