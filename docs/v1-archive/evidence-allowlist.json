@@ -66,8 +66,8 @@
       "purpose": "Declarative local validation summary for the v1.1.0 local-video upgrade; no media, paths, runtime output, or credentials."
     },
     {
-      "source": "tests/runtime/hardening-gateb-20260903/gateb-counts.json",
-      "archive_path": "evidence/runtime/hardening-gateb-20260903/gateb-counts.json",
+      "source": "tests/runtime/hardening-gateb-20260903T000000Z/gateb-counts.json",
+      "archive_path": "evidence/runtime/hardening-gateb-20260903T000000Z/gateb-counts.json",
       "category": "acceptance",
       "tier": "T1",
       "source_run_id": "20260903T000000Z",

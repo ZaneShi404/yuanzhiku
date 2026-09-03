@@ -15,8 +15,7 @@
   ],
   "defects": [],
   "evidence_refs": [
-    "reports/infrastructure/20260903T062808Z-v1-6-env-rebuild-dependency-upgrade.md",
-    "tests/runtime/hardening-gateb-20260903/commit-map-old-to-new.txt"
+    "reports/infrastructure/20260903T062808Z-v1-6-env-rebuild-dependency-upgrade.md"
   ],
   "release_gates": [
     {
