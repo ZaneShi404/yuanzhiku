@@ -1,13 +1,13 @@
 fastapi==0.141.1
 uvicorn[standard]==0.34.2
 python-multipart==0.0.20
-pypdf==5.4.0
+pypdf==6.15.0
 python-docx==1.2.0
 SQLAlchemy==2.0.41
 alembic==1.16.2
 psycopg[binary]==3.2.9
 psutil==7.2.2
-pytest==8.3.5
+pytest==9.0.3
 httpx==0.28.1
 yt-dlp==2026.7.4
 docling==2.120.1
