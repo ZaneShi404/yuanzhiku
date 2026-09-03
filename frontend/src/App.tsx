@@ -120,7 +120,7 @@ type VideoFrame = {
   time_ms: number
   width?: number | null
   height?: number | null
-  reason?: 'scene' | 'even'
+  reason?: 'scene' | 'even' | 'transcript' | 'silence'
 }
 type VideoMetadata = {
   container_name: string
@@ -144,7 +144,7 @@ type VideoDetail = {
     provider?: string | null
     reason?: string
     local_stt?: { enabled?: boolean; model?: string }
-    video_input?: { video_input?: boolean; provider?: string }
+    video_input?: { video_input?: boolean; image_input?: boolean; provider?: string }
   }
 }
 
@@ -184,7 +184,7 @@ function representationKindLabel(kind: string) {
   const map: Record<string, string> = { extraction: '提取', manual: '人工修订', transcription: '转写', summary: '摘要' }
   return map[kind] || kind
 }
-type SummarySuggestions = { domains: string[]; genres: string[]; tags: string[]; tier: number; visual_gap: boolean; video_direct: boolean; applied: boolean }
+type SummarySuggestions = { domains: string[]; genres: string[]; tags: string[]; tier: number; visual_gap: boolean; video_direct: boolean; frame_fallback: boolean; enriched: boolean; applied: boolean }
 function parseSummaryMarker(text: string): { body: string; suggestions: SummarySuggestions } | null {
   const match = text.match(/\s*<!--yuanzhiku:suggestions (\{[\s\S]*?\}) -->\s*$/)
   if (!match) return null
@@ -197,9 +197,11 @@ function parseSummaryMarker(text: string): { body: string; suggestions: SummaryS
         domains: strings(raw.domains),
         genres: strings(raw.genres),
         tags: strings(raw.tags),
-        tier: raw.tier === 2 ? 2 : 1,
+        tier: raw.tier === 2 ? 2 : raw.tier === 1.5 ? 1.5 : 1,
         visual_gap: raw.visual_gap === true,
         video_direct: raw.video_direct === true,
+        frame_fallback: raw.frame_fallback === true,
+        enriched: raw.enriched === true,
         applied: raw.applied === true,
       },
     }
@@ -993,14 +995,14 @@ function VideoDetailPanel({
     setSelectedFrameId(frame.id)
     void player.play().catch(() => undefined)
   }
-  const queueAiJob = async (kind: 'transcribe' | 'summarize', forceTier2 = false) => {
+  const queueAiJob = async (kind: 'transcribe' | 'summarize' | 'analyze', forceTier2 = false) => {
     setBusy(forceTier2 ? 'force-tier2' : kind)
     try {
       await request(
         `/videos/${sourceId}/${kind}`,
         kind === 'summarize' ? { method: 'POST', body: JSON.stringify({ force_tier2: forceTier2 }) } : { method: 'POST' },
       )
-      onMessage(kind === 'transcribe' ? '已排入语音转写作业' : '已排入内容摘要作业')
+      onMessage(kind === 'transcribe' ? '已排入语音转写作业' : kind === 'analyze' ? '已排入本地视频分析作业' : '已排入内容摘要作业')
     } catch (error) {
       onMessage(error instanceof Error ? error.message : '作业提交失败')
     } finally {
@@ -1014,6 +1016,7 @@ function VideoDetailPanel({
   const ai = detail?.ai_capability
   const summaryRepresentation = representations.filter(item => item.kind === 'summary').at(-1)
   const summary = summaryRepresentation ? parseSummaryMarker(summaryRepresentation.text_content) : null
+  const visualRepresentation = representations.filter(item => item.kind === 'visual_understanding').at(-1)
   const suggestions = summary?.suggestions
   const hasSuggestions = Boolean(suggestions && (suggestions.domains.length || suggestions.genres.length || suggestions.tags.length))
   const adoptSuggestions = async () => {
@@ -1046,9 +1049,10 @@ function VideoDetailPanel({
       <div><label>视频编码</label><span>{metadata.video_codec || '-'}</span></div>
       <div><label>音频编码</label><span>{metadata.audio_codec || '-'}</span></div>
     </div> : <p className="muted video-waiting">{detail?.media_capability.enabled === false ? '本机未检测到可用的 FFmpeg/ffprobe，视频分析作业会被阻止。' : '视频原件已保存，分析作业完成后会在这里显示媒体参数和时间采样帧。'}</p>}
-    {frames.length > 0 && <section className="video-frames"><header><h3>时间采样关键帧</h3><span>{frames.length} 帧</span><span className="muted">场景切换 + 等间隔抽样，帧内容未经理解</span></header><div className="frame-strip">{frames.map(frame => <button type="button" className={selectedFrameId === frame.id ? 'video-frame selected' : 'video-frame'} key={frame.id} onClick={() => seek(frame)} title={`${frame.reason === 'scene' ? '场景切换' : '等距'} · 定位到 ${formatDuration(frame.time_ms)}`}><img src={`${API}/videos/${encodeURIComponent(sourceId)}/frames/${encodeURIComponent(frame.id)}${versionQuery}`} alt={`关键帧 ${frame.ordinal + 1}`} /><span>{formatDuration(frame.time_ms)}</span></button>)}</div></section>}
-    <section className="video-ai-status"><header><h3>转写与摘要</h3><Status value={(ai?.enabled || ai?.local_stt?.enabled) ? 'succeeded' : 'blocked'}/></header><div><p>{ai?.enabled || ai?.local_stt?.enabled ? (ai?.local_stt?.enabled ? '本地转写模型已就绪；语音转写默认在本机完成，无需上传。' : '媒体 AI 服务已配置；音频与文本将发送至你配置的云端服务处理。') : '转写与摘要均未配置；不会上传视频或发起外部请求。'}</p><div className="video-ai-actions"><button type="button" className="button secondary" disabled={disabled || !(ai?.transcribe_enabled || ai?.local_stt?.enabled) || Boolean(busy)} onClick={() => void queueAiJob('transcribe')}>{busy === 'transcribe' ? '正在提交' : '语音转写'}</button><button type="button" className="button secondary" disabled={disabled || !ai?.understand_enabled || Boolean(busy)} onClick={() => void queueAiJob('summarize')}>{busy === 'summarize' ? '正在提交' : '内容摘要'}</button></div></div>
-      {summary && suggestions && <div className="video-summary"><header><h4>内容摘要</h4><span className="tier-badge">{suggestions.tier === 2 ? '深度' : '标准'}</span>{suggestions.visual_gap && <span className="muted">可能缺少画面信息</span>}{suggestions.video_direct && <span className="muted">已直送视频补充理解</span>}</header><p className="summary-text">{summary.body}</p>{hasSuggestions && <p className="muted">建议：领域 {suggestions.domains.map(value => taxonomyLabel(taxonomy.domains, value)).join('、') || '-'} · 体裁 {suggestions.genres.map(value => taxonomyLabel(taxonomy.genres, value)).join('、') || '-'} · 标签 {suggestions.tags.join('、') || '-'}</p>}<div className="video-ai-actions"><button type="button" className="button secondary" disabled={disabled || !ai?.video_input?.video_input || Boolean(busy)} title={ai?.video_input?.video_input ? '直送视频给多模态模型补充理解后重新生成摘要' : '在设置中配置视频直送后可用'} onClick={() => void queueAiJob('summarize', true)}>{busy === 'force-tier2' ? '正在提交' : '强制深度理解'}</button>{hasSuggestions && (suggestions.applied ? <span className="muted">建议已自动写入（仅填空缺），可在编辑元数据中修改</span> : <button type="button" className="button secondary" disabled={disabled || Boolean(busy)} onClick={() => void adoptSuggestions()}>{busy === 'adopt' ? '正在采纳' : '采纳建议'}</button>)}</div></div>}
+    {frames.length > 0 && <section className="video-frames"><header><h3>时间采样关键帧</h3><span>{frames.length} 帧</span><span className="muted">场景切换 + 转写语义锚点 + 等间隔抽样，帧内容未经理解</span></header><div className="frame-strip">{frames.map(frame => <button type="button" className={selectedFrameId === frame.id ? 'video-frame selected' : 'video-frame'} key={frame.id} onClick={() => seek(frame)} title={`${frameReasonLabels[frame.reason ?? 'even']} · 定位到 ${formatDuration(frame.time_ms)}`}><img src={`${API}/videos/${encodeURIComponent(sourceId)}/frames/${encodeURIComponent(frame.id)}${versionQuery}`} alt={`关键帧 ${frame.ordinal + 1}`} /><span>{formatDuration(frame.time_ms)}</span></button>)}</div></section>}
+    <section className="video-ai-status"><header><h3>转写与摘要</h3><Status value={(ai?.enabled || ai?.local_stt?.enabled) ? 'succeeded' : 'blocked'}/></header><div><p>{ai?.enabled || ai?.local_stt?.enabled ? (ai?.local_stt?.enabled ? '本地转写模型已就绪；语音转写默认在本机完成，无需上传。' : '媒体 AI 服务已配置；音频与文本将发送至你配置的云端服务处理。') : '转写与摘要均未配置；不会上传视频或发起外部请求。'}</p><div className="video-ai-actions"><button type="button" className="button secondary" disabled={disabled || !(ai?.transcribe_enabled || ai?.local_stt?.enabled) || Boolean(busy)} onClick={() => void queueAiJob('transcribe')}>{busy === 'transcribe' ? '正在提交' : '语音转写'}</button><button type="button" className="button secondary" disabled={disabled || !ai?.understand_enabled || Boolean(busy)} onClick={() => void queueAiJob('summarize')}>{busy === 'summarize' ? '正在提交' : '内容摘要'}</button><button type="button" className="button secondary" disabled={disabled || Boolean(busy)} title="重新执行本地关键帧分析：转写完成后重分析可让采样锚点融合转写语义（生成一份新分析，历史分析保留）" onClick={() => void queueAiJob('analyze')}>{busy === 'analyze' ? '正在提交' : '重新分析'}</button></div></div>
+      {summary && suggestions && <div className="video-summary"><header><h4>内容摘要</h4><span className="tier-badge">{suggestions.tier === 2 ? '深度' : suggestions.tier === 1.5 ? '标准+画面' : '标准'}</span>{suggestions.visual_gap && <span className="muted">可能缺少画面信息</span>}{suggestions.video_direct && <span className="muted">已直送视频补充理解</span>}{suggestions.frame_fallback && <span className="muted">直送不可行，已按关键帧补充画面理解</span>}{suggestions.enriched && <span className="muted">画面理解增强（关键帧）</span>}</header><p className="summary-text">{summary.body}</p>{hasSuggestions && <p className="muted">建议：领域 {suggestions.domains.map(value => taxonomyLabel(taxonomy.domains, value)).join('、') || '-'} · 体裁 {suggestions.genres.map(value => taxonomyLabel(taxonomy.genres, value)).join('、') || '-'} · 标签 {suggestions.tags.join('、') || '-'}</p>}<div className="video-ai-actions"><button type="button" className="button secondary" disabled={disabled || !ai?.video_input?.video_input || Boolean(busy)} title={ai?.video_input?.video_input ? '直送视频给多模态模型补充理解后重新生成摘要' : '在设置中配置视频直送后可用'} onClick={() => void queueAiJob('summarize', true)}>{busy === 'force-tier2' ? '正在提交' : '强制深度理解'}</button>{hasSuggestions && (suggestions.applied ? <span className="muted">建议已自动写入（仅填空缺），可在编辑元数据中修改</span> : <button type="button" className="button secondary" disabled={disabled || Boolean(busy)} onClick={() => void adoptSuggestions()}>{busy === 'adopt' ? '正在采纳' : '采纳建议'}</button>)}</div></div>}
+      {visualRepresentation && <div className="video-summary"><header><h4>画面理解（关键帧联络表）</h4><span className="muted">按时间窗定位，来源为缩略图网格单次理解</span></header><p className="summary-text">{visualRepresentation.text_content}</p></div>}
     </section>
   </section>
 }
@@ -1058,6 +1062,7 @@ type DownloaderCapability = { enabled: boolean; version?: string; cookies: Recor
 type PrefillResult = { title?: string | null; author?: string | null; language?: string | null; source_date?: string | null }
 
 type DetectedKind = 'text' | 'document' | 'image' | 'video' | 'link' | 'card'
+const frameReasonLabels: Record<string, string> = { scene: '场景切换', transcript: '转写语义', silence: '静音空档', even: '等距' }
 const fileKinds: Record<string, 'document' | 'image' | 'video'> = {
   pdf: 'document', docx: 'document', md: 'document', markdown: 'document', txt: 'document',
   jpg: 'image', jpeg: 'image', png: 'image', webp: 'image',
@@ -1539,7 +1544,7 @@ type AiSettings = {
   understand: { provider: string; base_url: string; chat_model: string; has_key: boolean; key_hint: string | null }
   transcriber: { engine: string; local_stt_model: string; stt_timeout_seconds: number; stt_memory_limit_mb: number; stt_disk_limit_mb: number }
   local_stt: { model_name: string; model_available: boolean; downloaded_at: string | null }
-  video: { provider: string; model: string; max_bytes: number; reencode: boolean; chunk_seconds: number; qwen: { has_key: boolean; key_hint: string | null }; mimo: { has_key: boolean; key_hint: string | null }; relay: { kind: string; base_url: string; has_secret: boolean; secret_hint: string | null; cos_bucket: string; cos_region: string; cos_has_key: boolean; cos_key_hint: string | null } }
+  video: { provider: string; model: string; max_bytes: number; reencode: boolean; chunk_seconds: number; frames_fallback: boolean; frames_enrich: boolean; sheet_frames: number; qwen: { has_key: boolean; key_hint: string | null }; mimo: { has_key: boolean; key_hint: string | null }; relay: { kind: string; base_url: string; has_secret: boolean; secret_hint: string | null; cos_bucket: string; cos_region: string; cos_has_key: boolean; cos_key_hint: string | null } }
   timeout_seconds: number
   auto_pipeline: boolean
 }
@@ -1548,7 +1553,7 @@ function AiSettingsSection({ onMessage }: { onMessage: (message: string) => void
   const [transcribe, setTranscribe] = useState({ provider: 'off', base_url: '', model: '', api_key: '' })
   const [understand, setUnderstand] = useState({ provider: 'off', base_url: '', chat_model: '', api_key: '' })
   const [transcriber, setTranscriber] = useState({ engine: 'auto', local_stt_model: 'paraformer-zh', stt_timeout_seconds: '3600', stt_memory_limit_mb: '2048', stt_disk_limit_mb: '1024' })
-  const [video, setVideo] = useState({ provider: 'off', model: '', max_bytes: '314572800', reencode: true, chunk_seconds: '600', relay_kind: 'http', relay_base_url: '', relay_secret: '', cos_bucket: '', cos_region: 'ap-shanghai', cos_secret_id: '', cos_secret_key: '', qwen_api_key: '', mimo_api_key: '' })
+  const [video, setVideo] = useState({ provider: 'off', model: '', max_bytes: '314572800', reencode: true, chunk_seconds: '600', frames_fallback: true, frames_enrich: false, sheet_frames: '24', relay_kind: 'http', relay_base_url: '', relay_secret: '', cos_bucket: '', cos_region: 'ap-shanghai', cos_secret_id: '', cos_secret_key: '', qwen_api_key: '', mimo_api_key: '' })
   const [localStt, setLocalStt] = useState<{ model_name: string; model_available: boolean }>({ model_name: 'paraformer-zh', model_available: false })
   const [timeoutSeconds, setTimeoutSeconds] = useState('300')
   const [autoPipeline, setAutoPipeline] = useState(true)
@@ -1560,7 +1565,7 @@ function AiSettingsSection({ onMessage }: { onMessage: (message: string) => void
     setTranscribe({ provider: value.transcribe.provider, base_url: value.transcribe.base_url, model: value.transcribe.model, api_key: '' })
     setUnderstand({ provider: value.understand.provider, base_url: value.understand.base_url, chat_model: value.understand.chat_model, api_key: '' })
     setTranscriber({ engine: value.transcriber.engine, local_stt_model: value.transcriber.local_stt_model, stt_timeout_seconds: String(value.transcriber.stt_timeout_seconds), stt_memory_limit_mb: String(value.transcriber.stt_memory_limit_mb), stt_disk_limit_mb: String(value.transcriber.stt_disk_limit_mb) })
-    setVideo({ provider: value.video.provider, model: value.video.model, max_bytes: String(value.video.max_bytes), reencode: value.video.reencode, chunk_seconds: String(value.video.chunk_seconds), relay_kind: value.video.relay.kind, relay_base_url: value.video.relay.base_url, relay_secret: '', cos_bucket: value.video.relay.cos_bucket, cos_region: value.video.relay.cos_region, cos_secret_id: '', cos_secret_key: '', qwen_api_key: '', mimo_api_key: '' })
+    setVideo({ provider: value.video.provider, model: value.video.model, max_bytes: String(value.video.max_bytes), reencode: value.video.reencode, chunk_seconds: String(value.video.chunk_seconds), frames_fallback: value.video.frames_fallback, frames_enrich: value.video.frames_enrich, sheet_frames: String(value.video.sheet_frames), relay_kind: value.video.relay.kind, relay_base_url: value.video.relay.base_url, relay_secret: '', cos_bucket: value.video.relay.cos_bucket, cos_region: value.video.relay.cos_region, cos_secret_id: '', cos_secret_key: '', qwen_api_key: '', mimo_api_key: '' })
     setLocalStt({ model_name: value.local_stt.model_name, model_available: value.local_stt.model_available })
     setTimeoutSeconds(String(value.timeout_seconds))
     setAutoPipeline(value.auto_pipeline)
@@ -1600,6 +1605,9 @@ function AiSettingsSection({ onMessage }: { onMessage: (message: string) => void
             max_bytes: Number(video.max_bytes) || 314572800,
             reencode: video.reencode ? 'on' : 'off',
             chunk_seconds: Number(video.chunk_seconds) || 600,
+            frames_fallback: video.frames_fallback ? 'on' : 'off',
+            frames_enrich: video.frames_enrich ? 'on' : 'off',
+            sheet_frames: Number(video.sheet_frames) || 24,
             relay_kind: video.relay_kind,
             relay_base_url: video.relay_base_url,
             cos_bucket: video.cos_bucket,
@@ -1677,6 +1685,9 @@ function AiSettingsSection({ onMessage }: { onMessage: (message: string) => void
         <label>视频模型<input value={video.model} onChange={event => setVideo(current => ({ ...current, model: event.target.value }))} placeholder="空则按供应商默认"/></label>
         <label>直送上限（字节）<input type="number" min="1048576" max="536870912" value={video.max_bytes} onChange={event => setVideo(current => ({ ...current, max_bytes: event.target.value }))}/></label>
         <label>分块时长（秒）<input type="number" min="60" max="3600" value={video.chunk_seconds} onChange={event => setVideo(current => ({ ...current, chunk_seconds: event.target.value }))}/></label>
+        <label className="check-row"><input type="checkbox" checked={video.frames_fallback} onChange={event => setVideo(current => ({ ...current, frames_fallback: event.target.checked }))}/>直送不可行时按关键帧联络表兜底理解画面</label>
+        <label className="check-row"><input type="checkbox" checked={video.frames_enrich} onChange={event => setVideo(current => ({ ...current, frames_enrich: event.target.checked }))}/>转写完整时也做画面理解增强（消耗额外调用）</label>
+        <label>联络表帧数上限<input type="number" min="8" max="48" value={video.sheet_frames} onChange={event => setVideo(current => ({ ...current, sheet_frames: event.target.value }))}/></label>
         <label className="check-row"><input type="checkbox" checked={video.reencode} onChange={event => setVideo(current => ({ ...current, reencode: event.target.checked }))}/>MiMo 直送前显式重编码</label>
         <label>通义千问密钥<input type="password" autoComplete="off" value={video.qwen_api_key} onChange={event => setVideo(current => ({ ...current, qwen_api_key: event.target.value }))} placeholder={videoHints.qwen ? `已配置（${videoHints.qwen}），输入以替换` : '未配置'}/></label>
         <label>MiMo 密钥<input type="password" autoComplete="off" value={video.mimo_api_key} onChange={event => setVideo(current => ({ ...current, mimo_api_key: event.target.value }))} placeholder={videoHints.mimo ? `已配置（${videoHints.mimo}），输入以替换` : '未配置'}/></label>
@@ -1687,7 +1698,7 @@ function AiSettingsSection({ onMessage }: { onMessage: (message: string) => void
         <label>地域<input value={video.cos_region} onChange={event => setVideo(current => ({ ...current, cos_region: event.target.value }))} placeholder="ap-shanghai"/></label>
         <label>SecretId<input type="password" autoComplete="off" value={video.cos_secret_id} onChange={event => setVideo(current => ({ ...current, cos_secret_id: event.target.value }))} placeholder={videoHints.cos ? `已配置（${videoHints.cos}），输入以替换` : '未配置'}/></label>
         <label>SecretKey<input type="password" autoComplete="off" value={video.cos_secret_key} onChange={event => setVideo(current => ({ ...current, cos_secret_key: event.target.value }))} placeholder="输入以替换"/></label></>}
-      </div><p className="hint">配置中转后直送优先经中转 URL（MiMo 可吃满 300MB 上限）；COS 形态使用预签名 URL（30 分钟）并在拉取后自动删除对象。未配置时 MiMo 走 base64（超限重编码/分块）、Qwen 走 DashScope 临时上传。直送仅在完整性判定「可能缺失」时发生。</p></fieldset>
+      </div><p className="hint">配置中转后直送优先经中转 URL（MiMo 可吃满 300MB 上限）；COS 形态使用预签名 URL（30 分钟）并在拉取后自动删除对象。未配置时 MiMo 走 base64（超限重编码/分块）、Qwen 走 DashScope 临时上传。直送仅在完整性判定「可能缺失」时发生；直送不可行时按关键帧联络表兜底理解画面（可关闭），仅发送少量缩略图。</p></fieldset>
       <label>AI 调用超时（秒）<input type="number" min="60" max="86400" value={timeoutSeconds} onChange={event => setTimeoutSeconds(event.target.value)}/></label>
       <label className="check-row"><input type="checkbox" checked={autoPipeline} onChange={event => setAutoPipeline(event.target.checked)}/>自动流水线</label>
       <p className="hint">配置 AI 后，导入视频自动串联转写/摘要/分类；文档与粘贴导入后自动分类（内容将发送至所配置端点）。</p>

@@ -1035,6 +1035,16 @@ def create_app(
         detail["ai_capability"] = svc.media_ai.capability()
         return detail
 
+    @app.post(f"{api}/videos/{{source_id}}/analyze", status_code=201, tags=["videos"])
+    def queue_video_analysis(source_id: str, svc: ApplicationServices = Depends(get_services)) -> dict[str, Any]:
+        # v1.7（REQ-056.4）：手动重分析——转写晚到后可获得转写引导帧；幂等由
+        # 分析身份（config_hash 含转写来源）去重，多份分析并存、detail 取最新。
+        detail = svc.videos.detail(source_id)
+        if detail is None:
+            raise HTTPException(status_code=404, detail="视频来源不存在或尚不可用")
+        version = detail["version"]
+        return svc.repository.create_job("video_analyze", source_id, version["id"], version["artifact_sha256"], None, {}, priority=100)
+
     @app.post(f"{api}/videos/{{source_id}}/transcribe", status_code=201, tags=["videos"])
     def queue_video_transcription(source_id: str, svc: ApplicationServices = Depends(get_services)) -> dict[str, Any]:
         detail = svc.videos.detail(source_id)

@@ -259,6 +259,47 @@ def test_frame_enrichment_runs_on_complete_transcript(client_and_services, monke
     assert adapter.frame_calls
 
 
+def test_reanalyze_after_late_transcription_creates_new_identity(client_and_services, monkeypatch: pytest.MonkeyPatch) -> None:
+    """T-FRAME-002（REQ-056.4）：转写晚到后手动重分析 → 新分析身份（config_hash
+    含转写来源）与旧分析并存，detail 取最新；旧分析行保留。"""
+    client, services = client_and_services
+    # 转写器未配置时入库：仅入队分析（矩阵未命中，v1.6 语义）。
+    source_id, version_id = _upload_video(client)
+    analyzed_first = services.jobs.run_once()
+    assert analyzed_first is not None and analyzed_first["kind"] == "video_analyze" and analyzed_first["state"] == "succeeded"
+
+    # 转写晚到：配置 AI 并手动转写成功（转写成功会链式摘要，需摘要 fake）。
+    _configure_ai(client)
+    monkeypatch.setattr("app.services.jobs.extract_audio_chunks", _jobs_audio_extractor)
+    monkeypatch.setattr(services.api_transcriber, "_transcription_caller", _fake_transcription_calls())
+    monkeypatch.setattr(services.media_ai, "_completion_caller", lambda **kwargs: _completion_response(_summary_payload()))
+    assert client.post(f"/api/v1/videos/{source_id}/transcribe").status_code == 201
+    transcribed = services.jobs.run_once()
+    assert transcribed is not None and transcribed["state"] == "succeeded"
+
+    # 手动重分析：新分析身份（含转写来源），与旧分析并存。链式摘要可能先于
+    # 重分析被领取，排空队列直到分析作业执行。
+    queued = client.post(f"/api/v1/videos/{source_id}/analyze")
+    assert queued.status_code == 201, queued.text
+    analyzed_second = None
+    for _ in range(6):
+        done = services.jobs.run_once()
+        if done is not None and done["kind"] == "video_analyze":
+            analyzed_second = done
+            break
+    assert analyzed_second is not None and analyzed_second["state"] == "succeeded"
+
+    analyses = services.repository.list_video_analyses(version_id)
+    assert len(analyses) == 2
+    hashes = {item["config_hash"] for item in analyses}
+    assert len(hashes) == 2, "无转写与转写引导必须构成不同分析身份"
+    detail = client.get(f"/api/v1/videos/{source_id}").json()
+    assert detail["current_analysis_id"] == analyses[0]["id"], "detail 取最新一份分析"
+
+    # 旧分析帧与帧 artifact 保留：两份分析的帧均仍可校验。
+    assert all(services.artifacts.verify(frame["artifact_sha256"]) for item in analyses for frame in item["frames"])
+
+
 def test_understand_frames_drops_out_of_range_cells(tmp_path: Path) -> None:
     """模型引用越界/非法格子号的条目一律丢弃；全部无效时按失败处理（绝不伪造）。"""
     settings = {"ai_video_provider": "qwen", "ai_video_model": "", "ai_understand_provider": "off"}
