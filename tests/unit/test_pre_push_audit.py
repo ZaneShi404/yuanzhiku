@@ -4,7 +4,7 @@
   token 文件进入 index；
 - 检测暂存新增行中的私钥/Bearer/API key/数据库 URL 模式，报告只含
   文件与行号，匹配值一律脱敏；
-- 未跟踪的 源知库使用指南/ 列为用户决策项；
+- 未跟踪的 docs/user-guide/ 文件列为用户决策项；
 - 不重写任何 Git 历史。
 """
 
@@ -101,11 +101,11 @@ def test_private_key_pattern_detected(repo: Path) -> None:
 
 
 def test_untracked_user_guide_listed_as_decision(repo: Path) -> None:
-    guide = repo / "源知库使用指南"
-    guide.mkdir()
+    guide = repo / "docs" / "user-guide"
+    guide.mkdir(parents=True)
     (guide / "index.html").write_text("<html></html>", encoding="utf-8")
 
     result = _run(repo)
 
-    assert "源知库使用指南" in result.stdout
+    assert "docs/user-guide" in result.stdout
     assert "用户明确选择" in result.stdout

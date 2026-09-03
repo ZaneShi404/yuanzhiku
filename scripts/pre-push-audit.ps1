@@ -94,13 +94,13 @@ foreach ($file in $historyFiles) {
 $untracked = @(Invoke-Git @('-c', 'core.quotepath=false', 'ls-files', '--others', '--exclude-standard'))
 $guideFound = $false
 foreach ($file in $untracked) {
-    if ($file.StartsWith('源知库使用指南')) {
+    if ($file.StartsWith('docs/user-guide')) {
         $guideFound = $true
         break
     }
 }
 if ($guideFound) {
-    Write-Output '[user-decision] 源知库使用指南/ 处于未跟踪状态：提交或忽略需用户明确选择（本脚本不代为决定）'
+    Write-Output '[user-decision] docs/user-guide/ 下存在未跟踪文件：提交或忽略需用户明确选择（本脚本不代为决定）'
 }
 
 if ($violations -gt 0) {

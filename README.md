@@ -11,7 +11,7 @@
 
 | 库页面 | 设置页 |
 |---|---|
-| ![库页面](源知库使用指南/screenshots/01-library.png) | ![设置页](源知库使用指南/screenshots/09-settings.png) |
+| ![库页面](docs/user-guide/screenshots/01-library.png) | ![设置页](docs/user-guide/screenshots/09-settings.png) |
 
 ## 功能特性
 
@@ -70,7 +70,7 @@ cd ..
 | [docs/architecture.md](docs/architecture.md) | 分层架构与模块边界 |
 | [docs/operations-and-recovery.md](docs/operations-and-recovery.md) | 启动、备份恢复、媒体 AI 与排障 |
 | [docs/threat-model.md](docs/threat-model.md) | 威胁模型与控制矩阵 |
-| [源知库使用指南/index.html](源知库使用指南/index.html) | 图文使用指南 |
+| [docs/user-guide/index.html](docs/user-guide/index.html) | 图文使用指南 |
 
 ## 测试
 
