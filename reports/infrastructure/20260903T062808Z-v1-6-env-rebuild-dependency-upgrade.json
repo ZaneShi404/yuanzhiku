@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "report_id": "RPT-V1-6-ENV-REBUILD-DEPENDENCY-UPGRADE-20260903T062808Z-001",
+  "recorded_at_utc": "2026-09-03T06:28:08Z",
+  "report_kind": "infrastructure",
+  "author_role": "infrastructure",
+  "independence": "non_independent",
+  "product_version": "v1.6.0",
+  "decision_scope": "archive_local",
+  "verdict": "accepted",
+  "requirements": [
+    "REQ-002",
+    "REQ-045",
+    "REQ-046"
+  ],
+  "defects": [],
+  "evidence_refs": [
+    "reports/infrastructure/20260903T062808Z-v1-6-env-rebuild-dependency-upgrade.md",
+    "tests/runtime/hardening-gateb-20260903/commit-map-old-to-new.txt"
+  ],
+  "release_gates": [
+    {
+      "gate_id": "GATE-UNIT-INTEGRATION-REGRESSION",
+      "status": "passed",
+      "requirements": [
+        "REQ-002",
+        "REQ-045",
+        "REQ-046"
+      ]
+    },
+    {
+      "gate_id": "GATE-FRONTEND-BUILD",
+      "status": "passed",
+      "requirements": []
+    },
+    {
+      "gate_id": "GATE-BROWSER-BLACKBOX",
+      "status": "blocked",
+      "requirements": []
+    },
+    {
+      "gate_id": "GATE-COMPOSE-PHYSICAL",
+      "status": "blocked",
+      "requirements": []
+    },
+    {
+      "gate_id": "GATE-RELEASE-READINESS",
+      "status": "blocked",
+      "requirements": []
+    }
+  ],
+  "summary": "v1.6.0 周期基础设施工作：执行环境从损坏状态按锁文件重建（python-docx 1.2.0 解锁整装冲突）；依赖审计升级（npm nanoid/vite 清零；starlette 0.49.1+fastapi 0.141.1、torch 2.10.0、pypdf 6.15.0、pytest 9.0.3），torch 两条公告因 torchaudio 停更与上游无修复登记为已接受风险；发布前历史脱敏（三份文档语义化改写 + filter-repo 四字面量全历史清除，归零验证），一次替换规则转义事故经仓库外镜像备份完整恢复后修正重跑；远端仓库首次公开发布并完成推送后引用核验。"
+}
