@@ -31,8 +31,8 @@ SNAPSHOT_REGISTER_PATH = "docs/v1-archive/snapshot-register.json"
 REPORT_ID_PATTERN = re.compile(r"^RPT-[A-Z0-9][A-Z0-9._-]*$")
 UTC_TIMESTAMP_PATTERN = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?Z$")
 SEMVER_PATTERN = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+$")
-REPORT_KINDS = frozenset({"archive_snapshot", "version_summary", "development", "testing", "acceptance", "infrastructure"})
-REPORT_AUTHOR_ROLES = frozenset({"development", "testing", "acceptance", "release_management", "infrastructure"})
+REPORT_KINDS = frozenset({"archive_snapshot", "version_summary", "development", "testing", "acceptance", "infrastructure", "review"})
+REPORT_AUTHOR_ROLES = frozenset({"development", "testing", "acceptance", "review", "release_management", "infrastructure"})
 REPORT_INDEPENDENCE = frozenset({"independent", "non_independent", "not_applicable"})
 REPORT_DECISION_SCOPES = frozenset({"archive_local", "version_archive", "release"})
 REPORT_VERDICTS = frozenset({"accepted", "rejected", "blocked", "not_applicable"})
@@ -79,6 +79,7 @@ SOURCE_DIRECTORIES = (
     "reports/development",
     "reports/testing",
     "reports/infrastructure",
+    "reports/review",
     "reports/versions",
 )
 ALLOWED_SUFFIXES = frozenset({".py", ".ps1", ".md", ".json", ".sql", ".ts", ".tsx", ".css", ".yml", ".yaml", ".ini", ".lock"})
@@ -341,9 +342,13 @@ def _load_allowlist(repository_root: Path) -> list[dict[str, Any]]:
             raise ArchiveError("运行证据白名单元数据无效")
         source_run_id = item.get("source_run_id")
         if not isinstance(source_run_id, str) or not SOURCE_RUN_ID_PATTERN.fullmatch(source_run_id):
-            raise ArchiveError("运行证据白名单缺少有效 source_run_id")
+            raise ArchiveError(
+                f"运行证据白名单缺少有效 source_run_id（应为 YYYYMMDDTHHMMSSZ[-后缀]）：{source}"
+            )
         if source_run_id not in source:
-            raise ArchiveError("运行证据 source_run_id 与来源路径不一致")
+            raise ArchiveError(
+                f"运行证据 source_run_id 与来源路径不一致：{source} 须包含 {source_run_id}"
+            )
         seen_sources.add(source)
         seen_destinations.add(destination)
         entries.append(item)
@@ -597,7 +602,9 @@ def _validate_report_references(
         raise ArchiveError("声明式归档报告含重复证据引用")
     for reference in evidence_refs:
         if not _is_safe_archive_path(reference) or reference not in known_source_paths | known_archive_paths:
-            raise ArchiveError("声明式归档报告证据引用越出当前档案")
+            raise ArchiveError(
+                f"声明式归档报告证据引用越出当前档案：{metadata_path} 引用 {reference}"
+            )
 
     release_gates = metadata.get("release_gates")
     if not isinstance(release_gates, list):
@@ -812,7 +819,10 @@ def _build_report_register(
         }
         if metadata_path not in metadata_records:
             if legacy_report_hashes.get(source_path) != markdown_record.source_sha256:
-                raise ArchiveError("新归档报告缺少同名 JSON 侧车")
+                raise ArchiveError(
+                    f"新归档报告缺少同名 JSON 侧车，且 {source_path} 内容与遗留登记哈希不一致"
+                    "（登记值与当前值请对照遗留登记与重新计算哈希；经批准的公示脱敏须同步更新登记）"
+                )
             entry.update({
                 "defects": REPORT_DEFECTS.get(source_path, []),
                 "normalization_status": "legacy_inferred",

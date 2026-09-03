@@ -26,12 +26,14 @@ REPORT_KIND_DIRECTORIES = {
     "testing": "reports/testing",
     "acceptance": "reports/testing",
     "infrastructure": "reports/infrastructure",
+    "review": "reports/review",
 }
 REPORT_KIND_LABELS = {
     "development": "开发",
     "testing": "测试",
     "acceptance": "验收",
     "infrastructure": "基础设施",
+    "review": "复核",
 }
 RELEASE_GATE_SKELETON = (
     ("GATE-UNIT-INTEGRATION-REGRESSION", "passed"),
@@ -251,7 +253,7 @@ def create_report(
 
 def _parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="生成规范化归档报告骨架（Markdown 与 JSON 侧车）")
-    parser.add_argument("--kind", required=True, help="报告类型：development/testing/acceptance/infrastructure")
+    parser.add_argument("--kind", required=True, help="报告类型：development/testing/acceptance/infrastructure/review")
     parser.add_argument("--slug", required=True, help="报告短名，小写字母、数字与中划线")
     parser.add_argument("--reqs", required=True, help="逗号分隔的 REQ 标识，必须存在于 docs/requirements.md")
     parser.add_argument("--defs", help="逗号分隔的 缺陷ID:relationship，缺陷须存在于缺陷台账")

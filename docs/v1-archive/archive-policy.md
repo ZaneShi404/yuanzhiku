@@ -81,7 +81,18 @@ $env:YUANZHIKU_TEST_RUNTIME = Join-Path $copy 'runtime'
 
 为一致性检查而构建、但不进入 `snapshot-register.json` 的中间档案是正式允许的（先例：`20260814T160204Z`、`20260815T101415Z-v1-3-summary-check`）；它们用于验证工作树登记/链一致性，没有验收记录、不推荐、不可被引用为候选。
 
-登记与链镜像由 `python scripts/register_snapshot.py --run-id ... --verdict ... --acceptance ...` 一步完成：校验验收报告、读取归档 manifest 哈希、追加登记并镜像全部版本汇总 JSON 链；版本汇总 Markdown 表格行由它打印建议后人工补注。小型升级（修复/工具/文档类，无新 REQ）允许单段归档（一次构建 + 一次验收后即登记）；含新需求或安全边界变更的版本仍走「候选 → 验收 → 最终记录」两段式。
+登记与链镜像由 `python scripts/register_snapshot.py --run-id ... --verdict ... --acceptance ...` 一步完成：校验验收报告、读取归档 manifest 哈希、追加登记并镜像全部版本汇总 JSON 链；版本汇总 Markdown 表格行由它打印建议后人工补注。归档通道分两档：
+
+- **小型升级**（修复/工具/文档类，无新 REQ）：允许单段归档——一次构建 + 一次验收后即登记。
+- **功能或安全边界变更版本**：走「候选 → 验收 → 最终记录」两段式（顺序契约见下）。
+- 新功能版本**不再允许整体跳过归档**：确需跳过时，跳过的版本区间必须在下一个已归档版本汇总中登记为归档债务（一句话说明版本区间与原因），使链条空窗可追溯而非不可见。先例警示：v1.5.0/v1.5.1/v1.5.2 因全流程成本被整体跳过，该版本区间在档案中无可追溯记录。
+
+### 顺序契约（两段式的隐式规则成文化）
+
+- 候选必须先经 `register_snapshot.py` 登记进冻结快照登记，才能构建最终记录——构建器会校验验收报告声明的归档身份（`archive_run_id`/`archive_manifest_sha256`）与登记一致，未登记即构建失败。
+- 候选登记产生的登记簿与版本汇总镜像变更须在最终记录构建**之前**提交：最终记录构建时工作树必须干净，manifest `git_state` 不得标记 dirty。
+- 验收报告一律存放于 `reports/testing/`（`report_kind=acceptance`、`author_role=acceptance`）；复核报告存放于 `reports/review/`（`report_kind=review`、`author_role=review`）。
+- 新版本汇总由实现者手工创建（JSON 骨架对照既有版本复制，`snapshot_chain` 取登记当前全量；Markdown 链表对照登记誊写）；登记镜像只更新既有汇总的链条，不代建新版本汇总文件。
 
 ## 规范化报告
 
@@ -91,7 +102,17 @@ $env:YUANZHIKU_TEST_RUNTIME = Join-Path $copy 'runtime'
 
 `legacy-report-register.json` 是历史豁免的冻结清单。它逐项绑定无 JSON 侧车的历史 Markdown 来源路径和来源 SHA-256；其条目集合必须与档案中全部无侧车报告完全相等。新建 Markdown 报告没有同名 JSON 时不得作为历史报告推断，构建和独立验证都必须拒绝。历史 Markdown 不补写、不改名、不重判；在 `index/report-register.json` 中仅标为 `legacy_inferred`，只登记可从冻结材料安全推导的来源路径、档案路径、标题、类别、正则提取的 `REQ-*` 和既有 `REPORT_DEFECTS` 关联；不推断时间、裁定、角色、独立性或验证结论。
 
-`v1.0.0` 是产品版本身份，不是档案目录名。每个不可变快照仍以 UTC run ID 标识，例如 `20260730T145000Z-replay-contract-remediated`。`snapshot-register.json` 冻结所有已知候选的有序 run ID、manifest SHA-256、archive-local 裁定、验收报告路径和 SHA-256 及前序关系；版本汇总的 `snapshot_chain` 必须按顺序逐项与该登记完全相等，不得遗漏、重排或改写。推荐快照必须是登记为 `accepted` 的候选，并具有同一档案可追溯的独立 `archive_local` 接受记录。`20260730T231357Z-normalized-reports` 保持为被拒绝的不可变历史候选，不能重建、替换或从汇总链移除。
+### 公示脱敏工作流（对历史材料的经批准改写）
+
+仓库公开发布等合规场景要求清除历史材料中的本机标识（域名、服务器地址、本机用户名路径）时，这是对「历史不改写」的唯一合法例外，必须留痕并按序执行：
+
+1. 改写须经仓库所有者明确批准，且仅限**移除标识信息**，不得改变技术事实与结论。
+2. 当前工作树中改写目标文件，以独立提交落盘（提交信息注明脱敏目的）。
+3. 同步更新 `legacy-report-register.json` 对应条目的 `source_sha256` 为脱敏后内容哈希；旧哈希连同提交哈希重写映射（如适用）记入哈希映射文件。
+4. 以全历史检索验证目标字面量归零；`archive_v1.py --check-tree` 保持通过。
+5. 改写关系记入下一版本汇总。先例：v1.6.0 发布前对 `reports/infrastructure/20260729-014251-environment-preparation.md` 的本机用户名路径脱敏（2026-09-03，用户批准；旧哈希 2273ef2c… 记录于映射文件）。
+
+`v1.0.0` 是产品版本身份，不是档案目录名。每个不可变快照仍以 UTC run ID 标识，例如 `20260730T145000Z-replay-contract-remediated`。`snapshot-register.json` 是快照链的**唯一事实源**：它冻结所有已知候选的有序 run ID、manifest SHA-256、archive-local 裁定、验收报告路径和 SHA-256 及前序关系；`reports/versions/*/version-summary.*` 是该登记的**投影**（由 `register_snapshot.py` 在登记时自动镜像链条），不得脱离登记单独编辑汇总的链条部分。版本汇总的 `snapshot_chain` 必须按顺序逐项与该登记完全相等，不得遗漏、重排或改写。推荐快照必须是登记为 `accepted` 的候选，并具有同一档案可追溯的独立 `archive_local` 接受记录。`20260730T231357Z-normalized-reports` 保持为被拒绝的不可变历史候选，不能重建、替换或从汇总链移除。
 
 声明式报告中的未知需求、未知缺陷、缺失同名 Markdown、跨档案引用、敏感键、运行输出、PID、绝对路径或凭据均会使构建或独立验证失败。更正一律追加新的同名 `.md` + `.json` 报告，并以 `supersedes_report_id` 指向此前声明式记录；不得修改封存快照、旧报告或其 manifest。manifest schema v1 档案继续按原有规则验证且不要求报告登记；schema v2 额外要求 `index/report-register.json` 及其全部交叉验证。
 
