@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "report_id": "RPT-V1-6-INDEPENDENT-ADVERSARIAL-CODE-REVIEW-20260903T070708Z-001",
+  "recorded_at_utc": "2026-09-03T07:07:08Z",
+  "report_kind": "review",
+  "author_role": "review",
+  "independence": "non_independent",
+  "product_version": "v1.6.0",
+  "decision_scope": "archive_local",
+  "verdict": "accepted",
+  "requirements": [
+    "REQ-003",
+    "REQ-040",
+    "REQ-041",
+    "REQ-042",
+    "REQ-046",
+    "REQ-052"
+  ],
+  "defects": [],
+  "evidence_refs": [
+    "reports/review/20260903T070708Z-v1-6-independent-adversarial-code-review.md",
+    "reports/testing/20260903T062808Z-v1-6-hardening-regression.md"
+  ],
+  "release_gates": [
+    {
+      "gate_id": "GATE-UNIT-INTEGRATION-REGRESSION",
+      "status": "passed",
+      "requirements": [
+        "REQ-003",
+        "REQ-040",
+        "REQ-041",
+        "REQ-042",
+        "REQ-046",
+        "REQ-052"
+      ]
+    },
+    {
+      "gate_id": "GATE-FRONTEND-BUILD",
+      "status": "passed",
+      "requirements": []
+    },
+    {
+      "gate_id": "GATE-BROWSER-BLACKBOX",
+      "status": "passed",
+      "requirements": []
+    },
+    {
+      "gate_id": "GATE-COMPOSE-PHYSICAL",
+      "status": "blocked",
+      "requirements": []
+    },
+    {
+      "gate_id": "GATE-RELEASE-READINESS",
+      "status": "blocked",
+      "requirements": []
+    }
+  ],
+  "summary": "v1.6.0 加固实现的对抗性代码复核（全新上下文自动化代理，19 提交区间）：总裁决 APPROVE-WITH-CONDITIONS——零 P1；P2-1 规范文档同步缺口已由实现者处置；P3 七项记录即可。复核者亲自重跑后端全量（489 通过、4 跳过、0 失败）与前端三件套，逐行对账 P1 安全修复 diff，12 探针边界实证（恶意 Host 全变体与恶意 Origin 写请求全部 403），数据演练证据与诚实性审查通过。复核引用的提交哈希早于发布前历史重写，对照见哈希映射文件。本报告使该复核裁决进入正式治理记录。"
+}
