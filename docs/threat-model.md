@@ -26,3 +26,7 @@
 | 本地转写拖垮 worker（CPU/内存） | 独立断路器设置组；单 worker 串行；推理循环内协作取消 | REQ-054 |
 | 本机其他进程或浏览器跨站写入/DNS rebinding 触达 API | 服务仅绑定 127.0.0.1；Host 头必须为回环主机（其余 403 untrusted_host）；写方法携带的 Origin 必须为本机同源或开发前端来源（其余 403 untrusted_origin）；凭据/Cookie 文件 ACL 收紧为仅当前账户+SYSTEM+Administrators（POSIX 0600/0700） | REQ-002, REQ-003, REQ-052 |
 | purge 后 artifact 文件残留（unlink 失败成为无登记孤儿） | 删除 catalog 行前先落持久化清理任务（artifact_cleanup_tasks）；逻辑提交后幂等 sweeper 消化，失败保留任务并以 503 artifact_cleanup_pending 呈现；启动低优先级作业自动重试；共享引用 artifact 不入队 | REQ-034, REQ-040..042 |
+| 画面帧经联络表外泄 | 仅发往用户显式配置的媒体 AI 端点；仅在摘要作业内、且仅当用户已触发直送（兜底）或显式开启增强时发生；帧数据量远小于整片直送；瞬态文件不入 artifact/备份/导出/日志；错误脱敏 | REQ-057, REQ-052 |
+| 转写锚点与视频版本错配 | 锚点仅取自同版本 transcription 表示；分析身份纳入转写来源 config_hash，跨版本/跨引擎不共用分析身份 | REQ-056 |
+| 联络表超限调用被拒或成本失控 | ai_video_sheet_frames 上限（默认 24，8–48）；供应商图像限制以能力声明为准；超限按上限截断网格并在作业消息注明（不静默） | REQ-057 |
+| 转写引导抽帧被误当作「理解」 | 分析作业零网络纪律不变（负向断言）；帧理解条目独立 visual_understanding 表示 + 逐条时间定位证据，与分析帧（浏览用途）可区分 | REQ-056, REQ-057 |

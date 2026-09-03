@@ -7,7 +7,7 @@
 | health | `/health`, `/capabilities` | GET | 运行状态、功能与本地限制 |
 | settings | `/settings`, `/settings/ai`, `/settings/ai/test`, `/settings/ai/stt-model`, `/settings/download-cookies/{platform}` | GET, PUT, POST, DELETE | 非敏感设置、端口和断路器；双组媒体 AI 配置与连通性检查（密钥仅存凭据文件，回显掩码）；本地转写模型下载/删除（REQ-054）；按平台 cookies.txt 导入/删除（每平台 ≤1MB） |
 | imports | `/imports/file`, `/imports/image`, `/imports/paste`, `/imports/prefill` | POST | rights 必填；文件/图片 multipart、文本 JSON；分类字段为 `domains`/`genres`（`categories` 已移除）；prefill 只读识别元数据，返回可空建议，不持久化、不联网 |
-| videos | `/videos/local`, `/videos/link`, `/videos/link/probe`, `/videos/{source_id}`, `/videos/{source_id}/stream`, `/videos/{source_id}/frames/{frame_id}`, `/videos/{source_id}/transcribe`, `/videos/{source_id}/summarize` | GET/POST | 本地 MP4/WebM artifact 与受限白名单链接下载；链接元数据只读探测（REQ-047b）；本地播放、关键帧；transcribe/summarize 入队媒体 AI 作业（未配置时终态 blocked，REQ-051） |
+| videos | `/videos/local`, `/videos/link`, `/videos/link/probe`, `/videos/{source_id}`, `/videos/{source_id}/stream`, `/videos/{source_id}/frames/{frame_id}`, `/videos/{source_id}/analyze`, `/videos/{source_id}/transcribe`, `/videos/{source_id}/summarize` | GET/POST | 本地 MP4/WebM artifact 与受限白名单链接下载；链接元数据只读探测（REQ-047b）；本地播放、关键帧；analyze/transcribe/summarize 入队媒体作业（AI 类未配置时终态 blocked，REQ-051）；v1.7 入库双入队转写+分析（REQ-056.1） |
 | sources | `/sources`, `/sources/{id}`, `/sources/{id}/metadata`, `/sources/{id}/rights`, `/sources/{id}/relations`, `/sources/{id}/relations/{relation_id}` | GET/PUT/POST/DELETE | 不返回本地原路径；来源详情含 `same_work_candidates`；关系可创建与删除 |
 | documents | `/documents/{version_id}/representations`, `/representations/{id}/evidence`, `/evidence/{id}`, `/citations`, `/knowledge`, `/knowledge/{id}/publish` | GET/POST | 保持证据链和发布校验 |
 | search | `/search` | GET | `q` 和显式 advanced 过滤参数：`domains`（重复、OR、`_none` 哨兵）、`genre`（单值、`_none`）、`topic_id` 等（REQ-024） |
@@ -142,3 +142,11 @@
 | `tags` | 字符串数组 | 拒绝（`422`） | 空数组有效 |
 
 `title`、`language`、`domains`、`genres` 和 `tags` 不接受显式 `null`；客户端应提交有效值或省略字段。`author`、`notes` 与 `source_date` 使用 JSON `null` 表示清除。错误遵循本文件开头的稳定错误信封；Pydantic 请求校验失败为 `422`。
+
+## v1.7 补充：手动重分析与帧理解（REQ-043/REQ-057）
+
+`POST /videos/{source_id}/analyze`（`201`）入队 `video_analyze` 作业：无前置条件（与 transcribe/summarize 手动端点同口径），幂等由分析身份（`config_hash` 含转写来源，REQ-056.3）去重；用于转写晚到后重新获得转写引导关键帧，多份分析并存、详情取最新。
+
+`GET /settings/ai` 的 `video` 节新增 `frames_fallback`（默认 `true`）、`frames_enrich`（默认 `false`）与 `sheet_frames`（默认 24，8–48）；`PUT /settings/ai` 的 `video` 分组接受同名局部更新（枚举 `on|off`，非法值 `422 request_validation`）。`/capabilities` 的 `media.ai.video_input` 节新增 `image_input`（供应商图像输入能力声明，REQ-057.6）。
+
+摘要作业三级补充理解（REQ-055.2 v1.7 修订）：直送 → 联络表帧理解兜底（`ai_video_frames_fallback=on` 且 `image_input` 可行）→ visual_gap（两者皆不可行才标记）；转写完整时可经 `ai_video_frames_enrich=on` 做画面增强（tier 1.5）。帧理解条目落 kind=`visual_understanding` 表示（父链挂 transcription，逐条 `video_time_range` 证据，进入检索索引）；摘要建议标记新增 `frame_fallback`/`enriched` 键。帧理解可达性问题均在作业层表达（blocked/failed + 脱敏消息），不新增错误码。

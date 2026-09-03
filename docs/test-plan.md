@@ -34,3 +34,7 @@
 | T-VDIR-001 | 视频直送单元 | 两级直送判定（直送成功/visual_gap）；min(设置, 供应商上限) 判定；重编码+分块组合（段偏移、段级兜底）；config_hash 含供应商/模型 | REQ-055 |
 | T-VDIR-002 | 视频直送集成 | 全链路 fake 转写/直送器：完整→tier1、缺失→直送成功（多模态直接出摘要）/失败→visual_gap 支路 | REQ-055, REQ-051 |
 | T-RLY-001 | 自备中转 | fake relay 服务器（上传/取 URL/TTL）；relay 优先与上传失败回退；未配置行为不变；URL 不落库不落日志 | REQ-055, 决策 22 |
+| T-ANCH-001 | 转写引导锚点融合 | 锚点池（场景点 ∪ 转写段边界 ∪ 静音空档中点 ∪ 等间隔）三级吸附、去重、封顶、黑帧护栏；reason 四值；config_hash 随转写来源变化；无转写退化 | REQ-056, REQ-053 |
+| T-REORDER-001 | 入库双入队与链序 | 入队矩阵（auto on/off × 转写器可用/不可用）；priority 保序（转写先执行）；分析→摘要/转写→摘要双链去重；分析成功 ready 写点；REQ-033a 回归 | REQ-056, REQ-051 |
+| T-FRAME-001 | 帧理解分支 | 兜底/增强触发矩阵；联络表构建与瞬态帧不入 video_frames/artifact；逐条 video_time_range 证据与独立表示；visual_gap 收窄；越界格子丢弃 | REQ-057 |
+| T-FRAME-002 | 帧理解集成 | 全链路 fake：导入→双入队→转写→引导抽帧→摘要三分支→证据链完整；转写晚到→手动重分析→新分析身份并存、detail 取最新 | REQ-056, REQ-057 |
