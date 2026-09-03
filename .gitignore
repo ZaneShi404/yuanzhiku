@@ -4,6 +4,11 @@ frontend/node_modules/
 tests/runtime/*
 !tests/runtime/.gitkeep
 
+# Test cache and agent session state
+.pytest_cache/
+/.superpowers/
+/docs/superpowers/
+
 # Private local audit snapshots and agent session state
 /.zcode/
 /archives/*

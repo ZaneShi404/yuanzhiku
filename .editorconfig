@@ -1,0 +1,21 @@
+# EditorConfig — 与 .gitattributes 的 LF 规范对齐；PS1 需带 BOM（Windows PowerShell 5.1 中文必需）。
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+
+[*.ps1]
+charset = utf-8-bom
+
+[*.py]
+indent_style = space
+indent_size = 4
+
+[*.{ts,tsx,json,html,css,yml,yaml}]
+indent_style = space
+indent_size = 2
+
+[*.md]
+trim_trailing_whitespace = false
