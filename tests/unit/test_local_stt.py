@@ -281,7 +281,7 @@ def _analyzed_video(client, services) -> tuple[str, str]:
         def probe(self, artifact_path, limits, cancelled, heartbeat):
             return VideoMetadata("mov,mp4,m4a", 10_000, 320, 180, "h264", "aac")
 
-        def extract_frames(self, artifact_path, metadata, workspace, maximum_frames, limits, cancelled, heartbeat):
+        def extract_frames(self, artifact_path, metadata, workspace, maximum_frames, limits, cancelled, heartbeat, transcript_segments=None):
             return ()
 
     services.videos.analyzer = FakeAnalyzer()

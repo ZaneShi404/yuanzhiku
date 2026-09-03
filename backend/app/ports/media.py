@@ -53,7 +53,11 @@ class MediaAnalyzerPort(Protocol):
         limits: MediaProcessingLimits,
         cancelled: Callable[[], bool],
         heartbeat: Callable[[], None],
-    ) -> tuple[ExtractedVideoFrame, ...]: ...
+        transcript_segments: list[tuple[int, int]] | None = None,
+    ) -> tuple[ExtractedVideoFrame, ...]:
+        """``transcript_segments``（v1.7，REQ-056.2）为同版本转写表示的段级
+        video_time_range（毫秒起止）：非空时采样计划融合转写语义锚点；空/None
+        时为纯信号抽帧（行为与 v1.6 一致）。"""
 
 
 class MediaTranscriberPort(Protocol):

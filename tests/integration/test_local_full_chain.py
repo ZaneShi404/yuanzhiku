@@ -126,7 +126,7 @@ class _FakeMediaAnalyzer:
     def probe(self, artifact_path, limits, cancelled, heartbeat) -> VideoMetadata:
         return VideoMetadata("mov,mp4,m4a,3gp,3g2,mj2", 10_000, 320, 180, "h264", "aac")
 
-    def extract_frames(self, artifact_path, metadata, workspace, maximum_frames, limits, cancelled, heartbeat):
+    def extract_frames(self, artifact_path, metadata, workspace, maximum_frames, limits, cancelled, heartbeat, transcript_segments=None):
         frames: list[ExtractedVideoFrame] = []
         for ordinal in range(min(maximum_frames, 2)):
             path = workspace / f"frame-{ordinal}.jpg"

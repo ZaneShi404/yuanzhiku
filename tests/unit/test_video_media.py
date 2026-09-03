@@ -15,7 +15,8 @@ from fastapi.testclient import TestClient
 
 from app.core.config import data_paths
 from app.domain.media import ExtractedVideoFrame, MediaProcessingLimits, VideoMetadata
-from app.adapters.media import LocalFfmpegMediaAnalyzer, plan_frame_times
+from app.adapters.media import LocalFfmpegMediaAnalyzer, plan_frame_times, transcript_anchor_points
+from app.services.videos import analysis_config_hash
 from app.main import create_app
 
 
@@ -51,6 +52,7 @@ class FakeMediaAnalyzer:
         limits: MediaProcessingLimits,
         cancelled,
         heartbeat,
+        transcript_segments=None,
     ) -> tuple[ExtractedVideoFrame, ...]:
         assert artifact_path.is_file()
         assert metadata.duration_ms == 10_000
@@ -403,6 +405,71 @@ def test_plan_frame_times_scene_tolerance_and_dedupe() -> None:
     assert plan_frame_times(120_000, 12, [62_000]) == [(62_000, "scene")]
     # 相距不足 1 秒的时间点去重。
     assert plan_frame_times(200_000, 12, [99_500, 100_400]) == [(99_500, "scene")]
+
+
+def test_transcript_anchor_points_derives_boundaries_and_silence_midpoints() -> None:
+    # 段边界 → transcript 锚点；相邻段间 ≥2s 空档 → 中点 silence 锚点。
+    anchors = transcript_anchor_points([(1_000, 4_000), (5_000, 8_000), (12_000, 15_000)], 20_000)
+    assert (1_000, "transcript") in anchors and (4_000, "transcript") in anchors
+    assert (5_000, "transcript") in anchors and (12_000, "transcript") in anchors
+    # 4s→5s 空档仅 1s（<2s）：不派生静音锚点；8s→12s 空档 4s：中点 10s。
+    assert (4_500, "silence") not in anchors
+    assert (10_000, "silence") in anchors
+
+
+def test_transcript_anchor_points_clamps_and_skips_empty() -> None:
+    # 越界段钳制到时长范围、零长段跳过。
+    anchors = transcript_anchor_points([(-500, 0), (3_000, 3_000), (5_000, 25_000)], 20_000)
+    assert anchors == [(5_000, "transcript"), (20_000, "transcript")]
+    assert transcript_anchor_points([], 20_000) == []
+
+
+def test_plan_frame_times_snaps_transcript_and_silence_anchors() -> None:
+    # 转写锚点在容差内吸附为 transcript，容差外保留 even。
+    assert plan_frame_times(120_000, 12, [], [(61_000, "transcript")]) == [(61_000, "transcript")]
+    assert plan_frame_times(120_000, 12, [], [(70_000, "transcript")]) == [(60_000, "even")]
+    # 静音中点锚点同样吸附。
+    assert plan_frame_times(120_000, 12, [], [(60_000, "silence")]) == [(60_000, "silence")]
+
+
+def test_plan_frame_times_scene_beats_transcript_at_equal_distance() -> None:
+    # 同距并列（各距 1s）：场景点优先于转写锚点。
+    assert plan_frame_times(120_000, 12, [59_000], [(61_000, "transcript")]) == [(59_000, "scene")]
+
+
+def test_plan_frame_times_dedupe_prefers_higher_priority_anchor() -> None:
+    # 相距不足 1 秒：高优先级锚点（scene）胜出。
+    planned = plan_frame_times(200_000, 12, [100_400], [(99_500, "transcript")])
+    assert planned == [(100_400, "scene")]
+
+
+def test_extract_frames_uses_transcript_anchor_reasons(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """转写段边界/静音中点参与采样计划：命中帧标记 transcript/silence（v1.7）。"""
+    monkeypatch.setattr(LocalFfmpegMediaAnalyzer, "_run", _fake_run_writing_jpegs(scene_output=b""))
+    analyzer = LocalFfmpegMediaAnalyzer()
+    metadata = VideoMetadata("mov,mp4,m4a,3gp,3g2,mj2", 10_000, 1280, 720, "h264", "aac")
+    frames = analyzer.extract_frames(
+        tmp_path / "artifact.mp4", metadata, tmp_path / "frames", maximum_frames=12,
+        limits=MediaProcessingLimits(30.0, 1024 ** 3, 1024 ** 3),
+        cancelled=lambda: False, heartbeat=lambda: None,
+        transcript_segments=[(1_500, 3_500), (8_000, 9_400)],
+    )
+    # 槽位 500→1.5s 段起点、5000→5.75s 静音中点（3.5s→8s 空档）、9500→9.4s 段终点。
+    assert [(frame.time_ms, frame.reason) for frame in frames] == [
+        (1_500, "transcript"), (5_750, "silence"), (9_400, "transcript"),
+    ]
+
+
+def test_analysis_config_hash_identity_combines_transcript_source() -> None:
+    analyzer_hash = "analyzer-only"
+    # 无转写：与 v1.6 身份一致（同参数纯信号抽帧幂等复用既有分析）。
+    assert analysis_config_hash(analyzer_hash, None) == analyzer_hash
+    assert analysis_config_hash(analyzer_hash, "") == analyzer_hash
+    # 有转写：转写来源参与身份，不同来源构成不同分析身份。
+    with_transcript = analysis_config_hash(analyzer_hash, "fake-hash")
+    assert with_transcript != analyzer_hash
+    assert analysis_config_hash(analyzer_hash, "fake-hash") == with_transcript
+    assert analysis_config_hash(analyzer_hash, "other-hash") != with_transcript
 
 
 def _recently_exited_pid() -> int:

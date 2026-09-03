@@ -23,6 +23,18 @@ from app.ports.storage import ArtifactStoragePort
 from app.services.documents import DocumentService
 
 
+def analysis_config_hash(analyzer_hash: str, transcription_config_hash: str | None) -> str:
+    """v1.7（REQ-056.3，决策 24）：分析身份纳入转写引导来源。
+
+    无转写时与 v1.6 身份完全一致（同参数纯信号抽帧可幂等复用既有分析）；
+    有转写时以 sha256(分析器哈希:转写表示 config_hash) 构成新身份——转写
+    晚到或换引擎后的重分析构成新分析身份并存，绝不与旧身份共享帧集。
+    """
+    if not transcription_config_hash:
+        return analyzer_hash
+    return hashlib.sha256(f"{analyzer_hash}:{transcription_config_hash}".encode("utf-8")).hexdigest()
+
+
 class VideoService:
     def __init__(
         self,
@@ -86,6 +98,8 @@ class VideoService:
         cancelled: Callable[[], bool],
         heartbeat: Callable[[], None],
         progress: Callable[[int, str], None],
+        transcript_segments: list[tuple[int, int]] | None = None,
+        transcription_config_hash: str | None = None,
     ) -> dict:
         path = self.artifacts.artifact_path(artifact_sha256)
         if not path.is_file():
@@ -99,13 +113,18 @@ class VideoService:
         if cancelled():
             raise MediaProcessingCancelled()
         progress(30, "正在提取时间采样关键帧")
-        config_hash = self.analyzer.config_hash(maximum_frames)
+        # v1.7（REQ-056.3，决策 24）：分析身份纳入转写引导来源——同一采样参数下
+        # 无转写 / 有转写 / 换转写引擎构成不同分析身份；无转写时与 v1.6 身份
+        # 完全一致（同参数纯信号抽帧可幂等复用既有分析），转写来源本身经
+        # config_hash 可审计，不重复写入元数据。
+        config_hash = analysis_config_hash(self.analyzer.config_hash(maximum_frames), transcription_config_hash)
         workspace = self.artifacts.staging_path().with_suffix("")
         workspace.mkdir(parents=True, exist_ok=False)
         stored_frames: list[dict[str, object]] = []
         try:
             frames = self.analyzer.extract_frames(
-                path, metadata, workspace, maximum_frames, execution_limits, cancelled, heartbeat
+                path, metadata, workspace, maximum_frames, execution_limits, cancelled, heartbeat,
+                transcript_segments=transcript_segments or [],
             )
             total = len(frames)
             for index, frame in enumerate(frames, start=1):

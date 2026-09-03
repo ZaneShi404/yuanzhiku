@@ -35,18 +35,67 @@ SAMPLING_SCENE_THRESHOLD = 0.3
 
 _SCENE_TIME_PATTERN = re.compile(r"pts_time:([0-9]+(?:\.[0-9]+)?)")
 
+# 锚点标签吸附优先级（v1.7，REQ-053 修订）：scene > transcript > silence > even。
+# 无转写锚点时取值集合退化为 {scene, even}，与 v1.6 行为逐位一致。
+_ANCHOR_PRIORITY = {"scene": 0, "transcript": 1, "silence": 2, "even": 3}
+# 相邻语音段之间静音空档达到该时长才派生中点锚点（更短的空档由两端点覆盖）。
+_SILENCE_GAP_MIN_MS = 2_000
+
+
+def transcript_anchor_points(
+    segments: list[tuple[int, int]],
+    duration_ms: int,
+) -> list[tuple[int, str]]:
+    """从转写段（毫秒起止）派生语义锚点：段起点/终点（transcript）与相邻段
+    之间 ≥2s 静音空档的中点（silence——长静音是画面切换高发区，也是「语音里
+    没有的画面信息」的唯一本地线索）。纯本地计算，零网络。
+    """
+    points: list[tuple[int, str]] = []
+    previous_end: int | None = None
+    for start_ms, end_ms in sorted(segments):
+        start_ms = max(0, min(int(start_ms), duration_ms))
+        end_ms = max(0, min(int(end_ms), duration_ms))
+        if end_ms <= start_ms:
+            continue
+        points.append((start_ms, "transcript"))
+        points.append((end_ms, "transcript"))
+        if previous_end is not None and start_ms - previous_end >= _SILENCE_GAP_MIN_MS:
+            points.append(((previous_end + start_ms) // 2, "silence"))
+        previous_end = end_ms if previous_end is None else max(previous_end, end_ms)
+    return points
+
+
+def _anchor_pool(
+    scene_times_ms: list[int] | tuple[int, ...],
+    transcript_anchors: list[tuple[int, str]] | None,
+    duration_ms: int,
+) -> dict[int, str]:
+    """合并场景点与转写语义点为锚点池（同刻按 scene > transcript/silence 优先保留）。"""
+    anchors: dict[int, str] = {}
+    for time_ms in scene_times_ms:
+        time_ms = int(time_ms)
+        if 0 < time_ms < duration_ms:
+            anchors.setdefault(time_ms, "scene")
+    for time_ms, label in transcript_anchors or []:
+        time_ms = int(time_ms)
+        if 0 < time_ms < duration_ms:
+            anchors.setdefault(time_ms, label)
+    return anchors
+
 
 def plan_frame_times(
     duration_ms: int,
     maximum_frames: int,
     scene_times_ms: list[int] | tuple[int, ...],
+    transcript_anchors: list[tuple[int, str]] | None = None,
 ) -> list[tuple[int, str]]:
-    """规划关键帧时间点：场景切换优先，等间隔槽位兜底。
+    """规划关键帧时间点：场景切换优先，转写语义锚点次之，等间隔槽位兜底。
 
     规则：短视频（<120s）至少抽 3 帧；长视频目标帧数为 ceil(时长/120s)，
     并以 maximum_frames 封顶。首槽锚定约 5%、末槽约 95%，中间槽均匀分布；
-    每个槽位在半个槽距容差内吸附最近的未使用场景点，吸不到就保留等间隔
-    位置；相距不足 1 秒的时间点去重（同距优先保留场景帧）。
+    每个槽位在半个槽距容差内按 scene > transcript/silence > even 优先级吸附
+    最近的未使用锚点，吸不到就保留等间隔位置；相距不足 1 秒的时间点去重
+    （同距优先保留高优先级锚点）。
     """
     if duration_ms <= 0:
         return []
@@ -61,23 +110,27 @@ def plan_frame_times(
         ideals = [round(duration_ms * 0.5)]
     else:
         ideals = [round(first + (last - first) * index / (count - 1)) for index in range(count)]
-    scenes = sorted({int(time_ms) for time_ms in scene_times_ms if 0 < time_ms < duration_ms})
+    anchors = _anchor_pool(scene_times_ms, transcript_anchors, duration_ms)
     tolerance = round((last - first) / (count - 1) / 2) if count > 1 else round(duration_ms * 0.05)
-    used_scenes: set[int] = set()
+    used_anchors: set[int] = set()
     planned: list[tuple[int, str]] = []
     for ideal in ideals:
-        candidates = [time_ms for time_ms in scenes if time_ms not in used_scenes and abs(time_ms - ideal) <= tolerance]
-        scene = min(candidates, key=lambda time_ms: abs(time_ms - ideal), default=None)
-        if scene is None:
+        candidates = [
+            (time_ms, label)
+            for time_ms, label in anchors.items()
+            if time_ms not in used_anchors and abs(time_ms - ideal) <= tolerance
+        ]
+        if not candidates:
             planned.append((ideal, "even"))
-        else:
-            planned.append((scene, "scene"))
-            used_scenes.add(scene)
-    planned.sort(key=lambda item: (item[0], item[1] != "scene"))
+            continue
+        time_ms, label = min(candidates, key=lambda item: (abs(item[0] - ideal), _ANCHOR_PRIORITY[item[1]]))
+        planned.append((time_ms, label))
+        used_anchors.add(time_ms)
+    planned.sort(key=lambda item: (item[0], _ANCHOR_PRIORITY[item[1]]))
     result: list[tuple[int, str]] = []
     for time_ms, reason in planned:
         if result and time_ms - result[-1][0] < 1000:
-            if reason == "scene" and result[-1][1] == "even":
+            if _ANCHOR_PRIORITY[reason] < _ANCHOR_PRIORITY[result[-1][1]]:
                 result[-1] = (time_ms, reason)
             continue
         result.append((time_ms, reason))
@@ -338,24 +391,29 @@ class LocalFfmpegMediaAnalyzer(MediaAnalyzerPort):
         limits: MediaProcessingLimits,
         cancelled: Callable[[], bool],
         heartbeat: Callable[[], None],
+        transcript_segments: list[tuple[int, int]] | None = None,
     ) -> tuple[ExtractedVideoFrame, ...]:
         if not 1 <= maximum_frames <= 32:
             raise ValueError("maximum_frames")
         workspace.mkdir(parents=True, exist_ok=True)
         scene_times = self._scene_times(artifact_path, metadata, limits, cancelled, heartbeat)
-        planned = plan_frame_times(metadata.duration_ms, maximum_frames, scene_times)
+        transcript_anchors = transcript_anchor_points(transcript_segments or [], metadata.duration_ms)
+        anchor_pool = _anchor_pool(scene_times, transcript_anchors, metadata.duration_ms)
+        planned = plan_frame_times(metadata.duration_ms, maximum_frames, scene_times, transcript_anchors)
         shift = max(1_000, round(metadata.duration_ms * 0.05))
+        anchor_times = {time_ms for time_ms, _ in planned}
         frames: list[ExtractedVideoFrame] = []
         for ordinal, (time_ms, reason) in enumerate(planned):
             if cancelled():
                 raise MediaProcessingCancelled()
             destination = workspace / f"frame-{ordinal + 1:02d}.jpg"
-            # 黑帧时依次尝试：未使用的最近场景点、±5% 平移的等距点；仍黑则接受当前结果。
-            unused_scenes = sorted(
-                (scene for scene in scene_times if scene not in {time for time, _ in planned}),
-                key=lambda scene: abs(scene - time_ms),
+            # 黑帧时依次尝试：未使用的最近锚点（场景点 + 转写语义点，v1.7）、
+            # ±5% 平移的等距点；仍黑则接受当前结果。
+            unused_anchors = sorted(
+                (candidate for candidate in anchor_pool if candidate not in anchor_times),
+                key=lambda candidate: abs(candidate - time_ms),
             )
-            candidates = [time_ms, *unused_scenes[:2], time_ms - shift, time_ms + shift]
+            candidates = [time_ms, *unused_anchors[:2], time_ms - shift, time_ms + shift]
             candidates = [
                 candidate for index, candidate in enumerate(candidates)
                 if 0 < candidate < metadata.duration_ms and candidate not in candidates[:index]
