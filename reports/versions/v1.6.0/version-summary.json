@@ -1,7 +1,49 @@
 {
   "schema_version": 1,
-  "purpose": "Frozen identities for every known V1 audit candidate and its acceptance record. Version summaries must reproduce this ordered chain exactly.",
-  "entries": [
+  "report_id": "RPT-V1-6-0-SUMMARY-001",
+  "recorded_at_utc": "2026-09-03T06:50:00Z",
+  "report_kind": "version_summary",
+  "author_role": "release_management",
+  "independence": "not_applicable",
+  "product_version": "v1.6.0",
+  "decision_scope": "version_archive",
+  "verdict": "accepted",
+  "requirements": [],
+  "defects": [],
+  "evidence_refs": [
+    "reports/development/20260903T062808Z-v1-6-hardening-implementation.md",
+    "reports/testing/20260903T062808Z-v1-6-hardening-regression.md",
+    "reports/infrastructure/20260903T062808Z-v1-6-env-rebuild-dependency-upgrade.md",
+    "reports/testing/20260903T064125Z-v1-6-hardening-candidate-acceptance.md",
+    "reports/testing/20260903T064624Z-v1-6-final-record-acceptance.md"
+  ],
+  "release_gates": [
+    {
+      "gate_id": "GATE-PG-PHYSICAL",
+      "status": "blocked",
+      "requirements": [
+        "REQ-045"
+      ]
+    },
+    {
+      "gate_id": "GATE-COMPOSE-PHYSICAL",
+      "status": "blocked",
+      "requirements": [
+        "REQ-045"
+      ]
+    },
+    {
+      "gate_id": "GATE-BROWSER-BLACKBOX",
+      "status": "passed",
+      "requirements": []
+    },
+    {
+      "gate_id": "GATE-RELEASE-READINESS",
+      "status": "blocked",
+      "requirements": []
+    }
+  ],
+  "snapshot_chain": [
     {
       "run_id": "20260730T110828Z",
       "manifest_sha256": "7fd9cc5afd3576b959989c1a43abca4f75b5599d126fd8017ca56f55577b49da",
@@ -138,5 +180,7 @@
       "acceptance_report_sha256": "bfab802f478fa0ab9e0292ad77a534be1d0f68f6bc4e3f91a030cd7a75ee3d53",
       "supersedes_run_id": "20260903T063956Z-v1-6-hardening-candidate"
     }
-  ]
+  ],
+  "recommended_snapshot_run_id": "20260815T082711Z-v1-3-final-record",
+  "summary": "v1.6.0（可靠性与安全加固）的本周期候选快照 20260903T063956Z-v1-6-hardening-candidate 与最终记录快照 20260903T064539Z-v1-6-final-record 均以 non_independent（同会话自我验收，另含一次全新上下文代理的对抗性代码复核）通过 archive_local 验收并被接受登记。按归档政策的独立性口径，本版本推荐审计快照保持为上一独立验收记录 20260815T082711Z-v1-3-final-record，v1.6.0 快照待独立 archive_local 验收后方可进入推荐位。这不是产品发布批准：真实 PostgreSQL 迁移/还原与 Docker Compose 物理拓扑门禁仍为 blocked，release_readiness 保持 blocked（浏览器黑盒已在门禁执行轮完成库页面与设置页实证）。"
 }
