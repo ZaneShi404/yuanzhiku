@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "report_id": "RPT-V1-6-HARDENING-CANDIDATE-ACCEPTANCE-20260903T064125Z-001",
+  "recorded_at_utc": "2026-09-03T06:41:25Z",
+  "report_kind": "acceptance",
+  "author_role": "acceptance",
+  "independence": "non_independent",
+  "product_version": "v1.6.0",
+  "decision_scope": "archive_local",
+  "verdict": "accepted",
+  "requirements": [
+    "REQ-040",
+    "REQ-041",
+    "REQ-042",
+    "REQ-046"
+  ],
+  "defects": [],
+  "evidence_refs": [
+    "reports/testing/20260903T064125Z-v1-6-hardening-candidate-acceptance.md"
+  ],
+  "release_gates": [
+    {
+      "gate_id": "GATE-UNIT-INTEGRATION-REGRESSION",
+      "status": "passed",
+      "requirements": [
+        "REQ-040",
+        "REQ-041",
+        "REQ-042",
+        "REQ-046"
+      ]
+    },
+    {
+      "gate_id": "GATE-FRONTEND-BUILD",
+      "status": "passed",
+      "requirements": []
+    },
+    {
+      "gate_id": "GATE-BROWSER-BLACKBOX",
+      "status": "passed",
+      "requirements": []
+    },
+    {
+      "gate_id": "GATE-COMPOSE-PHYSICAL",
+      "status": "blocked",
+      "requirements": []
+    },
+    {
+      "gate_id": "GATE-RELEASE-READINESS",
+      "status": "blocked",
+      "requirements": []
+    }
+  ],
+  "archive_run_id": "20260903T063956Z-v1-6-hardening-candidate",
+  "archive_manifest_sha256": "dd1819b0e68ce7826b9cdb79549224982b9319235080c5921c074c4f9eec5a6e",
+  "summary": "v1.6.0 加固周期候选归档 20260903T063956Z-v1-6-hardening-candidate 的 archive_local 裁定：accepted（non_independent，与构建/开发同会话，按政策如实标注；本快照可被接受登记但不进入推荐位）。该候选承载 v1.6.0 可靠性与安全加固的 21 个实现提交与本周期开发/测试/基础设施三份双件制报告。归档目录与同名压缩包均通过独立验证（退出码 0）；manifest 自哈希 dd1819b0… 复核一致；四个已清除敏感字面量全历史检索归零；遗留登记的发布脱敏哈希修正已同步。本裁定仅限 archive_local，不等于 release approval；release_readiness 保持 blocked。"
+}
