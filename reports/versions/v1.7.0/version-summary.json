@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "report_id": "RPT-V1-7-0-SUMMARY-001",
+  "recorded_at_utc": "2026-09-04T05:10:00Z",
+  "report_kind": "version_summary",
+  "author_role": "release_management",
+  "independence": "not_applicable",
+  "product_version": "v1.7.0",
+  "decision_scope": "version_archive",
+  "verdict": "accepted",
+  "requirements": [
+    "REQ-016",
+    "REQ-017",
+    "REQ-043",
+    "REQ-044",
+    "REQ-051",
+    "REQ-052",
+    "REQ-053",
+    "REQ-055",
+    "REQ-056",
+    "REQ-057"
+  ],
+  "defects": [],
+  "evidence_refs": [
+    "reports/development/20260904T044500Z-v1-7-frame-pipeline-implementation.md",
+    "reports/testing/20260904T050000Z-v1-7-frame-pipeline-regression.md",
+    "docs/v1-7-requirements.md",
+    "docs/decisions/ADR-012-transcript-guided-frame-sampling.md",
+    "docs/decisions/ADR-013-frame-understanding-fallback.md"
+  ],
+  "release_gates": [
+    {
+      "gate_id": "GATE-UNIT-INTEGRATION-REGRESSION",
+      "status": "passed",
+      "requirements": ["REQ-056", "REQ-057"]
+    },
+    {
+      "gate_id": "GATE-PROVIDER-FRAME-SMOKE",
+      "status": "blocked",
+      "requirements": ["REQ-057"]
+    },
+    {
+      "gate_id": "GATE-UI-BLACKBOX",
+      "status": "blocked",
+      "requirements": ["REQ-044"]
+    },
+    {
+      "gate_id": "GATE-INDEPENDENT-REVIEW",
+      "status": "blocked",
+      "requirements": ["REQ-046"]
+    },
+    {
+      "gate_id": "GATE-PG-PHYSICAL",
+      "status": "blocked",
+      "requirements": ["REQ-045"]
+    },
+    {
+      "gate_id": "GATE-COMPOSE-PHYSICAL",
+      "status": "blocked",
+      "requirements": ["REQ-045"]
+    }
+  ]
+}

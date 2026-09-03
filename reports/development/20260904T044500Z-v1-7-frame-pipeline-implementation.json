@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "report_id": "RPT-V1-7-FRAME-PIPELINE-IMPLEMENTATION-20260904T044500Z-001",
+  "recorded_at_utc": "2026-09-04T04:45:00Z",
+  "report_kind": "development",
+  "author_role": "development",
+  "independence": "non_independent",
+  "product_version": "v1.7.0",
+  "decision_scope": "archive_local",
+  "verdict": "accepted",
+  "requirements": [
+    "REQ-016",
+    "REQ-017",
+    "REQ-043",
+    "REQ-044",
+    "REQ-051",
+    "REQ-052",
+    "REQ-053",
+    "REQ-055",
+    "REQ-056",
+    "REQ-057"
+  ],
+  "defects": [],
+  "evidence_refs": [
+    "docs/v1-7-requirements.md",
+    "docs/v1-7-implementation-plan.md",
+    "reports/testing/20260904T050000Z-v1-7-frame-pipeline-regression.md"
+  ],
+  "release_gates": [
+    {
+      "gate_id": "GATE-UNIT-INTEGRATION-REGRESSION",
+      "status": "passed",
+      "requirements": ["REQ-056", "REQ-057"]
+    },
+    {
+      "gate_id": "GATE-PROVIDER-FRAME-SMOKE",
+      "status": "blocked",
+      "requirements": ["REQ-057"]
+    },
+    {
+      "gate_id": "GATE-INDEPENDENT-REVIEW",
+      "status": "blocked",
+      "requirements": ["REQ-046"]
+    }
+  ]
+}
