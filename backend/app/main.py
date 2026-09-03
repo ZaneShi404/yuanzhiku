@@ -908,10 +908,13 @@ def create_app(
                 source_date=source_date, domains=domain_values, genres=genre_values, tags=tag_values,
             )
             expected_bytes = file.size if isinstance(file.size, int) and file.size >= 0 else None
+            # v1.7（REQ-056.1）：按入队矩阵同事务入队转写（优先级高于分析，
+            # 保证转写先执行、分析可读取转写表示）；矩阵不满足时仅入队分析。
             return svc.imports.video(
                 file.file, file.filename or "upload.bin", validated.title, rights.value, author, language,
                 notes, validated.domains, validated.genres, validated.tags, expected_bytes,
                 validated.source_date.isoformat() if validated.source_date else None,
+                extra_job=svc.jobs.video_transcribe_extra_job(),
             )
         except (ValueError, StorageLimitError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc

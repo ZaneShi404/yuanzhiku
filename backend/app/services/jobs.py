@@ -127,6 +127,10 @@ class JobLeaseLost(RuntimeError):
 # 版本完整性与来源处理状态。
 AI_JOB_KINDS = {"video_transcribe", "video_summarize", "source_classify"}
 
+# v1.7（REQ-056.1）：视频入库时转写作业以更高优先级与视频分析同事务入队，
+# 单 worker 按 priority DESC 领取，保证转写先于分析执行（转写引导抽帧）。
+TRANSCRIBE_INGEST_PRIORITY = 110
+
 
 def _select_transcriber(
     engine: str,
@@ -541,6 +545,19 @@ class JobService:
             result_queue.close()
             shutil.rmtree(workspace, ignore_errors=True)
 
+    def _transcription_ranges(self, transcription: dict) -> list[tuple[int, int]]:
+        """转写表示证据中的 video_time_range 定位（毫秒起止，升序）。"""
+        ranges: list[tuple[int, int]] = []
+        for row in self.repository.evidence_for_representation(transcription["id"]):
+            try:
+                locator = json.loads(row["locator_json"])
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if isinstance(locator, dict) and locator.get("type") == "video_time_range":
+                ranges.append((max(0, int(locator.get("start_ms") or 0)), max(0, int(locator.get("end_ms") or 0))))
+        ranges.sort()
+        return ranges
+
     def _video_analyze(self, job: dict) -> None:
         if self.videos is None:
             if self._finish(job, "blocked", "本地视频分析服务不可用", progress=100):
@@ -563,6 +580,15 @@ class JobService:
             maximum_memory_bytes=memory_limit_mb * 1024 * 1024,
             maximum_workspace_bytes=disk_limit_mb * 1024 * 1024,
         )
+        # v1.7（REQ-056.2，决策 24）：读取同版本转写表示做锚点融合——语音说了
+        # 什么的时刻值得看画面。无转写表示（未跑/失败/blocked）时按纯信号策略
+        # 抽帧，行为与 v1.6 一致；分析本身保持零网络。
+        transcription = self._latest_representation(job["content_version_id"], "transcription")
+        transcript_segments: list[tuple[int, int]] = []
+        transcription_config_hash: str | None = None
+        if transcription is not None:
+            transcript_segments = self._transcription_ranges(transcription)
+            transcription_config_hash = transcription.get("config_hash")
         self.videos.analyze(
             version_id=job["content_version_id"],
             artifact_sha256=job["artifact_sha256"],
@@ -571,17 +597,26 @@ class JobService:
             cancelled=lambda: self.repository.job_cancel_requested(job["id"]),
             heartbeat=lambda: self._heartbeat(job),
             progress=lambda value, message: self._update_video_progress(job, value, message),
+            transcript_segments=transcript_segments,
+            transcription_config_hash=transcription_config_hash,
         )
         if self.repository.job_cancel_requested(job["id"]):
             self._finish(job, "cancelled", "视频分析已取消")
             return
         # 最终租约栅栏（加固计划 Task 8）：完整性与来源状态、链式后继作业
         # 与作业终态在同一事务内提交；租约丢失时整体无效。
-        child_jobs = (
-            self._chained_child_if_due("video_transcribe", job)
-            if self._auto_pipeline_enabled() and self._transcriber_available() and job["content_version_id"]
-            else []
-        )
+        # v1.7（REQ-056.1）：入库已按入队矩阵同事务入队转写（更高优先级先
+        # 执行）。此处仅兜底补链——无转写表示且转写器可用（如入库后才配置
+        # 转写）时补入队转写；已有转写表示时链式摘要。转写仍在排队/运行中
+        # 时两者皆不链：转写成功路径自身会链式摘要，避免摘要先行终态失败。
+        child_jobs: list[dict[str, Any]] = []
+        if self._auto_pipeline_enabled() and job["content_version_id"]:
+            transcription = self._latest_representation(job["content_version_id"], "transcription")
+            if transcription is None:
+                if self._transcriber_available():
+                    child_jobs = self._chained_child_if_due("video_transcribe", job)
+            elif self.media_ai is not None and self.media_ai.capability().get("understand_enabled"):
+                child_jobs = self._chained_child_if_due("video_summarize", job)
         if not self.repository.commit_job_success(
             job["id"], job["lease_token"],
             message="本地视频分析完成",
@@ -617,6 +652,15 @@ class JobService:
 
     def _auto_pipeline_enabled(self) -> bool:
         return self.repository.get_settings().get("ai_auto_pipeline", "on") == "on"
+
+    def video_transcribe_extra_job(self) -> tuple[str, int] | None:
+        """v1.7 入库入队矩阵（REQ-056.1，决策 23）：auto_pipeline 开且任一转写
+        路径可用时，返回与 video_analyze 同事务入队的转写作业 (kind, priority)；
+        否则返回 None（auto 关 = 保持「分析自动、转写手动」语义；转写器不可用
+        = 分析退化为纯信号抽帧路径）。"""
+        if self._auto_pipeline_enabled() and self._transcriber_available():
+            return ("video_transcribe", TRANSCRIBE_INGEST_PRIORITY)
+        return None
 
     def _chained_child_if_due(self, kind: str, job: dict) -> list[dict[str, Any]]:
         """构造链式后继作业行（加固计划 Task 7/8）：同版本同 kind 已有排队/
@@ -867,15 +911,7 @@ class JobService:
             except (TypeError, ValueError, json.JSONDecodeError):
                 duration_ms = 0
         # 最长静音：转写证据时间范围之间的最大空档（含首尾）。
-        ranges: list[tuple[int, int]] = []
-        for row in self.repository.evidence_for_representation(transcription["id"]):
-            try:
-                locator = json.loads(row["locator_json"])
-            except (TypeError, ValueError, json.JSONDecodeError):
-                continue
-            if isinstance(locator, dict) and locator.get("type") == "video_time_range":
-                ranges.append((max(0, int(locator.get("start_ms") or 0)), max(0, int(locator.get("end_ms") or 0))))
-        ranges.sort()
+        ranges = self._transcription_ranges(transcription)
         max_silence_ms = 0
         cursor = 0
         for start_ms, end_ms in ranges:
@@ -1249,13 +1285,14 @@ class JobService:
                     media_type=result.media_type,
                     source_id=derived_identifier("source", job["id"], "source"),
                     version_id=derived_identifier("source", job["id"], "version"),
+                    extra_job=self.video_transcribe_extra_job(),
                 )
             self.repository.audit("video_download", ingested["source"]["id"], "succeeded")
-            # 最终租约栅栏（Task 8）：来源/版本/provenance/后继 video_analyze 已由
+            # 最终租约栅栏（Task 8）：来源/版本/provenance/后继作业已由
             # create_ingest 同事务写入；此处仅提交作业终态本身。
             if not self.repository.commit_job_success(
                 job["id"], job["lease_token"],
-                message="链接下载完成，已排入本地视频分析",
+                message="链接下载完成，已排入语音转写与本地分析",
             ):
                 raise JobLeaseLost()
         finally:

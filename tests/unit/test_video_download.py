@@ -84,7 +84,7 @@ class FakeMediaAnalyzer:
 
     def extract_frames(
         self, artifact_path: Path, metadata: VideoMetadata, workspace: Path, maximum_frames: int,
-        limits: MediaProcessingLimits, cancelled, heartbeat,
+        limits: MediaProcessingLimits, cancelled, heartbeat, transcript_segments=None,
     ) -> tuple[ExtractedVideoFrame, ...]:
         assert artifact_path.is_file()
         frames: list[ExtractedVideoFrame] = []
@@ -1575,7 +1575,7 @@ def test_synthetic_download_full_chain(
         )
         completed = _claim_and_run(services)
         assert completed["id"] == job["id"] and completed["state"] == "succeeded", completed
-        assert completed["message"] == "链接下载完成，已排入本地视频分析"
+        assert completed["message"] == "链接下载完成，已排入语音转写与本地分析"
 
         # 回环代理记录断言：全部出站 ⊆ 测试注册表，且无任何外联
         assert len(proxies) == 1

@@ -757,6 +757,7 @@ class SqliteRepository:
         rights: str, domains: list[str], genres: list[str], tags: list[str], artifact_sha256: str, original_name: str,
         media_type: str | None, byte_size: int, job_payload: dict[str, Any], priority: int,
         audit_event: str, source_date: str | None = None, job_kind: str = "parse",
+        extra_job: tuple[str, int] | None = None,
         download_provenance: dict[str, Any] | None = None,
         source_id: str | None = None, version_id: str | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
@@ -768,6 +769,10 @@ class SqliteRepository:
         most one provenance row. The caller compensates the physical artifact
         only when this transaction fails and it created the content-addressed
         file itself.
+
+        ``extra_job``（REQ-056.1，v1.7）为 (kind, priority) 二元组：视频入库
+        时与首个作业同事务入队的转写作业（优先级更高，保证单 worker 串行下
+        先于分析执行）。重放路径（来源已存在）不重复入队。
 
         确定性身份（加固计划 Task 7）：传入 source_id/version_id 时为
         insert-or-return 重放——已存在且 artifact 一致即返回既有行；不一致
@@ -815,6 +820,13 @@ class SqliteRepository:
                    VALUES(?,?,?,?,?,?,?,?,? ,0,NULL,0,?,?,?)""",
                 (job_id, job_kind, source_id, version_id, artifact_sha256, None, json.dumps(job_payload), priority, "queued", self._configured_max_attempts(connection), stamp, stamp),
             )
+            if extra_job is not None:
+                extra_kind, extra_priority = extra_job
+                connection.execute(
+                    """INSERT INTO jobs(id,kind,source_id,content_version_id,artifact_sha256,config_hash,payload_json,priority,state,progress,message,attempt_count,max_attempts,created_at,updated_at)
+                       VALUES(?,?,?,?,?,?,?,?,?,0,NULL,0,?,?,?)""",
+                    (identifier(), extra_kind, source_id, version_id, artifact_sha256, None, json.dumps(job_payload), extra_priority, "queued", self._configured_max_attempts(connection), stamp, stamp),
+                )
             connection.execute(
                 "INSERT INTO audit_events(id, event_type, entity_id, result, created_at) VALUES(?, ?, ?, ?, ?)",
                 (identifier(), audit_event, source_id, "queued", stamp),

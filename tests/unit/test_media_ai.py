@@ -67,7 +67,7 @@ class FakeMediaAnalyzer:
     def probe(self, artifact_path: Path, limits: MediaProcessingLimits, cancelled, heartbeat) -> VideoMetadata:
         return VideoMetadata("mov,mp4,m4a,3gp,3g2,mj2", 10_000, 320, 180, "h264", "aac")
 
-    def extract_frames(self, artifact_path, metadata, workspace, maximum_frames, limits, cancelled, heartbeat):
+    def extract_frames(self, artifact_path, metadata, workspace, maximum_frames, limits, cancelled, heartbeat, transcript_segments=None):
         frames: list[ExtractedVideoFrame] = []
         for ordinal in range(min(maximum_frames, 2)):
             path = workspace / f"frame-{ordinal}.jpg"
@@ -557,12 +557,14 @@ def test_auto_pipeline_chains_video_jobs_and_applies_only_empty_fields(client_an
     monkeypatch.setattr(services.api_transcriber, "_transcription_caller", _fake_transcription_calls([]))
     monkeypatch.setattr(services.media_ai, "_completion_caller", lambda **kwargs: _completion_response(_summary_payload()))
 
-    analyzed = services.jobs.run_once()
-    assert analyzed is not None and analyzed["kind"] == "video_analyze" and analyzed["state"] == "succeeded"
-    assert _queued_kinds(services) == ["video_transcribe"]
-
+    # v1.7 入队矩阵：入库即同队列转写（priority 110）与分析（100），转写先执行。
     transcribed = services.jobs.run_once()
     assert transcribed is not None and transcribed["kind"] == "video_transcribe" and transcribed["state"] == "succeeded"
+    assert _queued_kinds(services) == ["video_summarize"]
+
+    analyzed = services.jobs.run_once()
+    assert analyzed is not None and analyzed["kind"] == "video_analyze" and analyzed["state"] == "succeeded"
+    # 摘要已由转写成功链式入队：分析成功不重复入队（同 version+kind 去重）。
     assert _queued_kinds(services) == ["video_summarize"]
 
     summarized = services.jobs.run_once()
@@ -585,7 +587,7 @@ def test_auto_pipeline_toggle_off_disables_chaining(client_and_services, monkeyp
 
     _upload_video(client)
     analyzed = services.jobs.run_once()
-    assert analyzed is not None and analyzed["state"] == "succeeded"
+    assert analyzed is not None and analyzed["kind"] == "video_analyze" and analyzed["state"] == "succeeded"
     assert "video_transcribe" not in {job["kind"] for job in services.repository.list_jobs()}
 
 
@@ -606,6 +608,51 @@ def test_auto_pipeline_unconfigured_ai_creates_no_chained_jobs(client_and_servic
     assert not kinds.intersection({"video_transcribe", "video_summarize", "source_classify"})
 
 
+def test_ingest_enqueue_matrix_prioritizes_transcription(client_and_services) -> None:
+    """v1.7 入队矩阵（REQ-056.1，决策 23）：转写器可用时入库同事务入队转写
+    （priority 110）与分析（100）；单 worker 按 priority DESC 领取，转写先执行，
+    分析得以读取转写表示做锚点融合。"""
+    client, services = client_and_services
+    _configure_ai(client)
+    source_id, version_id = _upload_video(client)
+    jobs = {
+        job["kind"]: job
+        for job in services.repository.list_jobs()
+        if job["kind"] in {"video_transcribe", "video_analyze"}
+    }
+    assert set(jobs) == {"video_transcribe", "video_analyze"}
+    assert jobs["video_transcribe"]["priority"] == 110
+    assert jobs["video_analyze"]["priority"] == 100
+    assert jobs["video_transcribe"]["content_version_id"] == version_id
+    assert jobs["video_transcribe"]["state"] == "queued"
+
+    first = services.jobs.run_once()
+    assert first is not None and first["kind"] == "video_transcribe"
+
+
+def test_analyze_chains_transcribe_when_configured_late(client_and_services, monkeypatch: pytest.MonkeyPatch) -> None:
+    """转写晚于入库、早于分析执行时可用（入库矩阵未命中）：分析成功时无转写
+    表示且转写器已可用 → 补链转写而非摘要（摘要先行会终态失败）；转写成功
+    后再链式摘要——保持 v1.6「配置在后」流程的自动串联。"""
+    client, services = client_and_services
+    _upload_video(client)
+    _configure_ai(client)
+    monkeypatch.setattr("app.services.jobs.extract_audio_chunks", _jobs_audio_extractor)
+    monkeypatch.setattr(services.api_transcriber, "_transcription_caller", _fake_transcription_calls([]))
+    monkeypatch.setattr(services.media_ai, "_completion_caller", lambda **kwargs: _completion_response(_summary_payload()))
+
+    analyzed = services.jobs.run_once()
+    assert analyzed is not None and analyzed["kind"] == "video_analyze" and analyzed["state"] == "succeeded"
+    assert _queued_kinds(services) == ["video_transcribe"]
+
+    transcribed = services.jobs.run_once()
+    assert transcribed is not None and transcribed["kind"] == "video_transcribe" and transcribed["state"] == "succeeded"
+    assert _queued_kinds(services) == ["video_summarize"]
+
+    summarized = services.jobs.run_once()
+    assert summarized is not None and summarized["kind"] == "video_summarize" and summarized["state"] == "succeeded"
+
+
 def test_auto_apply_noop_when_suggestions_empty(client_and_services, monkeypatch: pytest.MonkeyPatch) -> None:
     client, services = client_and_services
     _configure_ai(client)
@@ -618,7 +665,7 @@ def test_auto_apply_noop_when_suggestions_empty(client_and_services, monkeypatch
         "suggested_genres": [],
         "suggested_tags": [],
     }))
-    for expected_kind in ("video_analyze", "video_transcribe", "video_summarize"):
+    for expected_kind in ("video_transcribe", "video_analyze", "video_summarize"):
         finished = services.jobs.run_once()
         assert finished is not None and finished["kind"] == expected_kind and finished["state"] == "succeeded"
     source = services.repository.get_source(source_id)

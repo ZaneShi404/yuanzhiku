@@ -86,7 +86,7 @@ class ImportService:
         *, encoded: bytes | None, stream: BinaryIO | None, expected_bytes: int | None, source_type: str,
         title: str, author: str | None, language: str, notes: str | None, rights: str,
         domains: list[str], genres: list[str], tags: list[str], original_name: str, media_type: str, audit_event: str,
-        source_date: str | None, job_kind: str = "parse",
+        source_date: str | None, job_kind: str = "parse", extra_job: tuple[str, int] | None = None,
     ) -> dict:
         # Filesystem and database cannot share a transaction. Serialize the small
         # orchestration window and compensate only a file this operation created.
@@ -112,6 +112,7 @@ class ImportService:
                     priority=100,
                     audit_event=audit_event,
                     job_kind=job_kind,
+                    extra_job=extra_job,
                 )
             except Exception:
                 if stored.was_new and self.repository.delete_artifact_if_unreferenced(stored.sha256):
@@ -152,7 +153,7 @@ class ImportService:
     def video(
         self, stream: BinaryIO, filename: str, title: str, rights: str, author: str | None,
         language: str, notes: str | None, domains: list[str], genres: list[str], tags: list[str], expected_bytes: int | None,
-        source_date: str | None = None,
+        source_date: str | None = None, extra_job: tuple[str, int] | None = None,
     ) -> dict:
         suffix = Path(filename).suffix.lower()
         if suffix not in VIDEO_SUFFIXES:
@@ -179,6 +180,7 @@ class ImportService:
             audit_event="video_import",
             source_date=source_date,
             job_kind="video_analyze",
+            extra_job=extra_job,
         )
 
     def image(
@@ -237,6 +239,7 @@ class ImportService:
         media_type: str,
         source_id: str | None = None,
         version_id: str | None = None,
+        extra_job: tuple[str, int] | None = None,
     ) -> dict:
         """Persist a downloaded video and its provenance in one transaction.
 
@@ -244,7 +247,8 @@ class ImportService:
         ``video_download_provenance`` row commit together (source_id UNIQUE);
         on failure the whole transaction rolls back and this method compensates
         only the artifact file it created (same pattern as ``_persist_ingest``).
-        ``create_ingest`` queues the ``video_analyze`` job in the same
+        ``create_ingest`` queues the follow-up jobs (analysis and, when the
+        enqueue matrix is due, transcription at a higher priority) in the same
         transaction, so a failure never leaves a half-created source.
         """
         if not title.strip():
@@ -281,6 +285,7 @@ class ImportService:
                     },
                     source_id=source_id,
                     version_id=version_id,
+                    extra_job=extra_job,
                 )
             except Exception:
                 if stored.was_new and self.repository.delete_artifact_if_unreferenced(stored.sha256):
