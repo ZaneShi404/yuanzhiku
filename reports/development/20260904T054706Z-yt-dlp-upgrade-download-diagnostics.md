@@ -15,9 +15,9 @@
 
 ## 根因诊断（逐层复现，全部走应用受限通道）
 
-1. 作业记录核查：失败码 `DownloadInputInvalid("failed")`（yt-dlp 子进程非零退出，stderr 按纪律不落日志）。
+1. 作业记录核查：失败码 `DownloadInputInvalid("failed")`（yt-dlp 子进程非零退出，标准错误 按纪律不落日志）。
 2. 元数据探测复现：**成功**——链接有效、标题正确，代理白名单无缺口。
-3. 完整下载复现（保留 stderr）：抖音 web detail 接口 **403**，yt-dlp 报 `Fresh cookies (not necessarily logged in) are needed`。
+3. 完整下载复现（保留 标准错误）：抖音 web detail 接口 **403**，yt-dlp 报 `Fresh cookies (not necessarily logged in) are needed`。
 4. Cookie 排除：键名/有效期核查（不含值）——登录态 sessionid 剩 38 天、ttwid 剩 340 天，非过期问题。
 5. 决定性对照实验：同一链接、同一代理、同一 Cookie，仅将 yt-dlp 2026.7.4（锁定版）换为上游最新 2026.8.19 → **下载立即成功**（6.07MB MP4）。
 
@@ -27,7 +27,7 @@
 
 - `backend/requirements.lock`：`yt-dlp==2026.7.4` → `2026.8.19`（用户批准，`REQ-046` 预授权条款）。
 - `REQ-046` 修订（用户预授权 2026-09-04）：yt-dlp 为唯一允许跟随上游日历版本升级的依赖，每次升级须更新 lock 并通过下载链路回归 + 全量回归；其余依赖维持锁定。
-- `tools/diagnose_download.py`：四分类诊断工具（链接校验 / Cookie 状态与过期键名 / 代理拦截域名 / yt-dlp 底层复现含 stderr + 上游版本对比），与下载作业走同一受限通道，支持 `--cookie`/`--download`。
+- `tools/diagnose_download.py`：四分类诊断工具（链接校验 / Cookie 状态与过期键名 / 代理拦截域名 / yt-dlp 底层复现含 标准错误 + 上游版本对比），与下载作业走同一受限通道，支持 `--cookie`/`--download`。
 - 下载失败作业消息补通用指引（反爬策略更新 → 升级 yt-dlp / 重导 Cookie / 使用诊断工具）。
 - 文档同步：`docs/dependency-installation.md`（版本、例外条款、实证记录、诊断工具）、`docs/requirements.md`（`REQ-046` 修订）。
 
