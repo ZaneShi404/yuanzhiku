@@ -813,7 +813,7 @@ function SourceDetail({
   const locateCitation = (detail: CitationDetail) => {
     const target = evidence.find(item => item.id === detail.location_action.evidence_id)
     if (!target) {
-      onMessage('该引用的证据不在当前表示中，请切换到对应表示后定位')
+      onMessage('该引用的证据不在当前文本版本中，请切换到对应文本版本后定位')
       return
     }
     locateEvidence(target)
@@ -909,7 +909,7 @@ function SourceDetail({
           <p>{item.excerpt}</p><small>{locatorLabel(item.locator)}</small>
           <div className="inline-actions"><button type="button" className="text-button" onClick={() => locateEvidence(item)}><MapPin size={15}/>定位</button>{!sourceDeleted && <button type="button" className="text-button" disabled={Boolean(busyAction)} onClick={() => void createCitation(item.id)}><Plus size={15}/>{busyAction === `citation-${item.id}` ? '正在创建' : '创建引用'}</button>}</div>
           <div className="citation-row">{(citations[item.id] || []).map(entry => <button type="button" className="citation-chip" key={entry.id} onClick={() => void loadCitation(entry.id)}>引用 {entry.id.slice(0, 8)}</button>)}</div>
-        </article>) : <p className="muted">当前表示尚无可引用 evidence。</p>}
+        </article>) : <p className="muted">当前文本版本暂无可引用的证据摘录。</p>}
         {citation && <article className="citation-detail"><header><b>{citation.title}</b><Status value={citation.processing_state}/><button type="button" className="icon-button" onClick={() => setCitation(null)} title="关闭引用"><X size={15}/></button></header>{citationContextOpen ? <p>{citation.context}</p> : <p>{citation.context.slice(0, 80)}{citation.context.length > 80 ? '…' : ''}</p>}<div className="inline-actions">{citation.context.length > 80 && <button type="button" className="text-button" onClick={() => setCitationContextOpen(current => !current)}>{citationContextOpen ? '收起上下文' : '展开上下文'}</button>}<button type="button" className="text-button" onClick={() => locateCitation(citation)}><MapPin size={15}/>定位</button></div><small>{locatorLabel(citation.locator)} · {citation.human_revised ? '人工修订表示' : '原始表示'}</small></article>}
       </section>
 
@@ -1405,7 +1405,7 @@ function KnowledgePage({ knowledge, focusedId, onRefresh, onMessage }: { knowled
       setPublishingId(null)
     }
   }
-  return <div className="page split-page"><section><PageHeader title="知识"/><form className="form-stack compact-form" onSubmit={create}><label>知识类型<select value={kind} onChange={event => setKind(event.target.value)}>{knowledgeTypes.map(item => <option key={item[0]} value={item[0]}>{item[1]}</option>)}</select></label><label>陈述<textarea required value={statement} onChange={event => setStatement(event.target.value)}/></label><label>evidence ID（可选，逗号分隔）<input value={evidenceIds} onChange={event => setEvidenceIds(event.target.value)}/></label><button className="button primary" disabled={creating}>{creating ? '正在创建' : '创建草稿'}</button></form></section><section className="card-column"><h2>{selected ? '选中知识' : '知识列表'}</h2>{knowledge.length ? knowledge.map(item => <article className={item.id === selected?.id ? 'knowledge-item selected' : 'knowledge-item'} key={item.id}><div><span className="result-kind">{labelFor(knowledgeTypes, item.kind)}</span><Status value={item.status}/></div><p>{item.statement}</p><small>{item.evidence_ids.length} 条 evidence · {formatDate(item.created_at)}</small>{item.status !== 'published' && <button type="button" className="button secondary" disabled={publishingId === item.id} onClick={() => void publish(item.id)}>{publishingId === item.id ? '正在发布' : '发布'}</button>}</article>) : <Empty icon={<Brain size={36}/>} text="尚无知识项" />}</section></div>
+  return <div className="page split-page"><section><PageHeader title="知识"/><form className="form-stack compact-form" onSubmit={create}><label>知识类型<select value={kind} onChange={event => setKind(event.target.value)}>{knowledgeTypes.map(item => <option key={item[0]} value={item[0]}>{item[1]}</option>)}</select></label><label>陈述<textarea required value={statement} onChange={event => setStatement(event.target.value)}/></label><label>证据摘录 ID（可选，逗号分隔）<input value={evidenceIds} onChange={event => setEvidenceIds(event.target.value)}/></label><button className="button primary" disabled={creating}>{creating ? '正在创建' : '创建草稿'}</button></form></section><section className="card-column"><h2>{selected ? '选中知识' : '知识列表'}</h2>{knowledge.length ? knowledge.map(item => <article className={item.id === selected?.id ? 'knowledge-item selected' : 'knowledge-item'} key={item.id}><div><span className="result-kind">{labelFor(knowledgeTypes, item.kind)}</span><Status value={item.status}/></div><p>{item.statement}</p><small>{item.evidence_ids.length} 条证据摘录 · {formatDate(item.created_at)}</small>{item.status !== 'published' && <button type="button" className="button secondary" disabled={publishingId === item.id} onClick={() => void publish(item.id)}>{publishingId === item.id ? '正在发布' : '发布'}</button>}</article>) : <Empty icon={<Brain size={36}/>} text="尚无知识项" />}</section></div>
 }
 
 function jobLabel(kind: string) {
