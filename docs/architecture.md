@@ -4,9 +4,9 @@
 
 SQLite 位于 `<data-root>/state/knowledge.db`，artifact 位于 `<data-root>/artifacts/<sha256>`，临时文件只在 `<data-root>/staging`。完整本地路径不入数据库、API 或日志（`REQ-011`, `REQ-003`）。每次内容解析生成不可变 representation 与 evidence；人类修订创建新的 manual representation（`REQ-020`）。
 
-视频沿用普通 `file` source 与不可变原始 artifact：`ImportService.video` 仅接收 MP4/WebM，创建 `video_analyze` durable job。`VideoService` 将 `MediaAnalyzerPort` 的本地探测结果写为 extraction representation 与 `video_metadata` evidence，并将 JPEG 时间采样帧保存为独立内容寻址 artifact，关联 `video_analyses`、`video_frames`。`LocalFfmpegMediaAnalyzer` 只以 `shell=False` 运行显式安装的 ffprobe/ffmpeg，带总 deadline、取消、租约心跳、内存、staging 磁盘及输出上限；不会处理 URL 或网络。`MediaAiPort` 当前由 `UnconfiguredMediaAi` 实现，稳定报告禁用且不发起网络连接。视频 Range 播放只读取已验证的本地原 artifact；架构中没有 URL 获取适配器，抖音继续仅由 external-card 元数据和用户主动外部浏览器打开构成。
+视频沿用普通 `file` / `video_link` source 与不可变原始 artifact：导入或受限链接下载成功时，`create_ingest` 在单事务内建档并按入队矩阵同队 `video_transcribe`（priority 110）与 `video_analyze`（100）——转写先行（v1.7，`REQ-056`）。`VideoService` 将 `MediaAnalyzerPort` 的本地探测结果写为 extraction representation 与 `video_metadata` evidence，并将 JPEG 时间采样帧保存为独立内容寻址 artifact（采样来源 reason 记 scene/even/transcript/silence），关联 `video_analyses`、`video_frames`；分析作业读取同版本 transcription 表示，把采样锚点从场景检测扩展为「场景 ∪ 转写段边界 ∪ 静音空档中点 ∪ 等间隔」的融合策略，无转写表示自动退化为纯信号抽帧，分析身份 `config_hash` 纳入转写表示的唯一身份（多份分析并存、detail 取最新）。`LocalFfmpegMediaAnalyzer` 只以 `shell=False` 运行显式安装的 ffprobe/ffmpeg，带总 deadline、取消、租约心跳、内存、staging 磁盘及输出上限；视频分析不处理 URL 也不发起网络。媒体 AI 侧：转写经 `MediaTranscriberPort`（FunASR 本地默认 / 远程端点），摘要按完整性判定三级级联——整片视频直送（`VideoUnderstandingPort`，通义千问 DashScope/MiMo，可经自备中转）→ 直送不可行时按关键帧联络表单次多模态调用兜底（瞬态缩略图不入 video_frames/artifact）→ `visual_gap`；画面理解条目落独立 `visual_understanding` 表示并逐条 `video_time_range` 证据。受限链接获取经 `MediaDownloaderPort`（锁定版本 yt-dlp + 作业内回环过滤代理）在独立 staging 完成后并入同一证据链生命周期。视频 Range 播放只读取已验证的本地原 artifact。
 
-本地进程内单 worker 用 durable jobs 表轮询；容器部署拆为 API/worker、一次性 `migrate` 服务、PostgreSQL 与 Redis。`migrate` 是唯一执行 Alembic 的容器职责；API/worker 只检查数据库 revision 已到镜像 head，未就绪即失败关闭。PostgreSQL 作业领取使用行锁和 `SKIP LOCKED`，使独立 API/worker 进程不会领取同一作业；运行时后端由环境配置决定（`REQ-032`, `REQ-045`）。
+本地进程内单 worker 用 durable jobs 表轮询；容器部署拆为 API/worker、一次性 `migrate` 服务与 PostgreSQL。`migrate` 是唯一执行 Alembic 的容器职责；API/worker 只检查数据库 revision 已到镜像 head，未就绪即失败关闭。PostgreSQL 作业领取使用行锁和 `SKIP LOCKED`，使独立 API/worker 进程不会领取同一作业；运行时后端由环境配置决定（`REQ-032`, `REQ-045`）。
 
 ## REQ-004 冻结模块边界 → 代码载体映射
 

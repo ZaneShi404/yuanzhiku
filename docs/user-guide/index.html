@@ -207,7 +207,7 @@
   <tr><td><b>版本</b>（右上）</td><td>内容版本列表（当前导入路径固定为第 1 版）与原始文件信息</td><td><span class="tag auto">系统</span></td></tr>
   <tr><td><b>本地视频 / 原文预览</b></td><td>视频可直接在页面内播放；PDF/图片有只读隔离预览</td><td><span class="tag auto">系统</span></td></tr>
   <tr><td><b>关键帧</b></td><td>系统按"场景切换 + 转写语义锚点（语音说到什么就看那一刻）+ 静音空档 + 均匀抽样"自动截取的视频帧，每帧也是不可变存档；转写完成后可点"重新分析"获得转写引导帧（历史分析保留）</td><td><span class="tag auto">系统</span> <span class="tag human">可手动重分析</span></td></tr>
-  <tr><td><b>转写与摘要</b></td><td>语音转写全文、AI 内容摘要；未生成时可在此手动触发"语音转写 / 内容摘要"作业</td><td><span class="tag auto">系统</span> <span class="tag human">可手动触发</span></td></tr>
+  <tr><td><b>转写与摘要</b></td><td>语音转写全文、AI 内容摘要、画面理解条目（逐条带时间定位）；未生成时可在此手动触发"语音转写 / 内容摘要 / 重新分析"作业</td><td><span class="tag auto">系统</span> <span class="tag human">可手动触发</span></td></tr>
   <tr><td><b>文本表示</b></td><td>每次解析产出的不可变文本版本（抽取/转写/摘要/人工修订），带解析器身份指纹</td><td><span class="tag auto">系统</span></td></tr>
   <tr><td><b>证据与引用</b></td><td>每条 evidence 是一段 ≤300 字的原文摘录 + 定位信息（PDF 页码/视频时间段）。点"引用"看完整上下文，点"定位"跳到原文对应位置并高亮</td><td><span class="tag auto">系统</span></td></tr>
   <tr><td><b>人工修订</b></td><td>发现机器转写/解析有误？在这里提交修正文本，系统会新建一个"人工修订"表示，<b>不覆盖原始内容</b></td><td><span class="tag human">人工</span></td></tr>
@@ -230,7 +230,7 @@
   <tr><td>其他网页链接 / 勾选"存为卡片"</td><td>外部卡</td><td><b>只存链接元数据，不下载、不入库解析</b></td></tr>
   <tr><td>.pdf / .docx / .md / .txt 文件</td><td>文档</td><td>本地解析作业</td></tr>
   <tr><td>.jpg / .jpeg / .png / .webp</td><td>图片</td><td>本地图片分析（尺寸/EXIF，<b>无 OCR</b>）</td></tr>
-  <tr><td>.mp4 / .webm</td><td>本地视频</td><td>视频分析（元数据 + 抽帧）→ 可续转写、摘要</td></tr>
+  <tr><td>.mp4 / .webm</td><td>本地视频</td><td>先语音转写 → 再分析（抽帧融合转写锚点）→ 可续摘要</td></tr>
 </table>
 <p>导入时必须选择<b>权利声明</b>（这条内容你是否有权保存使用），还可以填标题、作者、日期、领域/体裁、自由标签。单文件上限 2GB，磁盘需保留足够余量（文件两倍空间 + 10GB 保底），不够会在上传前被拦下并提示。</p>
 
@@ -321,8 +321,8 @@
 </figure>
 <p>设置页向下还有三块重要配置：</p>
 <ul>
-  <li><b>媒体 AI 凭据</b>：转写端点（OpenAI 兼容 API）、理解模型（摘要/分类）、视频直送模型（通义千问/MiMo，可配中转或对象存储通道）。<b>密钥只存在本机 <code>data/state/ai/credentials.json</code></b>，绝不写进数据库、日志、备份和导出包。</li>
-  <li><b>自动流水线开关</b>：开了之后，视频分析完自动接力转写、转写完自动接力摘要、文档解析完自动接力 AI 分类；关掉则全部需要你在详情页手动触发。</li>
+  <li><b>媒体 AI 凭据</b>：转写端点（OpenAI 兼容 API）、理解模型（摘要/分类）、视频直送模型（通义千问/MiMo，可配中转或对象存储通道）与帧理解配置（直送不可行时的联络表兜底开关、转写完整时的画面增强开关、联络表帧数上限）。<b>密钥只存在本机 <code>data/state/ai/credentials.json</code></b>，绝不写进数据库、日志、备份和导出包。</li>
+  <li><b>自动流水线开关</b>：开了之后，视频导入即同时排队"语音转写 + 本地分析"（转写先行，分析自动融合转写锚点抽帧）、分析完自动接力摘要、文档解析完自动接力 AI 分类；关掉则视频只自动分析，转写/摘要需要你在详情页手动触发。</li>
   <li><b>本地转写模型</b>：本地 FunASR 中文模型的下载与校验（白名单锁定，校验哈希通过才可用）。本地模型可用时优先本地转写，失败可降级到你配置的远程 API。</li>
 </ul>
 
@@ -374,14 +374,15 @@
     <line x1="160" y1="307" x2="176" y2="307" stroke="#2c6e63" stroke-width="2" marker-end="url(#arr3)"/>
     <!-- 视频 -->
     <rect x="40" y="344" width="120" height="34" rx="6" fill="#f4f7f6" stroke="#b9d2cb"/><text x="100" y="366">本地视频</text>
-    <rect x="180" y="344" width="130" height="34" rx="6" fill="#f4f7f6" stroke="#b9d2cb"/><text x="245" y="366">元数据+抽帧</text>
-    <rect x="330" y="344" width="130" height="34" rx="6" fill="#e8ebf7" stroke="#3a4a8c"/><text x="395" y="366">语音转写*</text>
+    <rect x="180" y="344" width="130" height="34" rx="6" fill="#e8ebf7" stroke="#3a4a8c"/><text x="245" y="366">语音转写*</text>
+    <rect x="330" y="344" width="130" height="34" rx="6" fill="#f4f7f6" stroke="#b9d2cb"/><text x="395" y="366">元数据+抽帧</text>
     <rect x="480" y="344" width="130" height="34" rx="6" fill="#e8ebf7" stroke="#3a4a8c"/><text x="545" y="366">AI 摘要*</text>
     <rect x="670" y="344" width="110" height="34" rx="6" fill="#e2f2ea" stroke="#1d6b4f"/><text x="725" y="366">✔ 完成</text>
-    <line x1="160" y1="361" x2="176" y2="361" stroke="#2c6e63" stroke-width="2" marker-end="url(#arr3)"/>
-    <line x1="310" y1="361" x2="326" y2="361" stroke="#3a4a8c" stroke-width="2" stroke-dasharray="5 3" marker-end="url(#arr3)"/>
+    <line x1="160" y1="361" x2="176" y2="361" stroke="#3a4a8c" stroke-width="2" stroke-dasharray="5 3" marker-end="url(#arr3)"/>
+    <line x1="310" y1="361" x2="326" y2="361" stroke="#2c6e63" stroke-width="2" marker-end="url(#arr3)"/>
     <line x1="460" y1="361" x2="476" y2="361" stroke="#3a4a8c" stroke-width="2" stroke-dasharray="5 3" marker-end="url(#arr3)"/>
     <line x1="610" y1="361" x2="666" y2="361" stroke="#2c6e63" stroke-width="2" marker-end="url(#arr3)"/>
+    <text x="395" y="392" font-size="10.5" fill="#5f6f6a" text-anchor="middle">抽帧融合转写锚点（v1.7）</text>
     <!-- 链接 -->
     <rect x="40" y="398" width="120" height="34" rx="6" fill="#f4f7f6" stroke="#b9d2cb"/><text x="100" y="420">B站/抖音链接</text>
     <rect x="180" y="398" width="170" height="34" rx="6" fill="#f4f7f6" stroke="#b9d2cb"/><text x="265" y="420">yt-dlp 下载（≤1080p）</text>
@@ -472,6 +473,7 @@
   <tr><th>AI 产物</th><th>引擎</th><th>入库规则</th></tr>
   <tr><td>语音转写</td><td>本地 FunASR 优先，可降级 OpenAI 兼容 API</td><td>写成"转写"表示 + 带视频时间段的证据；引擎与降级事实记入身份指纹</td></tr>
   <tr><td>内容摘要</td><td>理解模型（200–600 字约束）；转写疑似不完整时可用视频直送多模态补全，直送不可行时自动按"关键帧联络表"兜底理解画面（可关闭）；转写完整也可在设置中开启画面增强</td><td>写成"摘要"表示 + 独立"画面理解"表示（逐条时间定位）；附分类建议标记</td></tr>
+  <tr><td>画面理解（关键帧联络表）</td><td>多模态模型单次理解 ≤24 张缩略图网格（帧字节远小于整片直送）</td><td>写成独立"画面理解"表示：每条带视频时间段定位与画面文字，进入检索；绝不臆造定位</td></tr>
   <tr><td>分类建议</td><td>理解模型（领域 0–3 / 体裁 0–1 / 标签 0–8）</td><td><b>只填空缺</b>：你填过的字段绝不覆盖；标签取并集合并；无可填则不动数据库</td></tr>
 </table>
 <div class="warn"><b>AI 的边界（系统级承诺）：</b>AI 作业失败/取消不影响来源的处理状态；AI 绝不生成证据（证据只来自真实原文定位）；AI 不创建知识/主题/关系；提示词、模型、阈值全部纳入身份指纹，换配置即新身份，历史产物可区分。</div>
@@ -493,9 +495,9 @@
 <table>
   <tr><th>事情</th><th>执行者</th><th>说明</th></tr>
   <tr><td>文件落盘、指纹去重、建档</td><td><span class="tag auto">自动</span></td><td>导入瞬间完成，失败自动回滚</td></tr>
-  <tr><td>文档解析 / 图片元数据 / 视频抽帧</td><td><span class="tag auto">自动</span></td><td>纯本地，无网络；断路器保护</td></tr>
+  <tr><td>文档解析 / 图片元数据 / 视频抽帧</td><td><span class="tag auto">自动</span></td><td>纯本地，无网络；断路器保护。视频抽帧在转写之后执行，锚点融合语音内容（转写不可用自动退化为纯信号抽帧）</td></tr>
   <tr><td>B站/抖音链接下载</td><td><span class="tag mixed">混合</span></td><td>你粘链接，yt-dlp 自动下载并入视频管线</td></tr>
-  <tr><td>语音转写、AI 摘要、AI 分类建议</td><td><span class="tag mixed">混合</span></td><td>需你在设置页配置 AI/模型；开自动流水线后自动接力，否则详情页手动触发</td></tr>
+  <tr><td>语音转写、AI 摘要、AI 分类建议、画面理解</td><td><span class="tag mixed">混合</span></td><td>需你在设置页配置 AI/模型；开自动流水线后视频导入即转写先行、自动接力分析/摘要，否则详情页手动触发</td></tr>
   <tr><td>检索索引（1200 字切块）</td><td><span class="tag auto">自动</span></td><td>随解析产物一并落库</td></tr>
   <tr><td>每日备份、完整性抽样</td><td><span class="tag auto">自动</span></td><td>每日首次启动自动排队；手动备份/全量校验在"备份与导出"</td></tr>
   <tr><td>作业失联回收、失败重试</td><td><span class="tag auto">自动</span></td><td>租约机制；你也可以在作业页手动重试/取消</td></tr>
@@ -579,6 +581,9 @@
 
 <h4>Q9：想从其他设备或用局域网 IP 访问，打不开？</h4>
 <p>设计如此。系统只接受来自本机回环地址（127.0.0.1 / localhost）的访问；用局域网 IP、其他域名或携带异常头的请求会被直接拒绝（403）——这是刻意的隐私边界，不是故障。</p>
+
+<h4>Q10：视频直送、画面理解兜底、"重新分析"是什么关系？</h4>
+<p>三级分工：① 转写完整 → 只出纯文本摘要；② 转写疑似不完整（或你点"强制深度理解"）→ 整片视频直送多模态模型（信息最全）；③ 直送行不通（视频太大、没配中转等）→ 自动退一步，把 ≤24 张关键帧缩略图拼成一张"联络表"发给多模态模型理解画面（便宜得多，且逐条带时间定位）。②③都不行才标记"可能缺少画面信息"。转写完整但你想要画面增强，在设置里开"画面增强"开关。"重新分析"按钮与 AI 无关——它让关键帧采样融合转写语义（语音说到什么就看那一刻），转写晚于分析完成时用它刷新关键帧，历史分析保留。</p>
 
 <hr>
 <p class="kbd-hint" style="text-align:center;color:#5f6f6a">本指南基于本机实际部署与真实数据生成 · 截图取自你当前的库 · 源知库 · 仅本机 · 无遥测</p>
