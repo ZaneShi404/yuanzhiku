@@ -65,11 +65,9 @@
   .svg-wrap { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 20px; margin: 18px 0; overflow-x: auto; }
   .svg-wrap svg { display: block; margin: 0 auto; max-width: 100%; height: auto; }
   .kbd-hint { color: var(--muted); font-size: 13px; }
-  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
   @media (max-width: 900px) {
     aside.toc { display: none; }
     main { padding: 24px 18px; }
-    .cols { grid-template-columns: 1fr; }
   }
   @media print {
     aside.toc { display: none; }
@@ -97,7 +95,7 @@
   <a href="#s4">四、导入流程详解</a>
   <a href="#s5">五、知识生成与入库规则</a>
   <a href="#s6">六、系统自动 vs 人工介入</a>
-  <a href="#s7">七、实战：以"2026新外贸"为例</a>
+  <a href="#s7">七、实战：以"独立思考"视频为例</a>
   <a href="#s8">八、常见问题 FAQ</a>
 </aside>
 <main>
@@ -111,7 +109,7 @@
   <ul>
     <li><b>隐私优先</b>：只监听本机回环地址 <code>127.0.0.1</code>，没有账号体系、没有遥测、没有广告。除了你显式配置的 AI 服务和视频下载，它<b>不联网</b>。界面左下角常驻"仅本机 · 无遥测"标识。</li>
     <li><b>原料不可变，证据可溯源</b>：每个文件按内容指纹（SHA-256）只存一份，原文永不修改；系统生成的每一段文字都能追回到原文的具体位置（PDF 第几页、视频第几秒）。</li>
-    <li><b>机器干粗活，人做判断</b>：解析、转写、摘要、查重由系统自动完成；而"这条结论是否成立""这两条资料是什么关系""如何归类"——这些判断<b>刻意留给人工</b>，系统绝不替你下结论。</li>
+    <li><b>机器干粗活，人做判断</b>：解析、转写、抽帧、摘要由系统自动完成；而"这条结论是否成立""这两条资料是什么关系""如何归类"——这些判断<b>刻意留给人工</b>，系统绝不替你下结论。</li>
   </ul>
 </div>
 
@@ -122,7 +120,6 @@
         <path d="M0,0 L10,4 L0,8 Z" fill="#2c6e63"/>
       </marker>
     </defs>
-    <!-- 输入层 -->
     <rect x="20" y="30" width="180" height="270" rx="12" fill="#e7f2ef" stroke="#2c6e63"/>
     <text x="110" y="56" text-anchor="middle" font-size="15" font-weight="bold" fill="#14312b">你喂给它什么</text>
     <g font-size="13" fill="#1f2a26">
@@ -134,18 +131,16 @@
       <rect x="36" y="262" width="148" height="30" rx="6" fill="#fff" stroke="#b9d2cb"/><text x="110" y="282" text-anchor="middle">🃏 外部卡（只存链接）</text>
     </g>
     <line x1="200" y1="165" x2="246" y2="165" stroke="#2c6e63" stroke-width="2" marker-end="url(#arr)"/>
-    <!-- 处理层 -->
     <rect x="250" y="30" width="300" height="270" rx="12" fill="#fff" stroke="#2c6e63"/>
     <text x="400" y="56" text-anchor="middle" font-size="15" font-weight="bold" fill="#14312b">系统自动处理（后台作业）</text>
     <g font-size="13" fill="#1f2a26">
       <rect x="266" y="72" width="268" height="34" rx="6" fill="#f4f7f6" stroke="#b9d2cb"/><text x="400" y="94" text-anchor="middle">去重入库（内容指纹 SHA-256）</text>
       <rect x="266" y="114" width="268" height="34" rx="6" fill="#f4f7f6" stroke="#b9d2cb"/><text x="400" y="136" text-anchor="middle">本地解析 / 抽帧 / 图片元数据</text>
-      <rect x="266" y="156" width="268" height="34" rx="6" fill="#f4f7f6" stroke="#b9d2cb"/><text x="400" y="178" text-anchor="middle">语音转写（本地 FunASR 优先）</text>
-      <rect x="266" y="198" width="268" height="34" rx="6" fill="#f4f7f6" stroke="#b9d2cb"/><text x="400" y="220" text-anchor="middle">AI 摘要 · AI 分类建议（可选）</text>
+      <rect x="266" y="156" width="268" height="34" rx="6" fill="#f4f7f6" stroke="#b9d2cb"/><text x="400" y="178" text-anchor="middle">语音转写先行（本地 FunASR 优先）</text>
+      <rect x="266" y="198" width="268" height="34" rx="6" fill="#f4f7f6" stroke="#b9d2cb"/><text x="400" y="220" text-anchor="middle">AI 摘要 · 画面理解 · 分类建议</text>
       <rect x="266" y="240" width="268" height="34" rx="6" fill="#f4f7f6" stroke="#b9d2cb"/><text x="400" y="262" text-anchor="middle">切块索引（1200 字/块，字面检索）</text>
     </g>
     <line x1="550" y1="165" x2="596" y2="165" stroke="#2c6e63" stroke-width="2" marker-end="url(#arr)"/>
-    <!-- 人层 -->
     <rect x="600" y="30" width="280" height="270" rx="12" fill="#fcefe2" stroke="#8a4b12"/>
     <text x="740" y="56" text-anchor="middle" font-size="15" font-weight="bold" fill="#8a4b12">由你做主的整理层</text>
     <g font-size="13" fill="#1f2a26">
@@ -193,29 +188,34 @@
 <h3 id="s3-library">3.1 资料库：你的来源都在这</h3>
 <figure>
   <img src="screenshots/01-library.png" alt="资料库页面">
-  <figcaption>图 2 · 资料库列表：每行是一条"来源"，可看到类型（链接视频）、处理状态（已完成）、更新时间。顶部支持按标题/标签筛选、按主题筛选、"当前/已删除"切换。</figcaption>
+  <figcaption>图 2 · 资料库列表：每行是一条"来源"，显示类型（链接视频）、处理状态（已完成）、更新时间。顶部支持按标题/标签筛选、按主题筛选、"当前/已删除"切换。</figcaption>
 </figure>
 <p><b>核心概念：来源（Source）</b>。库里每一条记录叫一个"来源"——一个文件、一段粘贴文本、一个视频，都是一条来源。来源携带：标题、作者、来源日期、语言、领域/体裁/标签、<b>权利声明</b>（导入时必填：原创/已获授权/许可使用/开放许可/其他）。</p>
 <p>点任意一行进入<b>来源详情页</b>——这是整个系统信息最密集的页面，也是你日常策展的主战场：</p>
 <figure>
   <img src="screenshots/02-detail.png" alt="来源详情页全页">
-  <figcaption>图 3 · 来源详情页全览（以"2026新外贸"这条链接视频为例，长图）。各面板职能见下表：</figcaption>
+  <figcaption>图 3 · 来源详情页全览（以"厌蠢症是挣不到钱的！！！ #独立思考 #认知思维"这条链接视频为例，长图）。各面板职能见下表。</figcaption>
 </figure>
 <table>
   <tr><th>详情页面板</th><th>内容</th><th>谁产生</th></tr>
   <tr><td><b>元数据区</b>（顶部）</td><td>标题、作者、日期、语言、领域/体裁/标签、备注、权利声明，均可编辑；每次修改都会留下修订快照</td><td><span class="tag human">人工</span>（AI 可建议，见下）</td></tr>
   <tr><td><b>版本</b>（右上）</td><td>内容版本列表（当前导入路径固定为第 1 版）与原始文件信息</td><td><span class="tag auto">系统</span></td></tr>
   <tr><td><b>本地视频 / 原文预览</b></td><td>视频可直接在页面内播放；PDF/图片有只读隔离预览</td><td><span class="tag auto">系统</span></td></tr>
-  <tr><td><b>关键帧</b></td><td>系统按"场景切换 + 转写语义锚点（语音说到什么就看那一刻）+ 静音空档 + 均匀抽样"自动截取的视频帧，每帧也是不可变存档；转写完成后可点"重新分析"获得转写引导帧（历史分析保留）</td><td><span class="tag auto">系统</span> <span class="tag human">可手动重分析</span></td></tr>
-  <tr><td><b>转写与摘要</b></td><td>语音转写全文、AI 内容摘要、画面理解条目（逐条带时间定位）；未生成时可在此手动触发"语音转写 / 内容摘要 / 重新分析"作业</td><td><span class="tag auto">系统</span> <span class="tag human">可手动触发</span></td></tr>
-  <tr><td><b>文本版本</b></td><td>每次转写/摘要/修订生成的一份不可变历史稿（抽取/转写/摘要/人工修订），下拉按时间排序、可切换对比，永不互相覆盖；带解析器身份指纹</td><td><span class="tag auto">系统</span> <span class="tag human">可追加修订</span></td></tr>
-  <tr><td><b>证据与引用</b></td><td>每条 evidence 是一段 ≤300 字的原文摘录 + 定位信息（PDF 页码/视频时间段）。点"引用"看完整上下文，点"定位"跳到原文对应位置并高亮</td><td><span class="tag auto">系统</span></td></tr>
-  <tr><td><b>人工修订</b></td><td>发现机器转写/解析有误？在这里提交修正文本，系统会新建一个"人工修订"表示，<b>不覆盖原始内容</b></td><td><span class="tag human">人工</span></td></tr>
+  <tr><td><b>时间采样关键帧</b></td><td>系统自动截取的代表性画面。鼠标悬浮可看到<b>采样理由</b>：场景切换 / 转写语义 / 静音空档 / 等距；点帧即跳转到该时刻播放。帧仅供你浏览，AI 的画面理解结果在下方摘要区</td><td><span class="tag auto">系统</span></td></tr>
+  <tr><td><b>转写与摘要</b></td><td>语音转写全文、AI 内容摘要；三个手动按钮：<b>语音转写</b>、<b>内容摘要</b>、<b>重新分析</b>（见 3.1.1）</td><td><span class="tag auto">系统</span> <span class="tag human">可手动触发</span></td></tr>
+  <tr><td><b>内容摘要块</b></td><td>摘要正文 + 档位徽标（<b>深度 / 标准+画面 / 标准</b>）+ 状态标记（如"已直送视频补充理解""直送不可行，已按关键帧补充画面理解"）+ AI 分类建议（可一键采纳，只填空缺）+ "强制深度理解"按钮</td><td><span class="tag auto">系统</span></td></tr>
+  <tr><td><b>画面理解（关键帧联络表）</b></td><td>当摘要走了"联络表兜底/增强"路径时出现：AI 按时间窗逐条描述画面里发生了什么，每条都可定位回视频时刻</td><td><span class="tag auto">系统</span>（需配置视频直送模型）</td></tr>
+  <tr><td><b>文本版本</b></td><td>每次处理产出的不可变文本稿：抽取 / 转写 / 摘要 / 人工修订。下拉"新稿在后"，带时间戳；每一稿带处理引擎身份指纹</td><td><span class="tag auto">系统</span></td></tr>
+  <tr><td><b>人工修订</b></td><td>发现机器转写/解析有误？提交修正文本，系统新建一稿"人工修订"，<b>不覆盖原稿</b></td><td><span class="tag human">人工</span></td></tr>
+  <tr><td><b>证据与引用</b></td><td>每条证据是一段 ≤300 字的原文摘录 + 定位信息（PDF 页码/视频时间段）。点"定位"跳到原文对应位置并高亮；点"创建引用"生成可分享的引用卡</td><td><span class="tag auto">系统</span></td></tr>
   <tr><td><b>从证据创建知识</b></td><td>勾选证据 + 用自己的话写陈述 → 创建知识草稿（详见 3.4 与第五章）</td><td><span class="tag human">人工</span></td></tr>
-  <tr><td><b>关系</b>（右栏）</td><td>把本条与另一条来源连起来：新版本 / 修订版本 / 相关 / 同一作品</td><td><span class="tag human">人工</span></td></tr>
+  <tr><td><b>关系</b>（右栏）</td><td>把本条与另一条来源连起来：新版本 / 修订版本 / 相关 / 同一作品；有重复嫌疑时系统会提示"可能重复的来源"</td><td><span class="tag human">人工</span></td></tr>
   <tr><td><b>主题</b>（右栏）</td><td>把本条挂进手工主题合集，或新建主题</td><td><span class="tag human">人工</span></td></tr>
-  <tr><td><b>删除</b>（右栏底部）</td><td>两段式：先软删（进"已删除"页签，可恢复）；永久删除需在已删除状态下再确认，系统会连带清理全部派生数据和无人引用的原始文件（极少数情况下文件被占用删不掉时，会记入清理队列自动后台重试，逻辑删除不受影响）</td><td><span class="tag human">人工</span></td></tr>
+  <tr><td><b>删除</b>（右栏底部）</td><td>两段式：先软删（进"已删除"页签，可恢复）；永久删除需在已删除状态下再确认，系统连带清理全部派生数据和无人引用的原始文件</td><td><span class="tag human">人工</span></td></tr>
 </table>
+
+<h4 id="s3-reanalyze">3.1.1 "重新分析"是干什么的（视频专属）</h4>
+<p>视频抽帧会<b>融合语音转写里的语义锚点</b>（每段话的起止点、长静音空档的中点——这些位置往往是画面切换或"嘴上没说、只在画面里"的信息高发区）。如果分析跑在转写之前完成（比如转写当时不可用），抽帧就只剩纯信号策略。这时转写完成后点一次<b>重新分析</b>，系统会生成一份<b>新的</b>分析（历史分析和旧帧全部保留，详情页默认看最新一份），帧集就能吸收转写语义。<b>它与 AI 无关，全程本地、零网络。</b></p>
 
 <h3 id="s3-import">3.2 导入：一个入口，自动识别</h3>
 <figure>
@@ -230,20 +230,20 @@
   <tr><td>其他网页链接 / 勾选"存为卡片"</td><td>外部卡</td><td><b>只存链接元数据，不下载、不入库解析</b></td></tr>
   <tr><td>.pdf / .docx / .md / .txt 文件</td><td>文档</td><td>本地解析作业</td></tr>
   <tr><td>.jpg / .jpeg / .png / .webp</td><td>图片</td><td>本地图片分析（尺寸/EXIF，<b>无 OCR</b>）</td></tr>
-  <tr><td>.mp4 / .webm</td><td>本地视频</td><td>先语音转写 → 再分析（抽帧融合转写锚点）→ 可续摘要</td></tr>
+  <tr><td>.mp4 / .webm</td><td>本地视频</td><td>语音转写（先行）→ 视频分析（抽帧融合转写锚点）→ 可续摘要</td></tr>
 </table>
 <p>导入时必须选择<b>权利声明</b>（这条内容你是否有权保存使用），还可以填标题、作者、日期、领域/体裁、自由标签。单文件上限 2GB，磁盘需保留足够余量（文件两倍空间 + 10GB 保底），不够会在上传前被拦下并提示。</p>
 
 <h3 id="s3-search">3.3 检索：精确匹配，不玩语义</h3>
 <figure>
   <img src="screenshots/04-search.png" alt="检索页面">
-  <figcaption>图 5 · 检索页：输入"外贸"，命中 17 次。注意搜索框下那行小字——"仅进行中文短语、关键词和子串匹配，不提供语义检索"，这是刻意的设计承诺。</figcaption>
+  <figcaption>图 5 · 检索页：输入"独立思考"，命中该视频。注意搜索框下那行小字——"仅进行中文短语、关键词和子串匹配，不提供语义检索"，这是刻意的设计承诺。</figcaption>
 </figure>
 <ul>
   <li><b>匹配方式</b>：字面包含（大小写不敏感），按出现次数计"相关度"排序，也可切换最新优先；"高级范围"里可按领域/体裁/标签/主题/来源类型过滤，默认只搜最新完整版本、不含已删除来源。</li>
-  <li><b>能搜到什么</b>：标题、作者、备注、正文类文本（解析/转写/摘要/人工修订）。视频元数据模板文本、分类标签 token 被明确排除，避免干扰。</li>
+  <li><b>能搜到什么</b>：标题、作者、备注、正文类文本（抽取/转写/摘要/人工修订/画面理解条目）。视频容器元数据模板文本、分类标签 token 被明确排除，避免干扰。</li>
   <li><b>结果类型</b>：来源 / 知识 / 外部卡三类混排，点击直达。</li>
-  <li><b>实际含义</b>：搜"外贸"能命中，搜"国际贸易"不会自动联想"外贸"。<b>检索词要尽量用原文里真实出现过的说法</b>。</li>
+  <li><b>实际含义</b>：搜"独立思考"能命中，搜"批判性思维"不会自动联想。<b>检索词要尽量用原文里真实出现过的说法</b>。</li>
 </ul>
 
 <h3 id="s3-knowledge">3.4 知识：从证据到你的结论</h3>
@@ -253,17 +253,17 @@
 </figure>
 <p>知识是这个系统的"最终产物"：<b>一条你自己的陈述 + 支撑它的证据</b>。分两步走：</p>
 <ol>
-  <li><b>创建草稿</b>：在来源详情页"从证据创建知识"区，勾选相关 evidence，选类型（事实/观点/指令/案例/引文/未核验），用<b>自己的话</b>写陈述，提交。</li>
+  <li><b>创建草稿</b>：在来源详情页"从证据创建知识"区，勾选相关证据，选类型（事实/观点/指令/案例/引文/未核验），用<b>自己的话</b>写陈述，提交。</li>
   <li><b>发布</b>：到"知识"栏目点发布。发布有硬性校验——<b>事实/指令/案例必须挂着有效证据</b>；观点/引文/未核验可以无证据发布。这就是"知识可溯源"的强制保证。</li>
 </ol>
-<div class="tip"><b>为什么推荐在详情页创建而不是知识页？</b>详情页能直接勾选证据（自动带上 evidence ID）；知识页那个"evidence ID 逗号分隔"输入框是给高级用户/脚本用的，手填 ID 很痛苦。</div>
+<div class="tip"><b>为什么推荐在详情页创建而不是知识页？</b>详情页能直接勾选证据（自动带上证据 ID）；知识页那个"证据 ID 逗号分隔"输入框是给高级用户/脚本用的，手填 ID 很痛苦。</div>
 
 <h3 id="s3-jobs">3.5 作业：后台任务的透明看板</h3>
 <figure>
   <img src="screenshots/06-jobs.png" alt="作业页面">
-  <figcaption>图 7 · 作业页：每条后台作业一张卡片，含类型（视频语音转写/视频内容摘要…）、状态、进度条、结果消息。可对失败/卡住的任务重试或取消，也可批量清理。</figcaption>
+  <figcaption>图 7 · 作业页：每条后台作业一张卡片，含类型、状态、进度条、结果消息。注意图中"链接下载"的结果是"已排入语音转写与本地分析"——这是转写先行管线的可见证据；该作业"已尝试 3 次"则说明前两次失败后自动重试成功了。</figcaption>
 </figure>
-<p>所有耗时工作都是"作业"：本地解析、媒体信息提取、语音转写、内容摘要、链接下载、AI 分类、日常备份、完整性校验、artifact 清理重试。作业状态机：</p>
+<p>所有耗时工作都是"作业"：本地解析、本地媒体信息提取、语音转写、内容摘要、链接下载、AI 分类、日常备份、完整性校验。作业状态机：</p>
 <div class="svg-wrap">
 <svg viewBox="0 0 900 210" xmlns="http://www.w3.org/2000/svg" font-family="Microsoft YaHei, sans-serif">
   <defs><marker id="arr2" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto"><path d="M0,0 L10,4 L0,8 Z" fill="#2c6e63"/></marker></defs>
@@ -305,33 +305,34 @@
 <h3 id="s3-transfers">3.7 备份与导出：数据的保险柜</h3>
 <figure>
   <img src="screenshots/08-transfers.png" alt="备份与导出页面">
-  <figcaption>图 10 · 备份、还原与导出。系统每天首次启动会自动排一个"日常备份"作业（图中已有两条完成的备份），也可手动"立即备份"。</figcaption>
+  <figcaption>图 10 · 备份、还原与导出。系统每天首次启动会自动排一个"日常备份"作业（图中已有多条完成的备份），也可手动"立即备份"。</figcaption>
 </figure>
 <ul>
   <li><b>备份</b>：自动（每日）+ 手动。备份是带清单指纹的 zip 包，存于数据目录 <code>data/backups/</code>。</li>
   <li><b>校验</b>：抽样校验/全量校验——重新计算存档文件的 SHA-256 与登记值比对，发现文件损坏会报告。<b>建议换机、升级、大扫除前做一次全量校验</b>。</li>
-  <li><b>还原</b>：选备份 + 填<b>新数据根</b>路径，还原到全新位置（绝不覆盖当前数据）。备份包会与备份目录记录锚定校验——手动替换过的备份包会被拒绝，防止还原到被篡改的数据。</li>
-  <li><b>导出/再导入</b>：导出成归档 zip 带走；在另一个源知库实例上"校验并再导入"。再导入时做主键+自然键双重冲突检测，同内容 artifact 自动去重，冲突项会列出来给你；若已入库的存档文件意外丢失或损坏，再导入会从归档中自动修复。</li></li>
+  <li><b>还原</b>：选备份 + 填<b>新数据根</b>路径，还原到全新位置（绝不覆盖当前数据）。</li>
+  <li><b>导出/再导入</b>：导出成归档 zip 带走；在另一个源知库实例上"校验并再导入"。再导入时做主键+自然键双重冲突检测，同内容存档自动去重，冲突项会列出来给你裁决。</li>
 </ul>
 
 <h3 id="s3-settings">3.8 设置：限额与 AI 配置</h3>
 <figure>
   <img src="screenshots/09-settings.png" alt="设置页面">
-  <figcaption>图 11 · 设置页上半部分：各类资源限额（解析/视频/图片/下载的超时、内存、磁盘、帧数），即"断路器"的阈值，一般无需改动。</figcaption>
+  <figcaption>图 11 · 设置页的"视频直送"配置区（v1.7 新增两个开关与一个上限）：直送不可行时按关键帧联络表兜底理解画面（默认开）、转写完整时也做画面理解增强（默认关，额外消耗调用）、联络表帧数上限（默认 24，范围 8–48）。</figcaption>
 </figure>
-<p>设置页向下还有三块重要配置：</p>
+<p>设置页从上到下分几块：</p>
 <ul>
-  <li><b>媒体 AI 凭据</b>：转写端点（OpenAI 兼容 API）、理解模型（摘要/分类）、视频直送模型（通义千问/MiMo，可配中转或对象存储通道）与帧理解配置（直送不可行时的联络表兜底开关、转写完整时的画面增强开关、联络表帧数上限）。<b>密钥只存在本机 <code>data/state/ai/credentials.json</code></b>，绝不写进数据库、日志、备份和导出包。</li>
-  <li><b>自动流水线开关</b>：开了之后，视频导入即同时排队"语音转写 + 本地分析"（转写先行，分析自动融合转写锚点抽帧）、分析完自动接力摘要、文档解析完自动接力 AI 分类；关掉则视频只自动分析，转写/摘要需要你在详情页手动触发。</li>
-  <li><b>本地转写模型</b>：本地 FunASR 中文模型的下载与校验（白名单锁定，校验哈希通过才可用）。本地模型可用时优先本地转写，失败可降级到你配置的远程 API。</li>
+  <li><b>资源限额</b>：解析/视频/图片/下载的超时、内存、磁盘、最大关键帧数（1–32）——即"断路器"的阈值，一般无需改动。</li>
+  <li><b>媒体 AI 凭据</b>：语音转写分<b>本地（默认，FunASR 模型，白名单锁定+哈希校验）</b>与 <b>API 端点</b>两条路径，策略可选 自动/仅本地/仅 API；理解模型管摘要与分类；视频直送模型（通义千问/小米 MiMo，可配中转或对象存储通道）管深度理解。<b>密钥只存在本机 <code>data/state/ai/credentials.json</code></b>，绝不写进数据库、日志、备份和导出包。</li>
+  <li><b>自动流水线开关</b>：开了之后，导入视频自动串联转写/分析/摘要/分类，文档与粘贴导入后自动分类；关掉则全部需要你在详情页手动触发。</li>
+  <li><b>下载 Cookie</b>：B站/抖音的 cookies.txt 导入与删除，用于下载需要登录态的视频。</li>
 </ul>
 
 <!-- ============ 四、导入流程详解 ============ -->
 <h2 id="s4">四、导入流程详解（幕后发生了什么）</h2>
-<p>点下"导入"按钮后，系统做三件事：<b>加锁 → 按内容指纹落盘去重 → 单事务建档并派发作业</b>。之后后台作业接力完成解析等深加工。全链路如图：</p>
+<p>点下"导入"按钮后，系统做三件事：<b>加锁 → 按内容指纹落盘去重 → 单事务建档并派发作业</b>。之后后台作业接力完成深加工。全链路如图：</p>
 
 <div class="svg-wrap">
-<svg viewBox="0 0 940 470" xmlns="http://www.w3.org/2000/svg" font-family="Microsoft YaHei, sans-serif">
+<svg viewBox="0 0 940 520" xmlns="http://www.w3.org/2000/svg" font-family="Microsoft YaHei, sans-serif">
   <defs><marker id="arr3" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto"><path d="M0,0 L10,4 L0,8 Z" fill="#2c6e63"/></marker></defs>
 
   <!-- 同步段 -->
@@ -353,7 +354,7 @@
   <text x="470" y="150" font-size="12" fill="#5f6f6a" text-anchor="middle">全程双锁保护；任一步失败自动回滚：多余暂存文件删除、新建存档在无人引用时补偿删除，绝不留垃圾</text>
 
   <!-- 异步段 -->
-  <rect x="20" y="190" width="900" height="260" rx="12" fill="#fff" stroke="#2c6e63"/>
+  <rect x="20" y="190" width="900" height="310" rx="12" fill="#fff" stroke="#2c6e63"/>
   <text x="40" y="216" font-size="14" font-weight="bold" fill="#14312b">第 2 阶段：后台深加工（作业按类型接力，可在"作业"栏目围观）</text>
   <g font-size="12.5" text-anchor="middle" fill="#1f2a26">
     <!-- 文档 -->
@@ -372,45 +373,43 @@
     <rect x="670" y="290" width="110" height="34" rx="6" fill="#e2f2ea" stroke="#1d6b4f"/><text x="725" y="312">✔ 完成</text>
     <line x1="390" y1="307" x2="666" y2="307" stroke="#2c6e63" stroke-width="2" marker-end="url(#arr3)"/>
     <line x1="160" y1="307" x2="176" y2="307" stroke="#2c6e63" stroke-width="2" marker-end="url(#arr3)"/>
-    <!-- 视频 -->
-    <rect x="40" y="344" width="120" height="34" rx="6" fill="#f4f7f6" stroke="#b9d2cb"/><text x="100" y="366">本地视频</text>
-    <rect x="180" y="344" width="130" height="34" rx="6" fill="#e8ebf7" stroke="#3a4a8c"/><text x="245" y="366">语音转写*</text>
-    <rect x="330" y="344" width="130" height="34" rx="6" fill="#f4f7f6" stroke="#b9d2cb"/><text x="395" y="366">元数据+抽帧</text>
-    <rect x="480" y="344" width="130" height="34" rx="6" fill="#e8ebf7" stroke="#3a4a8c"/><text x="545" y="366">AI 摘要*</text>
-    <rect x="670" y="344" width="110" height="34" rx="6" fill="#e2f2ea" stroke="#1d6b4f"/><text x="725" y="366">✔ 完成</text>
+    <!-- 视频：转写先行 -->
+    <rect x="40" y="344" width="120" height="78" rx="6" fill="#f4f7f6" stroke="#b9d2cb"/><text x="100" y="377">视频（本地上传</text><text x="100" y="395">或链接下载后）</text>
+    <rect x="180" y="344" width="140" height="34" rx="6" fill="#e8ebf7" stroke="#3a4a8c"/><text x="250" y="366">① 语音转写*（先行）</text>
+    <rect x="180" y="388" width="140" height="34" rx="6" fill="#f4f7f6" stroke="#b9d2cb"/><text x="250" y="410">② 本地分析+抽帧</text>
+    <rect x="340" y="388" width="170" height="34" rx="6" fill="#f4f7f6" stroke="#b9d2cb"/><text x="425" y="410">抽帧融合转写语义锚点</text>
+    <rect x="530" y="366" width="130" height="34" rx="6" fill="#e8ebf7" stroke="#3a4a8c"/><text x="595" y="388">③ AI 摘要*</text>
+    <rect x="690" y="366" width="110" height="34" rx="6" fill="#e2f2ea" stroke="#1d6b4f"/><text x="745" y="388">✔ 完成</text>
     <line x1="160" y1="361" x2="176" y2="361" stroke="#3a4a8c" stroke-width="2" stroke-dasharray="5 3" marker-end="url(#arr3)"/>
-    <line x1="310" y1="361" x2="326" y2="361" stroke="#2c6e63" stroke-width="2" marker-end="url(#arr3)"/>
-    <line x1="460" y1="361" x2="476" y2="361" stroke="#3a4a8c" stroke-width="2" stroke-dasharray="5 3" marker-end="url(#arr3)"/>
-    <line x1="610" y1="361" x2="666" y2="361" stroke="#2c6e63" stroke-width="2" marker-end="url(#arr3)"/>
-    <text x="395" y="392" font-size="10.5" fill="#5f6f6a" text-anchor="middle">抽帧融合转写锚点（v1.7）</text>
-    <!-- 链接 -->
-    <rect x="40" y="398" width="120" height="34" rx="6" fill="#f4f7f6" stroke="#b9d2cb"/><text x="100" y="420">B站/抖音链接</text>
-    <rect x="180" y="398" width="170" height="34" rx="6" fill="#f4f7f6" stroke="#b9d2cb"/><text x="265" y="420">yt-dlp 下载（≤1080p）</text>
-    <rect x="370" y="398" width="150" height="34" rx="6" fill="#f4f7f6" stroke="#b9d2cb"/><text x="445" y="420">并入"本地视频"管线</text>
-    <line x1="160" y1="415" x2="176" y2="415" stroke="#2c6e63" stroke-width="2" marker-end="url(#arr3)"/>
-    <line x1="350" y1="415" x2="366" y2="415" stroke="#2c6e63" stroke-width="2" marker-end="url(#arr3)"/>
-    <line x1="445" y1="398" x2="445" y2="382" stroke="#2c6e63" stroke-width="2" marker-end="url(#arr3)"/>
-    <text x="860" y="420" font-size="11" fill="#5f6f6a" text-anchor="end">* 蓝底虚线 = AI 作业，可选、可关、失败不影响主流程</text>
+    <line x1="160" y1="405" x2="176" y2="405" stroke="#2c6e63" stroke-width="2" marker-end="url(#arr3)"/>
+    <line x1="320" y1="405" x2="336" y2="405" stroke="#2c6e63" stroke-width="2" marker-end="url(#arr3)"/>
+    <line x1="510" y1="400" x2="526" y2="390" stroke="#2c6e63" stroke-width="2" marker-end="url(#arr3)"/>
+    <line x1="320" y1="361" x2="526" y2="378" stroke="#3a4a8c" stroke-width="2" stroke-dasharray="5 3" marker-end="url(#arr3)"/>
+    <line x1="660" y1="383" x2="686" y2="383" stroke="#2c6e63" stroke-width="2" marker-end="url(#arr3)"/>
+    <text x="250" y="338" font-size="11" fill="#5f6f6a">两作业同事务入队，转写优先级更高 ⇒ 先跑</text>
+    <!-- 外部卡 -->
+    <rect x="40" y="452" width="120" height="34" rx="6" fill="#f4f7f6" stroke="#b9d2cb"/><text x="100" y="474">外部卡</text>
+    <rect x="180" y="452" width="230" height="34" rx="6" fill="#f4f7f6" stroke="#b9d2cb"/><text x="295" y="474">只校验并保存链接，不下载</text>
+    <rect x="690" y="452" width="110" height="34" rx="6" fill="#e2f2ea" stroke="#1d6b4f"/><text x="745" y="474">✔ 即刻完成</text>
+    <line x1="160" y1="469" x2="176" y2="469" stroke="#2c6e63" stroke-width="2" marker-end="url(#arr3)"/>
+    <line x1="410" y1="469" x2="686" y2="469" stroke="#2c6e63" stroke-width="2" marker-end="url(#arr3)"/>
+    <text x="920" y="499" font-size="11" fill="#5f6f6a" text-anchor="end">* 蓝底虚线 = AI 作业，可选、可关、失败不影响主流程</text>
   </g>
 </svg>
-<figcaption>图 12 · 导入全流程。第 1 阶段保证"点了就有回应、失败不留垃圾"；第 2 阶段全部走作业队列，可暂停、可重试、可围观。</figcaption>
+<figcaption>图 12 · 导入全流程。视频管线是"转写先行"：转写与分析同时入队、转写优先级更高，让分析抽帧能融合语音里的语义锚点；转写不可用则退化为纯信号抽帧，不失败。链接下载成功后汇入同一视频管线。</figcaption>
 </div>
 
 <h3>4.1 去重：内容指纹说了算</h3>
-<p>同一个文件（哪怕文件名不同）指纹相同，第二次导入时<b>不会再占磁盘</b>，只新建一条来源引用同一份存档。反过来，两条来源指纹相同时，详情页会提示"同作品候选"，由你决定是否标记为"同一作品"关系。</p>
+<p>同一个文件（哪怕文件名不同）指纹相同，第二次导入时<b>不会再占磁盘</b>，只新建一条来源引用同一份存档。反过来，两条来源指纹相同（或规范化标题相同）时，详情页会提示"发现可能重复的来源"，由你决定是否标记为"同一作品"关系。</p>
 
 <h3>4.2 特殊状况手册</h3>
 <table>
   <tr><th>状况</th><th>系统行为</th><th>你该怎么办</th></tr>
   <tr><td>PDF 已加密</td><td>作业置"受阻"，提示已加密</td><td>解密后重新导入</td></tr>
-  <tr><td>PDF 无文本层（扫描件）</td><td>标记 <code>awaiting_ocr</code>（等待 OCR），保留原件</td><td>系统无 OCR；先用别的工具转文字，再把文本粘贴导入</td></tr>
+  <tr><td>PDF 无文本层（扫描件）</td><td>标记"等待 OCR"，保留原件</td><td>系统无 OCR；先用别的工具转文字，再把文本粘贴导入</td></tr>
   <tr><td>解析器降级</td><td>首选解析器不可用时自动回退到备用方案，并记一条审计</td><td>无需处理，结果照常可用</td></tr>
-  <tr><td>链接下载失败</td><td>作业失败，给出脱敏中文原因（平台风控/网络/格式等）</td><td>按提示排查后重试作业</td></tr>
+  <tr><td>链接下载失败</td><td>作业失败，给出脱敏中文原因（平台风控/网络/格式等），可按提示运行下载诊断脚本排查</td><td>按提示排查后在作业页重试</td></tr>
   <tr><td>磁盘不足 / 文件超 2GB</td><td>上传前直接拦截</td><td>清理磁盘或拆分文件</td></tr>
-  <tr><td>文件内容与扩展名不符（如把 .txt 改名 .pdf）</td><td>入库前校验拒绝（422），不留任何残留</td><td>确认文件真实格式后重新导出/导入</td></tr>
-  <tr><td>PDF 内容损坏 / DOCX 结构异常或超限</td><td>入库前校验拒绝（422；解压体积超限为 413）</td><td>用原始来源重新获取，或用 Office/WPS 重新另存后导入</td></tr>
-  <tr><td>文本文件含异常空字节</td><td>入库前校验拒绝（422）</td><td>用文本编辑器转存为 UTF-8 后重新导入</td></tr>
-  <tr><td>标签超 100 项 / 单标签超 100 字 / 请求体超 12MiB</td><td>校验拒绝（422 / 413）</td><td>精简标签或拆分内容后再导入</td></tr>
   <tr><td>AI 作业失败（转写/摘要/分类）</td><td>只该作业失败，<b>来源本身仍然是"已完成"</b></td><td>检查设置页 AI 配置后手动重试</td></tr>
 </table>
 
@@ -430,7 +429,7 @@
     <rect x="290" y="70" width="120" height="60" rx="10" fill="#e7f2ef" stroke="#2c6e63"/>
     <text x="350" y="95" font-weight="bold" fill="#14312b">原始存档</text><text x="350" y="115" font-size="11" fill="#5f6f6a">不可变·指纹寻址</text>
     <rect x="430" y="70" width="130" height="60" rx="10" fill="#fff" stroke="#2c6e63"/>
-    <text x="495" y="95" font-weight="bold" fill="#14312b">文本表示</text><text x="495" y="115" font-size="11" fill="#5f6f6a">抽取/转写/摘要/修订</text>
+    <text x="495" y="95" font-weight="bold" fill="#14312b">文本版本</text><text x="495" y="115" font-size="11" fill="#5f6f6a">抽取/转写/摘要/修订</text>
     <rect x="580" y="70" width="110" height="60" rx="10" fill="#fff" stroke="#2c6e63"/>
     <text x="635" y="95" font-weight="bold" fill="#14312b">证据</text><text x="635" y="115" font-size="11" fill="#5f6f6a">摘录+定位坐标</text>
     <rect x="710" y="70" width="100" height="60" rx="10" fill="#fff" stroke="#2c6e63"/>
@@ -447,23 +446,23 @@
     </g>
   </g>
   <g font-size="12" fill="#5f6f6a" text-anchor="middle">
-    <text x="70" y="170">如：2026新外贸视频</text>
+    <text x="70" y="170">如：独立思考视频</text>
     <text x="210" y="170">第 1 版 video.mp4</text>
-    <text x="350" y="170">指纹 d41d…（去重）</text>
-    <text x="495" y="170">本地转写 1828 字</text>
-    <text x="635" y="170">"做外贸的第一步…"</text>
-    <text x="635" y="190" fill="#8a4b12">定位：视频 00:32–01:10</text>
+    <text x="350" y="170">指纹寻址（去重）</text>
+    <text x="495" y="170">本地转写 1193 字</text>
+    <text x="635" y="170">"厌蠢症是挣不到钱的…"</text>
+    <text x="635" y="190" fill="#8a4b12">定位：视频时间段（示意）</text>
     <text x="880" y="170">你写的陈述</text>
   </g>
   <rect x="10" y="205" width="920" height="26" rx="6" fill="#f4f7f6"/>
-  <text x="470" y="223" font-size="12" fill="#14312b" text-anchor="middle">规则：表示与证据一旦写入永不修改（修正=新建）；事实/指令/案例类知识发布时必须挂有效证据；删除来源时整条链级联清理</text>
+  <text x="470" y="223" font-size="12" fill="#14312b" text-anchor="middle">规则：文本版本与证据一旦写入永不修改（修正=新建一稿）；事实/指令/案例类知识发布时必须挂有效证据；删除来源时整条链级联清理</text>
 </svg>
 <figcaption>图 13 · 证据链模型。你在详情页"证据与引用"区看到的每一条，都能一键"定位"回原文位置。</figcaption>
 </div>
 
 <h3>5.2 文本版本与检索切块</h3>
 <ul>
-  <li><b>文本版本（系统内部称 representation）</b>：同一来源可以有多个文本版本——最初解析的"抽取"、语音"转写"、AI"摘要"、你的"人工修订"。详情页的文本版本下拉按时间排序（新稿在后），每次触发生成一份新稿、旧稿永久保留，绝不互相覆盖。每份带<b>身份指纹</b>（解析器名+版本+配置哈希）：同一身份重复处理自动跳过（幂等），同一身份内容不一致直接报错（防数据撕裂）。</li>
+  <li><b>文本版本</b>：同一来源可以有多个文本版本——最初解析的"抽取"、语音"转写"、AI"摘要"、你的"人工修订"。每个版本带<b>身份指纹</b>（处理引擎名+版本+配置哈希）：同一身份重复处理自动跳过（幂等），同一身份内容不一致直接报错（防数据撕裂）。</li>
   <li><b>检索切块</b>：正文按 <b>1200 字硬切</b>、无重叠、无语义边界，每块带指纹，仅供检索命中用。<b>切块不是证据</b>，不能挂在知识上。</li>
   <li><b>检索默认只看最新完整版本</b>；已删除来源不参与检索。</li>
 </ul>
@@ -471,19 +470,50 @@
 <h3>5.3 AI 能做什么、不能做什么</h3>
 <table>
   <tr><th>AI 产物</th><th>引擎</th><th>入库规则</th></tr>
-  <tr><td>语音转写</td><td>本地 FunASR 优先，可降级 OpenAI 兼容 API</td><td>写成"转写"表示 + 带视频时间段的证据；引擎与降级事实记入身份指纹</td></tr>
-  <tr><td>内容摘要</td><td>理解模型（200–600 字约束）；转写疑似不完整时可用视频直送多模态补全，直送不可行时自动按"关键帧联络表"兜底理解画面（可关闭）；转写完整也可在设置中开启画面增强</td><td>写成"摘要"表示 + 独立"画面理解"表示（逐条时间定位）；附分类建议标记</td></tr>
-  <tr><td>画面理解（关键帧联络表）</td><td>多模态模型单次理解 ≤24 张缩略图网格（帧字节远小于整片直送）</td><td>写成独立"画面理解"表示：每条带视频时间段定位与画面文字，进入检索；绝不臆造定位</td></tr>
+  <tr><td>语音转写</td><td>本地 FunASR 优先（默认路径），可降级 OpenAI 兼容 API</td><td>写成"转写"文本版本 + 带视频时间段的证据；引擎与降级事实记入身份指纹</td></tr>
+  <tr><td>内容摘要</td><td>理解模型（200–600 字约束）；按"三级级联"补充画面信息（见 5.4）</td><td>写成"摘要"文本版本；附分类建议标记与档位徽标</td></tr>
+  <tr><td>画面理解条目</td><td>视频直送模型的联络表理解（缩略图网格单次调用）</td><td>写成独立"画面理解"文本版本（父链挂转写），逐条带视频时间段证据、进全文检索</td></tr>
   <tr><td>分类建议</td><td>理解模型（领域 0–3 / 体裁 0–1 / 标签 0–8）</td><td><b>只填空缺</b>：你填过的字段绝不覆盖；标签取并集合并；无可填则不动数据库</td></tr>
 </table>
-<div class="warn"><b>AI 的边界（系统级承诺）：</b>AI 作业失败/取消不影响来源的处理状态；AI 绝不生成证据（证据只来自真实原文定位）；AI 不创建知识/主题/关系；提示词、模型、阈值全部纳入身份指纹，换配置即新身份，历史产物可区分。</div>
 
-<h3>5.4 数据落在哪</h3>
+<h4>5.4 摘要的"三级级联"：AI 怎么补画面信息</h4>
+<div class="svg-wrap">
+<svg viewBox="0 0 940 300" xmlns="http://www.w3.org/2000/svg" font-family="Microsoft YaHei, sans-serif">
+  <defs><marker id="arr5" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto"><path d="M0,0 L10,4 L0,8 Z" fill="#2c6e63"/></marker></defs>
+  <g font-size="12.5" text-anchor="middle">
+    <rect x="20" y="30" width="190" height="56" rx="10" fill="#e7f2ef" stroke="#2c6e63"/>
+    <text x="115" y="53" font-weight="bold" fill="#14312b">转写完整性判定</text><text x="115" y="72" font-size="11" fill="#5f6f6a">覆盖率/最长静音 + LLM 复核</text>
+    <rect x="300" y="10" width="200" height="52" rx="10" fill="#e2f2ea" stroke="#1d6b4f"/>
+    <text x="400" y="32" font-weight="bold" fill="#1d6b4f">转写完整 → 标准摘要</text><text x="400" y="50" font-size="11" fill="#5f6f6a">徽标"标准"（tier 1）</text>
+    <rect x="300" y="80" width="200" height="52" rx="10" fill="#e8ebf7" stroke="#3a4a8c"/>
+    <text x="400" y="102" font-weight="bold" fill="#3a4a8c">可选：画面理解增强</text><text x="400" y="120" font-size="11" fill="#5f6f6a">徽标"标准+画面"（tier 1.5，默认关）</text>
+    <rect x="300" y="150" width="200" height="52" rx="10" fill="#fff" stroke="#2c6e63"/>
+    <text x="400" y="172" font-weight="bold" fill="#14312b">疑似缺失 → ① 视频直送</text><text x="400" y="190" font-size="11" fill="#5f6f6a">整片发多模态模型，徽标"深度"（tier 2）</text>
+    <rect x="560" y="150" width="200" height="52" rx="10" fill="#fff" stroke="#2c6e63"/>
+    <text x="660" y="172" font-weight="bold" fill="#14312b">② 联络表兜底（默认开）</text><text x="660" y="190" font-size="11" fill="#5f6f6a">关键帧缩略图网格理解画面，"标准+画面"</text>
+    <rect x="560" y="222" width="200" height="52" rx="10" fill="#fdf3d8" stroke="#9a6a00"/>
+    <text x="660" y="244" font-weight="bold" fill="#9a6a00">③ 诚实标注"可能缺少画面信息"</text><text x="660" y="262" font-size="11" fill="#5f6f6a">两条路都不通时，绝不伪造</text>
+  </g>
+  <g stroke="#2c6e63" stroke-width="2" fill="none">
+    <line x1="210" y1="48" x2="296" y2="38" marker-end="url(#arr5)"/>
+    <line x1="210" y1="68" x2="296" y2="168" marker-end="url(#arr5)"/>
+    <line x1="400" y1="62" x2="400" y2="76" stroke="#3a4a8c" stroke-dasharray="5 3" marker-end="url(#arr5)"/>
+    <line x1="500" y1="176" x2="556" y2="176" marker-end="url(#arr5)"/>
+    <line x1="660" y1="202" x2="660" y2="218" marker-end="url(#arr5)"/>
+  </g>
+  <text x="760" y="176" font-size="11" fill="#5f6f6a">直送不可行或失败时</text>
+</svg>
+<figcaption>图 14 · 摘要补充理解三级级联。也可以在摘要区点"强制深度理解"手动要求直送。联络表缩略图是瞬态文件，用完即删、永不入库。</figcaption>
+</div>
+
+<div class="warn"><b>AI 的边界（系统级承诺）：</b>AI 作业失败/取消不影响来源的处理状态；AI 产物的证据定位只来自真实处理过程；AI 不创建知识/主题/关系；提示词、模型、阈值全部纳入身份指纹，换配置即新身份，历史产物可区分。AI 密钥只存本机，绝不进库/日志/备份/导出。</div>
+
+<h3>5.5 数据落在哪</h3>
 <table>
   <tr><th>位置</th><th>内容</th></tr>
   <tr><td><code>data/artifacts/&lt;指纹前2位&gt;/&lt;指纹&gt;</code></td><td>原始文件与视频帧，不可变，按指纹去重</td></tr>
-  <tr><td><code>data/state/knowledge.db</code></td><td>SQLite 主库：来源、版本、表示、证据、知识、关系、主题、作业、审计（可切换 PostgreSQL）</td></tr>
-  <tr><td><code>data/staging/</code></td><td>临时工作区（上传暂存、下载、抽帧、音轨），作业结束即清理</td></tr>
+  <tr><td><code>data/state/knowledge.db</code></td><td>SQLite 主库：来源、版本、文本版本、证据、知识、关系、主题、作业、审计（可切换 PostgreSQL）</td></tr>
+  <tr><td><code>data/staging/</code></td><td>临时工作区（上传暂存、下载、抽帧、音轨、联络表缩略图），作业结束即清理</td></tr>
   <tr><td><code>data/backups/</code> · <code>data/exports/</code></td><td>备份 zip 与导出归档</td></tr>
   <tr><td><code>data/state/ai/credentials.json</code></td><td>AI 密钥（仅此一处，不进库/日志/备份/导出）</td></tr>
   <tr><td><code>data/models/</code></td><td>本地解析/转写模型缓存（白名单锁定、哈希校验）</td></tr>
@@ -495,98 +525,104 @@
 <table>
   <tr><th>事情</th><th>执行者</th><th>说明</th></tr>
   <tr><td>文件落盘、指纹去重、建档</td><td><span class="tag auto">自动</span></td><td>导入瞬间完成，失败自动回滚</td></tr>
-  <tr><td>文档解析 / 图片元数据 / 视频抽帧</td><td><span class="tag auto">自动</span></td><td>纯本地，无网络；断路器保护。视频抽帧在转写之后执行，锚点融合语音内容（转写不可用自动退化为纯信号抽帧）</td></tr>
+  <tr><td>文档解析 / 图片元数据 / 视频抽帧</td><td><span class="tag auto">自动</span></td><td>纯本地，无网络；断路器保护；抽帧自动融合转写语义锚点</td></tr>
   <tr><td>B站/抖音链接下载</td><td><span class="tag mixed">混合</span></td><td>你粘链接，yt-dlp 自动下载并入视频管线</td></tr>
-  <tr><td>语音转写、AI 摘要、AI 分类建议、画面理解</td><td><span class="tag mixed">混合</span></td><td>需你在设置页配置 AI/模型；开自动流水线后视频导入即转写先行、自动接力分析/摘要，否则详情页手动触发</td></tr>
+  <tr><td>语音转写、AI 摘要、画面理解、AI 分类建议</td><td><span class="tag mixed">混合</span></td><td>需你在设置页配置模型；开自动流水线后自动接力（转写先行），否则详情页手动触发</td></tr>
+  <tr><td>视频"重新分析"（融合转写锚点重抽帧）</td><td><span class="tag human">人工发起</span></td><td>详情页按钮；纯本地、与 AI 无关；历史分析保留</td></tr>
   <tr><td>检索索引（1200 字切块）</td><td><span class="tag auto">自动</span></td><td>随解析产物一并落库</td></tr>
   <tr><td>每日备份、完整性抽样</td><td><span class="tag auto">自动</span></td><td>每日首次启动自动排队；手动备份/全量校验在"备份与导出"</td></tr>
   <tr><td>作业失联回收、失败重试</td><td><span class="tag auto">自动</span></td><td>租约机制；你也可以在作业页手动重试/取消</td></tr>
   <tr><td>元数据预填（导入表单）</td><td><span class="tag auto">自动</span></td><td>只读识别，可改可不管</td></tr>
   <tr><td>编辑标题/作者/标签/权利声明</td><td><span class="tag human">人工</span></td><td>AI 建议只填空缺，你填的永不覆盖</td></tr>
-  <tr><td><b>关系</b>：连接两条来源</td><td><span class="tag human">人工</span></td><td>系统只提示"同作品候选"，确认在你</td></tr>
+  <tr><td><b>关系</b>：连接两条来源</td><td><span class="tag human">人工</span></td><td>系统只提示"可能重复的来源"，确认在你</td></tr>
   <tr><td><b>主题</b>：建合集、挂来源</td><td><span class="tag human">人工</span></td><td>完全手工；区别于 AI 分类的"领域/标签"</td></tr>
   <tr><td><b>知识</b>：写陈述、挂证据、发布</td><td><span class="tag human">人工</span></td><td>发布校验由系统强制执行（事实类必须带证据）</td></tr>
-  <tr><td>人工修订（修正机器误读）</td><td><span class="tag human">人工</span></td><td>新建修订表示，原文不动</td></tr>
+  <tr><td>人工修订（修正机器误读）</td><td><span class="tag human">人工</span></td><td>新建修订稿，原稿不动</td></tr>
   <tr><td>删除 / 恢复 / 永久删除</td><td><span class="tag human">人工</span></td><td>两段式防误删；永久删除先记账再执行</td></tr>
   <tr><td>还原 / 导出 / 再导入</td><td><span class="tag human">人工</span></td><td>在"备份与导出"页操作，冲突由你裁决</td></tr>
 </table>
 
-<div class="tip"><b>一句话记忆法：</b>把系统当成一个极其可靠的<b>图书管理员</b>——收书、登记、复印、摘抄、按指纹防重复、每天盘点，全都不用你操心；但"这些书讲了什么道理、彼此之间什么关系、怎么分类摆架"——这是<b>你作为读者的工作</b>。</div>
+<div class="tip"><b>一句话记忆法：</b>把系统当成一个极其可靠的<b>图书管理员</b>——收书、登记、听写、摘抄、拍照、按指纹防重复、每天盘点，全都不用你操心；但"这些书讲了什么道理、彼此之间什么关系、怎么分类摆架"——这是<b>你作为读者的工作</b>。</div>
 
 <!-- ============ 七、实战 ============ -->
-<h2 id="s7">七、实战：以"2026新外贸"为例走一遍</h2>
-<p>你库里这条链接视频已经处理完毕（转写 1828 字 + AI 摘要已生成）。现在用它把三个手工功能点亮：</p>
+<h2 id="s7">七、实战：以"独立思考"视频为例走一遍</h2>
+<p>以库里这条链接视频"厌蠢症是挣不到钱的！！！ #独立思考 #认知思维"为例。它已处理完毕：本地 FunASR 转写 1193 字、AI 摘要已生成（领域被建议为 商业/教育/生活、8 个标签已写入）、抽帧 2 张。现在用它把三个手工功能点亮：</p>
 
 <div class="card">
-<h4 style="margin-top:0">第 1 步 · 建一个主题（1 分钟）</h4>
+<h4 style="margin-top:0">第 1 步 · 把视频挂进主题（30 秒）</h4>
 <ol>
   <li>打开该视频详情页 → 右侧"主题"区</li>
-  <li>在"新主题名称"输入 <code>外贸入门</code> → 点"新建主题"，本条来源自动挂入</li>
-  <li>回"资料库"，顶部"全部主题"下拉现在能按 <code>外贸入门</code> 筛选了</li>
+  <li>库里已有主题"认知提升"（尚未关联任何来源）→ 在"选择现有主题"下拉选中它 → 点"关联主题"</li>
+  <li>回"资料库"，顶部"全部主题"下拉选"认知提升"，只剩这条视频</li>
 </ol>
+<p class="kbd-hint">注意：创建主题和把来源挂进主题是两个动作——光建不挂，主题就是空合集。</p>
 </div>
 
 <div class="card">
 <h4 style="margin-top:0">第 2 步 · 发布第一条知识（3 分钟）</h4>
 <ol>
   <li>详情页找到"证据与引用"区 → 找到转写证据（带视频时间段定位那条）</li>
-  <li>下方"从证据创建知识"：类型选 <code>案例</code> 或 <code>事实</code></li>
-  <li>用<b>自己的话</b>写陈述，例如："2026 年普通人做外贸，可从 XX 切入，先 XX 再 XX"</li>
+  <li>下方"从证据创建知识"：类型选 <code>观点</code> 或 <code>案例</code></li>
+  <li>用<b>自己的话</b>写陈述，例如："创作者认为'厌蠢'心态会阻断对真实需求的洞察，从而影响赚钱能力"</li>
   <li>勾选那条转写证据 → 点"创建知识草稿"</li>
-  <li>左侧导航进"知识" → 找到草稿 → 点"发布"（若提示需要证据，说明没勾选 evidence）</li>
-  <li>以后在"检索"里搜"外贸"，这条知识会和来源一起出现</li>
+  <li>左侧导航进"知识" → 找到草稿 → 点"发布"（若提示需要证据，说明没勾选证据）</li>
+  <li>以后在"检索"里搜"独立思考"，这条知识会和来源一起出现</li>
 </ol>
 </div>
 
 <div class="card">
-<h4 style="margin-top:0">第 3 步 · 建第一条关系（等你有第二条相关来源后）</h4>
+<h4 style="margin-top:0">第 3 步 · 建第一条关系（库里已有两条视频，现在就能做）</h4>
 <ol>
-  <li>再导入一条相关内容，比如同系列的另一期视频、或该视频的图文稿</li>
-  <li>打开任一条详情页 → "关系"区 → 选择另一条 → 类型选 <code>相关</code>（若一个是另一个的更新版，选"新版本"）→ 创建</li>
-  <li>若两条是同一内容的不同载体（同指纹/同标题），系统会出"同作品候选"，一键标记"同一作品"</li>
+  <li>打开另一条视频（如"科学搞定爆款选材的方式…"）的详情页 → 右栏"关系"区</li>
+  <li>选择"独立思考"这条 → 类型选 <code>相关</code> → 创建</li>
+  <li>两条来源的详情页"关系"区会互相出现对方</li>
 </ol>
+<p class="kbd-hint">关系是双向可见的。类型选择建议：内容迭代用"新版本/修订版本"，主题呼应用"相关"，同一内容的不同载体（如视频+文字稿）用"同一作品"。</p>
 </div>
 
 <div class="card">
-<h4 style="margin-top:0">可选 · 修正转写错误</h4>
-<p>本地转写难免有错字。在详情页"人工修订"区提交修正后的文本：系统新建一个 <code>人工修订</code> 表示（检索、证据都以它为准），<b>原始转写保留不动</b>，任何时候都能对比机器版与人工版。</p>
+<h4 style="margin-top:0">可选 · 两个视频专属技巧</h4>
+<ul>
+  <li><b>重新分析</b>：详情页"转写与摘要"区点"重新分析"，系统会基于已完成的转写重新抽帧（融合转写语义锚点），生成一份新分析，历史帧全部保留。纯本地操作，不消耗 AI 调用。</li>
+  <li><b>人工修订</b>：本地转写难免有错字。在"人工修订"区提交修正后的文本：系统新建一稿"人工修订"（检索、证据都以它为准），<b>原始转写保留不动</b>，任何时候都能对比机器稿与人工稿。</li>
+</ul>
 </div>
 
 <!-- ============ 八、FAQ ============ -->
 <h2 id="s8">八、常见问题 FAQ</h2>
 
 <h4>Q1：为什么我的来源详情里"关系 / 主题 / 知识"全是空的？</h4>
-<p>正常。这三样是纯人工策展功能，系统不自动创建。库里只有一条来源时"关系"天然为空（关系需要两条来源）；主题和知识等你按第七章的步骤创建。</p>
+<p>正常。这三样是纯人工策展功能，系统不自动创建。另外注意：主题建好后还要"关联"来源——只建主题不挂来源，主题列表里就是空合集（库里现有的"外贸""认知提升"两个主题就是这种待关联状态）。</p>
 
 <h4>Q2：AI 摘要/分类没有出现？</h4>
 <p>检查"设置"页：① 是否配置了理解模型的 API 密钥；② "自动流水线"是否开启。也可以直接在详情页"转写与摘要"区手动点按钮触发，然后到"作业"页看执行结果与失败原因。</p>
 
-<h4>Q3：扫描版 PDF 导入后提示"等待 OCR"？</h4>
+<h4>Q3：摘要上的"可能缺少画面信息"是什么意思？</h4>
+<p>转写完整性判定认为语音可能没覆盖核心内容（比如大量纯画面演示），且视频直送与联络表兜底两条补画面路径都不通（未配置或失败）。此时系统会诚实标注，而不是编一段。配置视频直送模型后重新摘要即可消除。</p>
+
+<h4>Q4："重新分析"和"内容摘要"有什么区别？</h4>
+<p>完全不同的两件事：<b>重新分析</b>是纯本地的重新抽帧（融合转写语义锚点，零网络、零 AI 调用，历史分析保留）；<b>内容摘要</b>是调用 AI 理解模型重新生成文字摘要。想让 AI 看得更准时，正确顺序是：转写 → 重新分析 → 摘要。</p>
+
+<h4>Q5：扫描版 PDF 导入后提示"等待 OCR"？</h4>
 <p>系统刻意不内置 OCR（避免隐式下载大模型）。用任意 OCR 工具把扫描件转成文字后，以"粘贴文本"方式再导入一条，并用"关系"把两条连起来。</p>
 
-<h4>Q4：检索搜不到我以为有的内容？</h4>
-<p>它是字面匹配：① 换个原文真实出现过的说法（"外贸"≠"跨境贸易"）；② 确认来源处理状态是"已完成"且不在"已删除"里；③ 图片只索引 EXIF 元数据，图片里的文字内容不参与检索。</p>
+<h4>Q6：检索搜不到我以为有的内容？</h4>
+<p>它是字面匹配：① 换个原文真实出现过的说法（"独立思考"≠"批判性思维"）；② 确认来源处理状态是"已完成"且不在"已删除"里；③ 图片只索引 EXIF 元数据，图片里的文字内容不参与检索。</p>
 
-<h4>Q5：换电脑怎么搬走整个库？</h4>
+<h4>Q7：换电脑怎么搬走整个库？</h4>
 <p>方式一：备份与导出页 → "确认并导出"得到 zip → 新机器上"校验并再导入"。方式二：直接整体拷贝 <code>data/</code> 目录（停机状态下）。搬完记得做一次"全量校验"。</p>
 
-<h4>Q6：AI 密钥安全吗？</h4>
-<p>密钥只存本机 <code>data/state/ai/credentials.json</code>，不进数据库、日志、备份、导出包；所有 AI 报错都脱敏后才显示。导出归档给别人时天然不带密钥。若凭据文件损坏，相关功能会明确报错（503）并拒绝覆盖——按界面提示修复或删除该文件重新配置即可。</p>
+<h4>Q8：AI 密钥安全吗？</h4>
+<p>密钥只存本机 <code>data/state/ai/credentials.json</code>，不进数据库、日志、备份、导出包；所有 AI 报错都脱敏后才显示。导出归档给别人时天然不带密钥。</p>
 
-<h4>Q7：作业卡住或失败了？</h4>
+<h4>Q9：作业卡住或失败了？</h4>
 <p>"作业"页看状态：失败会显示脱敏原因，点"重试"即可；"受阻"表示缺前置条件（FFmpeg 缺失、AI 未配置、PDF 加密），按提示补齐再重试。中途关机导致的假死作业会被租约机制自动回收重排。</p>
 
-<h4>Q8：会不会误删我的原始文件？</h4>
-<p>不会。删除是两段式：先软删（随时恢复）；永久删除需二次确认，且系统只在"无人引用"时才删除存档文件——同一份文件被多条来源共享时，删一条来源绝不动文件。删除动作全部留审计（保留 ≥366 天）。若永久删除时个别存档文件因被占用删不掉，系统会把清理任务记入队列并在后台自动重试（作业页可见），逻辑删除不受影响。</p>
-
-<h4>Q9：想从其他设备或用局域网 IP 访问，打不开？</h4>
-<p>设计如此。系统只接受来自本机回环地址（127.0.0.1 / localhost）的访问；用局域网 IP、其他域名或携带异常头的请求会被直接拒绝（403）——这是刻意的隐私边界，不是故障。</p>
-
-<h4>Q10：视频直送、画面理解兜底、"重新分析"是什么关系？</h4>
-<p>三级分工：① 转写完整 → 只出纯文本摘要；② 转写疑似不完整（或你点"强制深度理解"）→ 整片视频直送多模态模型（信息最全）；③ 直送行不通（视频太大、没配中转等）→ 自动退一步，把 ≤24 张关键帧缩略图拼成一张"联络表"发给多模态模型理解画面（便宜得多，且逐条带时间定位）。②③都不行才标记"可能缺少画面信息"。转写完整但你想要画面增强，在设置里开"画面增强"开关。"重新分析"按钮与 AI 无关——它让关键帧采样融合转写语义（语音说到什么就看那一刻），转写晚于分析完成时用它刷新关键帧，历史分析保留。</p>
+<h4>Q10：会不会误删我的原始文件？</h4>
+<p>不会。删除是两段式：先软删（随时恢复）；永久删除需二次确认，且系统只在"无人引用"时才删除存档文件——同一份文件被多条来源共享时，删一条来源绝不动文件。删除动作全部留审计（保留 ≥366 天）。</p>
 
 <hr>
-<p class="kbd-hint" style="text-align:center;color:#5f6f6a">本指南基于本机实际部署与真实数据生成 · 截图取自你当前的库 · 源知库 · 仅本机 · 无遥测</p>
+<p class="kbd-hint" style="text-align:center;color:#5f6f6a">本指南基于 v1.7 管线与本机真实数据编写 · 截图取自当前资料库 · 源知库 · 仅本机 · 无遥测</p>
 </main>
 </div>
 </body>
