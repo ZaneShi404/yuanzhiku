@@ -24,9 +24,7 @@
   "evidence_refs": [
     "reports/development/20260904T044500Z-v1-7-frame-pipeline-implementation.md",
     "reports/testing/20260904T050000Z-v1-7-frame-pipeline-regression.md",
-    "docs/v1-7-requirements.md",
-    "docs/decisions/ADR-012-transcript-guided-frame-sampling.md",
-    "docs/decisions/ADR-013-frame-understanding-fallback.md"
+    "reports/review/20260904T015022Z-v1-7-independent-adversarial-code-review.md"
   ],
   "release_gates": [
     {

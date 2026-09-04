@@ -17,9 +17,7 @@
   "defects": [],
   "evidence_refs": [
     "reports/testing/20260904T050000Z-v1-7-frame-pipeline-regression.md",
-    "reports/development/20260904T044500Z-v1-7-frame-pipeline-implementation.md",
-    "docs/v1-7-requirements.md",
-    "docs/requirements.md"
+    "reports/development/20260904T044500Z-v1-7-frame-pipeline-implementation.md"
   ],
   "release_gates": [
     {
