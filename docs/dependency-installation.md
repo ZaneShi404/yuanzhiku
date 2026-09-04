@@ -10,7 +10,7 @@ Push-Location frontend; npm ci; npm run build; Pop-Location
 
 Docling 是可选的首选解析能力，Python 包（MIT 许可证）以锁定版本写入 `backend/requirements.lock`（`docling==2.120.1`，2026-08-14 起随 venv 安装，用于实测 Docling 解析路径的页码 segments 行为）。未验证许可、来源、哈希的模型不会下载；模型缓存路径是 `<data-root>\models`。`backend/models.lock.json` 是唯一允许自动模型来源的审核清单（`REQ-013`）。锁条目 schema 为六个必需字符串字段：`name`、`version`、`source_url`、`license`、`cache_path`、`sha256`——缺一即视为未批准，Docling 保持不可用。**"按锁文件直接公开下载"的通道刻意未实现**：当前基线为空白名单（`models: []`），即零下载、零网络面；日后若批准模型，须先实现并独立审核合规下载通道，再把条目写入锁文件。当前基础安装包含纯本地回退解析器 pypdf、python-docx，绝无云回退（`REQ-014`）。
 
-链接获取（受限下载通道）依赖锁定版本的 `yt-dlp`（Unlicense）与 `psutil`（MIT，内存断路器）——两者已写入 `backend/requirements.lock`（`yt-dlp==2026.7.4`、`psutil==7.2.2`），随 venv 一次性安装，无额外二进制。版本评估纪律：`REQ-046` 锁定后**绝不自动升级**；每次候选版本升级须手动评估（变更日志、许可证、行为变化、出站域集合变化），并经 T-VID-003/004 全量回归 + T-VID-005 手工验收后才可更新 lock。
+链接获取（受限下载通道）依赖锁定版本的 `yt-dlp`（Unlicense）与 `psutil`（MIT，内存断路器）——两者已写入 `backend/requirements.lock`（`yt-dlp==2026.8.19`、`psutil==7.2.2`），随 venv 一次性安装，无额外二进制。版本评估纪律：`REQ-046` 锁定后**绝不自动升级**，**唯一例外（用户预授权 2026-09-04）：`yt-dlp` 跟随上游日历版本升级**——平台反爬参数高频变化，yt-dlp 以日历版本高频修复对应抽取器（实证：2026-09-04 抖音 web detail 接口 403 导致下载全量失败，升级 2026.7.4→2026.8.19 后同一链接、同一代理、同一 Cookie 立即恢复）；每次升级须手动评估（变更日志、许可证、行为变化、出站域集合变化）并经下载链路回归 + 全量回归后才可更新 lock。下载故障诊断使用 `tools/diagnose_download.py`（四分类定位：链接/Cookie/代理拦截/版本过时，与下载作业走同一受限通道）。
 
 可配置媒体 AI（`REQ-051`/`REQ-052`）依赖锁定版本的 `litellm==1.96.2`（MIT）——本次升级唯一新增 Python 依赖，已写入 `backend/requirements.lock`（`REQ-046`）；本环境经阿里云 PyPI 镜像安装，锁定之时镜像上更新的 1.98.0 仅为 dev 预发布，故钉最新稳定版。litellm 仅在用户显式配置 AI 分组后才被调用，默认关闭时零网络面；升级纪律与 yt-dlp 相同：绝不自动升级，候选版本须手动评估并经 T-AI-001 回归后才可更新 lock。
 

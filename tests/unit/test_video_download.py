@@ -47,7 +47,7 @@ from app.ports.media import (
 
 RUN_ROOT = Path(os.environ.get("YUANZHIKU_TEST_RUNTIME", Path(__file__).resolve().parents[1] / "runtime")) / "video-download"
 
-GENERIC_FAILURE_MESSAGE = "链接失效、平台拒绝或下载产物无效，请重新复制分享链接或稍后重试"
+GENERIC_FAILURE_MESSAGE = "链接失效、平台拒绝或下载产物无效，请重新复制分享链接或稍后重试；若反复失败，可能是平台反爬策略更新所致，可尝试升级 yt-dlp 或重新导出平台 Cookie（可用 tools/diagnose_download.py 定位）"
 
 
 class FakeMediaAnalyzer:

@@ -396,7 +396,7 @@ class JobService:
         except DownloadInputInvalid:
             try:
                 # 反爬/链接失效/平台拒绝/超限/产物无效：通用脱敏消息，可有限重试。
-                self._finish(job, "failed", "链接失效、平台拒绝或下载产物无效，请重新复制分享链接或稍后重试")
+                self._finish(job, "failed", "链接失效、平台拒绝或下载产物无效，请重新复制分享链接或稍后重试；若反复失败，可能是平台反爬策略更新所致，可尝试升级 yt-dlp 或重新导出平台 Cookie（可用 tools/diagnose_download.py 定位）")
             except JobLeaseLost:
                 pass
         except ParserCircuitBreaker as exc:

@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "report_id": "RPT-YT-DLP-UPGRADE-DOWNLOAD-DIAGNOSTICS-20260904T054706Z-001",
+  "recorded_at_utc": "2026-09-04T05:47:06Z",
+  "report_kind": "development",
+  "author_role": "development",
+  "independence": "non_independent",
+  "product_version": "v1.7.0",
+  "decision_scope": "archive_local",
+  "verdict": "accepted",
+  "requirements": [
+    "REQ-046",
+    "REQ-047"
+  ],
+  "defects": [],
+  "evidence_refs": [
+    "reports/testing/20260904T050000Z-v1-7-frame-pipeline-regression.md"
+  ],
+  "release_gates": [
+    {
+      "gate_id": "GATE-UNIT-INTEGRATION-REGRESSION",
+      "status": "passed",
+      "requirements": [
+        "REQ-046",
+        "REQ-047"
+      ]
+    },
+    {
+      "gate_id": "GATE-FRONTEND-BUILD",
+      "status": "passed",
+      "requirements": []
+    },
+    {
+      "gate_id": "GATE-BROWSER-BLACKBOX",
+      "status": "blocked",
+      "requirements": []
+    },
+    {
+      "gate_id": "GATE-COMPOSE-PHYSICAL",
+      "status": "blocked",
+      "requirements": []
+    },
+    {
+      "gate_id": "GATE-RELEASE-READINESS",
+      "status": "blocked",
+      "requirements": []
+    }
+  ]
+}
