@@ -1032,7 +1032,14 @@ def create_app(
         if detail is None:
             raise HTTPException(status_code=404, detail="视频来源不存在或尚不可用")
         detail["media_capability"] = svc.media_analyzer.capability()
-        detail["ai_capability"] = svc.media_ai.capability()
+        # 详情页能力视图与 /capabilities 同构（含 local_stt 与 video_input 节点）：
+        # 前端「强制深度理解」按钮以 ai_capability.video_input.video_input 门控，
+        # 缺失该节点会导致按钮永久禁用（用户报告 2026-09-04）。
+        detail["ai_capability"] = {
+            **svc.media_ai.capability(),
+            "local_stt": svc.local_transcriber.capability(),
+            "video_input": _video_input_capability(svc),
+        }
         return detail
 
     @app.post(f"{api}/videos/{{source_id}}/analyze", status_code=201, tags=["videos"])

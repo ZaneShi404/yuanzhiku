@@ -608,6 +608,19 @@ def test_auto_pipeline_unconfigured_ai_creates_no_chained_jobs(client_and_servic
     assert not kinds.intersection({"video_transcribe", "video_summarize", "source_classify"})
 
 
+def test_video_detail_capability_includes_video_input_node(client_and_services) -> None:
+    """详情页 ai_capability 必须与 /capabilities 同构地包含 video_input 节点——
+    「强制深度理解」按钮的门控依赖它（用户报告 2026-09-04：节点缺失导致按钮
+    自 v1.5 起永久禁用）。"""
+    client, services = client_and_services
+    source_id, _ = _upload_video(client)
+    detail = client.get(f"/api/v1/videos/{source_id}").json()
+    capability = detail["ai_capability"]
+    assert capability["understand_enabled"] is False
+    assert capability["local_stt"]["enabled"] is False
+    assert capability["video_input"] == {"video_input": False, "provider": "off"}
+
+
 def test_ingest_enqueue_matrix_prioritizes_transcription(client_and_services) -> None:
     """v1.7 入队矩阵（REQ-056.1，决策 23）：转写器可用时入库同事务入队转写
     （priority 110）与分析（100）；单 worker 按 priority DESC 领取，转写先执行，
