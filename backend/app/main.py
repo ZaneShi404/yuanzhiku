@@ -1538,7 +1538,9 @@ def create_app(
             candidate = static_dir / web_path
             if web_path and candidate.is_file():
                 return FileResponse(candidate)
-            return FileResponse(static_dir / "index.html")
+            # 入口页禁用缓存（用户报告 2026-09-04：发版后浏览器停留旧构建）：
+            # 强制浏览器每次以 ETag 复验；/assets 文件名自带内容哈希，不受影响。
+            return FileResponse(static_dir / "index.html", headers={"Cache-Control": "no-cache"})
 
     return app
 
