@@ -145,6 +145,14 @@
       "acceptance_report": "reports/testing/20260904T024054Z-v1-7-archive-candidate-acceptance.md",
       "acceptance_report_sha256": "41c2df1de5714484b3a826b82c9e9585b8bf5351eb4a73917d60e192ac76a111",
       "supersedes_run_id": "20260903T064539Z-v1-6-final-record"
+    },
+    {
+      "run_id": "20260904T025612Z-v1-7-final-record",
+      "manifest_sha256": "b758a83339dc9acba79152e6fec44c5e829a8ff9192bcb70d0f40740422dd6bc",
+      "archive_local_verdict": "accepted",
+      "acceptance_report": "reports/testing/20260904T024643Z-v1-7-final-record-acceptance.md",
+      "acceptance_report_sha256": "39c8426bead5d845118ce65c0774270fd985b210c60ac42e4639ac0d9c0667ba",
+      "supersedes_run_id": "20260904T022759Z-v1-7-candidate"
     }
   ]
 }
