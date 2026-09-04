@@ -83,6 +83,9 @@ BASELINE_DIRECTORIES = (
     "reports/development/",
     "reports/testing/",
     "reports/infrastructure/",
+    # 复核报告为 T0 归档源目录（archive_v1.py 同名单）；a2fffa0 引入 review
+    # 报告类型时验证器白名单遗漏了该目录，此处补齐（v1.7.0 归档周期处置）。
+    "reports/review/",
     "reports/versions/",
 )
 ALLOWED_BASELINE_SUFFIXES = frozenset({".py", ".ps1", ".md", ".json", ".sql", ".ts", ".tsx", ".css", ".yml", ".yaml", ".ini", ".lock"})
