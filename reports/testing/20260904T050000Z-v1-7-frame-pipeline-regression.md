@@ -2,7 +2,7 @@
 
 - 日期：2026-09-04。
 - 角色边界：本报告仅记录开发侧全量回归与新增测试执行结果，不包含独立验收结论（独立性口径：`non_independent`）。
-- 被测状态：master `f234385`（实现四提交 292e592 / 7ca740f / ace83bd / a978743 + 文档冻结 f234385）。
+- 被测状态：master `f234385`（实现四提交 292e592 / 7ca740f / ace83bd / a978743 + 文档冻结 f234385）；第三行覆盖独立复核处置提交 `585dc1b`（P2-1/P2-2/P3 修复 + 2 新用例，见 `reports/review/20260904T015022Z-v1-7-independent-adversarial-code-review.md`）。
 
 ## 执行结果
 
@@ -10,6 +10,7 @@
 |---|---|
 | `PYTHONPATH=backend .venv/Scripts/python.exe -m pytest tests/unit tests/integration -p no:cacheprovider -q` | **`503 passed, 4 skipped in 1964.04s (0:32:44)`，0 failed** |
 | 变更前基线（同命令，变更前代码） | `489 passed, 4 skipped in 2471.26s`，0 failed |
+| **独立复核处置后全量回归**（同命令，树 = 处置提交 `585dc1b`） | **`505 passed, 4 skipped in 1964.37s (0:32:44)`，0 failed**（503 + 复核处置新增 2 用例） |
 
 新增 14 个用例全部通过：T-REORDER-001 双用例（`test_ingest_enqueue_matrix_prioritizes_transcription`、`test_analyze_chains_transcribe_when_configured_late`）、T-ANCH-001 七用例（锚点派生/三级吸附/同距优先级/去重优先级/抽帧融合/身份组合）、T-FRAME-001 四用例（兜底救援/关闭回退/增强支路/越界格子丢弃）、T-FRAME-002 一用例（转写晚到→手动重分析→新分析身份并存、detail 取最新、旧帧保留）。
 
