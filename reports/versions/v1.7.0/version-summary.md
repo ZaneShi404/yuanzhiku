@@ -14,6 +14,12 @@
 - **手动重分析与 API/UI**（`REQ-043`/`REQ-044` 修订）：`POST /videos/{id}/analyze` 手动重分析（转写晚到后获得引导帧，多分析并存、detail 取最新）；设置页帧理解三字段；详情页画面理解条目区块、徽标与「重新分析」按钮；关键帧标题标注采样来源。
 - **决策与文档**：决策 23–27 归档（ADR-012/013，ADR-006/011 标记部分取代）；REQ-056/057 新增、REQ-016/017/043/044/051/052/053/055 修订进入冻结基线；威胁模型 4 行、api-contract/acceptance-matrix/test-plan/operations/user-guide 同步。
 
+## 候选链
+
+| Run ID | 本地档案裁定 | Manifest SHA-256 | 裁定记录 | 后继关系 |
+| --- | --- | --- | --- | --- |
+| `20260904T022759Z-v1-7-candidate` | `accepted` | `f83876dd18457541783849f8c0c37278c47b70bc5040453f08a9c22f552797ed` | `20260904T024054Z-v1-7-archive-candidate-acceptance` | 后继 `20260903T064539Z-v1-6-final-record` |
+
 ## 门禁状态
 
 | 门禁 | 状态 | 说明 |
