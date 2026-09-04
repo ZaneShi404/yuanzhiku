@@ -169,6 +169,9 @@ function formatDate(value?: string | null) {
   return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '-'
 }
 function formatDateOnly(value?: string | null) { return value || '-' }
+function formatTimestamp(value?: string | null) {
+  return value ? new Date(value).toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '-'
+}
 function stateLabel(value: string) {
   const map: Record<string, string> = {
     queued: '排队', running: '处理中', retry_wait: '等待重试', succeeded: '已完成',
@@ -181,7 +184,7 @@ function sourceType(value: string) {
   return value === 'paste' ? '粘贴文本' : value === 'file' ? '本地文件' : value === 'douyin' ? '抖音参考' : value === 'video_link' ? '链接视频' : '外部卡'
 }
 function representationKindLabel(kind: string) {
-  const map: Record<string, string> = { extraction: '提取', manual: '人工修订', transcription: '转写', summary: '摘要' }
+  const map: Record<string, string> = { extraction: '抽取', manual: '人工修订', transcription: '转写', summary: '摘要' }
   return map[kind] || kind
 }
 type SummarySuggestions = { domains: string[]; genres: string[]; tags: string[]; tier: number; visual_gap: boolean; video_direct: boolean; frame_fallback: boolean; enriched: boolean; applied: boolean }
@@ -892,16 +895,16 @@ function SourceDetail({
       </section>
 
       <section className="document-panel">
-        <header><h2>文本表示</h2><span>{representation?.kind === 'manual' ? '人工修订表示' : representation ? `${representation.parser_name} · ${representationKindLabel(representation.kind)}` : '暂无表示'}</span></header>
+        <header><h2>文本版本</h2><span>{representation?.kind === 'manual' ? '人工修订稿' : representation ? `${representationKindLabel(representation.kind)} · ${representation.parser_name}` : '暂无文本'}</span></header>
         {source.versions.length > 1 && <label className="panel-control">内容版本<select value={version?.id || ''} onChange={event => setVersionId(event.target.value)}>{source.versions.map(item => <option key={item.id} value={item.id}>{item.original_name} · {formatDate(item.created_at)}</option>)}</select></label>}
-        {representations.length > 0 && <label className="panel-control">表示<select value={representation?.id || ''} onChange={event => setRepresentationId(event.target.value)}>{representations.map(item => <option key={item.id} value={item.id}>{representationKindLabel(item.kind)} · {item.parser_name}</option>)}</select></label>}
+        {representations.length > 0 && <label className="panel-control">文本版本（新稿在后）<select value={representation?.id || ''} onChange={event => setRepresentationId(event.target.value)}>{representations.map(item => <option key={item.id} value={item.id}>{formatTimestamp(item.created_at)} · {representationKindLabel(item.kind)}</option>)}</select></label>}
         {representation ? <pre ref={textRef}><TextWithHighlight text={representation.text_content} highlight={highlightedExcerpt}/></pre> : <div className="loading">当前版本尚无可显示的本地文本。</div>}
       </section>
 
-      {!sourceDeleted && version && <section className="manual-revision"><header><h2>人工修订</h2>{!editingRevision && <button type="button" className="button secondary" disabled={Boolean(busyAction)} onClick={() => { setRevisedText(representation?.text_content || ''); setEditingRevision(true) }}>新建修订表示</button>}</header>{editingRevision && <><textarea value={revisedText} disabled={Boolean(busyAction)} onChange={event => setRevisedText(event.target.value)} aria-label="人工修订文本"/><div><button type="button" className="button primary" disabled={Boolean(busyAction)} onClick={() => void saveManualRevision()}>{busyAction === 'manual-revision' ? '正在保存' : '保存新表示'}</button><button type="button" className="button text" disabled={Boolean(busyAction)} onClick={() => setEditingRevision(false)}>取消</button></div></>}</section>}
+      {!sourceDeleted && version && <section className="manual-revision"><header><h2>人工修订</h2>{!editingRevision && <button type="button" className="button secondary" disabled={Boolean(busyAction)} onClick={() => { setRevisedText(representation?.text_content || ''); setEditingRevision(true) }}>新建人工修订</button>}</header>{editingRevision && <><textarea value={revisedText} disabled={Boolean(busyAction)} onChange={event => setRevisedText(event.target.value)} aria-label="人工修订文本"/><div><button type="button" className="button primary" disabled={Boolean(busyAction)} onClick={() => void saveManualRevision()}>{busyAction === 'manual-revision' ? '正在保存' : '保存修订'}</button><button type="button" className="button text" disabled={Boolean(busyAction)} onClick={() => setEditingRevision(false)}>取消</button></div></>}</section>}
 
       <section className="evidence-panel">
-        <header><h2>证据与引用</h2><span>{representation?.kind === 'manual' ? '人工修订来源' : '不可变 evidence'}</span></header>
+        <header><h2>证据与引用</h2><span>{representation?.kind === 'manual' ? '来自人工修订稿' : '摘录 ≤300 字 · 完整内容见左侧文本版本'}</span></header>
         {evidence.length ? evidence.map(item => <article key={item.id}>
           <p>{item.excerpt}</p><small>{locatorLabel(item.locator)}</small>
           <div className="inline-actions"><button type="button" className="text-button" onClick={() => locateEvidence(item)}><MapPin size={15}/>定位</button>{!sourceDeleted && <button type="button" className="text-button" disabled={Boolean(busyAction)} onClick={() => void createCitation(item.id)}><Plus size={15}/>{busyAction === `citation-${item.id}` ? '正在创建' : '创建引用'}</button>}</div>
