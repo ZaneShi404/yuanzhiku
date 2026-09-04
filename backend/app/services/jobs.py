@@ -570,14 +570,15 @@ class JobService:
 
     def _sheet_cell_windows(
         self, version_id: str, transcription: dict, sheet_frames: int, duration_ms: int,
-    ) -> list[tuple[int, int]]:
+    ) -> tuple[list[tuple[int, int]], str | None]:
         """联络表格子时间窗（REQ-057.1，决策 25）：候选 = 当前分析帧时间 ∪
         转写语义锚点（段边界/静音中点），相邻 <1s 合并，超上限按时间均匀抽稀；
-        窗格为 [t_i, t_{i+1})（末格到片尾）——格子即证据时间范围。"""
+        窗格为 [t_i, t_{i+1})（末格到片尾）——格子即证据时间范围。超限截断
+        返回注明文本（威胁模型行 3：不静默，P2-2 处置）。"""
         ranges = self._transcription_ranges(transcription)
         effective_duration = duration_ms or max((end for _, end in ranges), default=0)
         if effective_duration <= 0:
-            return []
+            return [], None
         times: set[int] = set()
         analysis = self.repository.video_analysis_for_version(version_id)
         if analysis is not None:
@@ -595,7 +596,9 @@ class JobService:
         for time_ms in ordered:
             if not merged or time_ms - merged[-1] >= 1_000:
                 merged.append(time_ms)
+        truncation_note: str | None = None
         if len(merged) > sheet_frames:
+            truncation_note = f"联络表候选 {len(merged)} 点超出上限 {sheet_frames} 格，已按上限截断"
             span = len(merged) - 1
             picked: list[int] = []
             for index in range(sheet_frames):
@@ -608,7 +611,7 @@ class JobService:
         ]
         if merged:
             windows.append((merged[-1], effective_duration))
-        return windows
+        return windows, truncation_note
 
     def _run_frame_understanding(
         self,
@@ -619,18 +622,18 @@ class JobService:
         cancelled: Callable[[], bool],
         cancel_event: threading.Event,
         duration_ms: int,
-    ) -> list[dict[str, Any]] | None:
+    ) -> tuple[list[dict[str, Any]], str | None]:
         """联络表帧理解（REQ-057.1，决策 25/27）：构建缩略图网格 → 单次多模态
-        调用 → 带窗格时间定位的画面条目。不可行/失败返回 None（作业层按原
-        降级语义记录），绝不伪造条目；瞬态缩略图随作业 staging 清理，绝不入
-        video_frames/artifact。"""
+        调用 → 带窗格时间定位的画面条目。不可行/失败返回 ([], 注明)（作业层
+        按原降级语义记录），绝不伪造条目；瞬态缩略图随作业 staging 清理，绝不
+        入 video_frames/artifact。截断等事项以注明文本返回（P2-2 处置）。"""
         try:
             sheet_frames = max(8, min(48, int(self.repository.get_settings().get("ai_video_sheet_frames", "24"))))
         except (TypeError, ValueError):
             sheet_frames = 24
-        cells = self._sheet_cell_windows(job["content_version_id"], transcription, sheet_frames, duration_ms)
+        cells, truncation_note = self._sheet_cell_windows(job["content_version_id"], transcription, sheet_frames, duration_ms)
         if not cells:
-            return None
+            return [], None
         self._update_video_progress(job, 30, "正在构建关键帧联络表")
         settings = self.repository.get_settings()
         try:
@@ -660,17 +663,18 @@ class JobService:
                 heartbeat=lambda: self._heartbeat(job),
             )
             self._update_video_progress(job, 45, "正在理解关键帧画面")
-            return self._run_with_lease_heartbeat(
+            entries = self._run_with_lease_heartbeat(
                 job,
                 lambda: adapter.understand_frames(sheet_image, cells, transcript_text, cancelled),
                 cancel_event,
             )
+            return entries, truncation_note
         except MediaProcessingCancelled:
             raise
         except Exception:
             if cancelled():
                 raise MediaProcessingCancelled() from None
-            return None
+            return [], truncation_note
         finally:
             shutil.rmtree(workspace, ignore_errors=True)
 
@@ -747,10 +751,13 @@ class JobService:
         # 抽帧，行为与 v1.6 一致；分析本身保持零网络。
         transcription = self._latest_representation(job["content_version_id"], "transcription")
         transcript_segments: list[tuple[int, int]] = []
-        transcription_config_hash: str | None = None
+        transcript_source: str | None = None
         if transcription is not None:
             transcript_segments = self._transcription_ranges(transcription)
-            transcription_config_hash = transcription.get("config_hash")
+            # P2-1 处置（独立复核 2026-09-04）：分析身份纳入转写表示的唯一身份
+            # （representation id）——同引擎重转产生不同转写内容时身份随之更新，
+            # 重分析绝不与既有分析共享帧集而触发同键帧不一致。
+            transcript_source = transcription.get("id")
         self.videos.analyze(
             version_id=job["content_version_id"],
             artifact_sha256=job["artifact_sha256"],
@@ -760,7 +767,7 @@ class JobService:
             heartbeat=lambda: self._heartbeat(job),
             progress=lambda value, message: self._update_video_progress(job, value, message),
             transcript_segments=transcript_segments,
-            transcription_config_hash=transcription_config_hash,
+            transcript_source=transcript_source,
         )
         if self.repository.job_cancel_requested(job["id"]):
             self._finish(job, "cancelled", "视频分析已取消")
@@ -779,9 +786,12 @@ class JobService:
                     child_jobs = self._chained_child_if_due("video_transcribe", job)
             elif self.media_ai is not None and self.media_ai.capability().get("understand_enabled"):
                 child_jobs = self._chained_child_if_due("video_summarize", job)
+        # REQ-056.2：无转写表示（未跑/失败/blocked）时退化为纯信号抽帧，作业
+        # 消息注明，不静默（P2-2 处置，独立复核 2026-09-04）。
+        message = "本地视频分析完成" if transcription is not None else "转写不可用，已按场景感知策略抽帧"
         if not self.repository.commit_job_success(
             job["id"], job["lease_token"],
-            message="本地视频分析完成",
+            message=message,
             version_id=job["content_version_id"], completeness="complete",
             source_id=job["source_id"], processing="succeeded",
             child_jobs=child_jobs,
@@ -1107,6 +1117,11 @@ class JobService:
         visual_entries: list[dict[str, Any]] = []
         frame_fallback = False
         enriched = False
+        notes: list[str] = []
+        if frames_enrich_enabled and not image_input:
+            # REQ-057.6：增强开启但供应商不具备图像输入 → 跳过并在作业消息注明
+            # （P2-2 处置，不静默）。
+            notes.append("画面增强已开启但供应商不具备图像输入，已跳过")
         if want_direct:
             # 三级补充理解（REQ-055.2 v1.7 修订，决策 26，用户裁定 2026-09-04）：
             # ① 视频直送（主路径，偏差 A 三合一）→ ② 联络表帧理解兜底（REQ-057.2）
@@ -1136,22 +1151,30 @@ class JobService:
             else:
                 degraded_reason = "未配置视频直送，画面信息未补充"
             if not video_direct and frames_fallback_enabled and image_input:
-                entries = self._run_frame_understanding(
+                entries, sheet_note = self._run_frame_understanding(
                     job, adapter, transcription, transcript_text, cancelled, cancel_event, duration_ms,
                 )
+                if sheet_note:
+                    notes.append(sheet_note)
                 if entries:
                     visual_entries = entries
                     frame_fallback = True
                     degraded_reason = None
+                else:
+                    degraded_reason = f"{degraded_reason or '视频直送不可行，画面信息未补充'}（关键帧画面理解兜底亦未成功）"
         elif frames_enrich_enabled and image_input:
             # v1.7 帧理解增强（REQ-057.3）：转写完整时的可选画面补充（tier 1.5），
             # 开关关闭或帧理解不可行时行为与 v1.6 tier1 完全一致。
-            entries = self._run_frame_understanding(
+            entries, sheet_note = self._run_frame_understanding(
                 job, adapter, transcription, transcript_text, cancelled, cancel_event, duration_ms,
             )
+            if sheet_note:
+                notes.append(sheet_note)
             if entries:
                 visual_entries = entries
                 enriched = True
+            else:
+                notes.append("画面增强已开启但关键帧画面理解未成功")
         visual_gap = bool(want_direct and not video_direct and not frame_fallback)
         self._update_video_progress(job, 65, "正在生成内容摘要")
         if video_direct:
@@ -1240,7 +1263,10 @@ class JobService:
                 "genres": result.get("suggested_genres") or [],
                 "tags": result.get("suggested_tags") or [],
             })
-        if not self.repository.commit_job_success(job["id"], job["lease_token"], message="内容摘要完成"):
+        message = "内容摘要完成"
+        if notes:
+            message = f"内容摘要完成（{'；'.join(notes)}）"
+        if not self.repository.commit_job_success(job["id"], job["lease_token"], message=message):
             raise JobLeaseLost()
 
     def _source_classify(self, job: dict) -> None:

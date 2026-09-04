@@ -23,16 +23,18 @@ from app.ports.storage import ArtifactStoragePort
 from app.services.documents import DocumentService
 
 
-def analysis_config_hash(analyzer_hash: str, transcription_config_hash: str | None) -> str:
+def analysis_config_hash(analyzer_hash: str, transcript_source: str | None) -> str:
     """v1.7（REQ-056.3，决策 24）：分析身份纳入转写引导来源。
 
     无转写时与 v1.6 身份完全一致（同参数纯信号抽帧可幂等复用既有分析）；
-    有转写时以 sha256(分析器哈希:转写表示 config_hash) 构成新身份——转写
-    晚到或换引擎后的重分析构成新分析身份并存，绝不与旧身份共享帧集。
+    有转写时以 sha256(分析器哈希:转写表示唯一身份) 构成新身份——转写表示的
+    representation id 唯一对应一次转写作业产出的具体转写内容，同引擎重转产生
+    新内容时身份随之更新（独立复核 P2-1 处置 2026-09-04），绝不与旧身份共享
+    帧集；转写表示自身的 config_hash（引擎/模型）仍随该表示可查。
     """
-    if not transcription_config_hash:
+    if not transcript_source:
         return analyzer_hash
-    return hashlib.sha256(f"{analyzer_hash}:{transcription_config_hash}".encode("utf-8")).hexdigest()
+    return hashlib.sha256(f"{analyzer_hash}:{transcript_source}".encode("utf-8")).hexdigest()
 
 
 class VideoService:
@@ -99,7 +101,7 @@ class VideoService:
         heartbeat: Callable[[], None],
         progress: Callable[[int, str], None],
         transcript_segments: list[tuple[int, int]] | None = None,
-        transcription_config_hash: str | None = None,
+        transcript_source: str | None = None,
     ) -> dict:
         path = self.artifacts.artifact_path(artifact_sha256)
         if not path.is_file():
@@ -117,7 +119,7 @@ class VideoService:
         # 无转写 / 有转写 / 换转写引擎构成不同分析身份；无转写时与 v1.6 身份
         # 完全一致（同参数纯信号抽帧可幂等复用既有分析），转写来源本身经
         # config_hash 可审计，不重复写入元数据。
-        config_hash = analysis_config_hash(self.analyzer.config_hash(maximum_frames), transcription_config_hash)
+        config_hash = analysis_config_hash(self.analyzer.config_hash(maximum_frames), transcript_source)
         workspace = self.artifacts.staging_path().with_suffix("")
         workspace.mkdir(parents=True, exist_ok=False)
         stored_frames: list[dict[str, object]] = []

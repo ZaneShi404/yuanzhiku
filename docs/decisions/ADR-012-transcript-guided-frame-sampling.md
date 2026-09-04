@@ -11,8 +11,10 @@
 （≥2s 空档）∪ 等间隔锚点，槽位吸附优先级 scene > transcript/silence > even，
 帧 reason 扩展 transcript/silence（自由 TEXT 列，零 schema 迁移）；无转写表示
 时自动退化为纯信号抽帧（行为与 v1.6 逐位一致），分析作业全程零网络不变。
-分析身份 `config_hash` 纳入转写来源（transcription 表示的 config_hash；无转写
-时与 v1.6 原值一致可幂等复用）——转写晚到或换引擎后的重分析构成新分析身份并
+分析身份 `config_hash` 纳入转写来源（transcription 表示的唯一身份
+representation id，唯一对应一次转写作业产出的具体转写内容；无转写
+时与 v1.6 原值一致可幂等复用；同引擎重转产生新内容即构成新身份——
+独立复核 P2-1 处置 2026-09-04，重分析绝不与旧身份共享帧集）——转写晚到或换引擎后的重分析构成新分析身份并
 存（detail 取最新），绝不与旧身份共享帧集；转写晚到后经新增
 `POST /videos/{id}/analyze` 手动重分析获得引导帧。分析成功仍是来源 ready 的
 唯一写点（`REQ-033a`）；转写晚配置场景由分析成功时补链转写（无转写表示且转写

@@ -679,13 +679,14 @@ class _VideoChatAdapter(VideoUnderstandingPort):
                 description = str(item.get("content") or "").strip()[:500]
                 if not description:
                     continue
-                try:
-                    cell_number = int(item.get("cell"))
-                except (TypeError, ValueError):
+                # P3-2 处置（独立复核 2026-09-04）：格子号必须是真正的整数——
+                # bool（true→1）与浮点截断（2.9→2）一律丢弃，绝不宽化。
+                cell_value = item.get("cell")
+                if isinstance(cell_value, bool) or not isinstance(cell_value, int):
                     continue
-                if not 1 <= cell_number <= len(cells):
+                if not 1 <= cell_value <= len(cells):
                     continue
-                start_ms, end_ms = cells[cell_number - 1]
+                start_ms, end_ms = cells[cell_value - 1]
                 entries.append({
                     "start_ms": start_ms,
                     "end_ms": max(start_ms + 1, end_ms),

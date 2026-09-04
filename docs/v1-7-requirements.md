@@ -143,7 +143,7 @@ flowchart TD
 
 1. 入库单事务（本地导入 `services/imports.py:152-182` 与链接下载 `services/imports.py:216-294` 同路径）的入队矩阵：`ai_auto_pipeline=on` 且转写器可用 → 同事务入队 `video_transcribe`（priority 110）与 `video_analyze`（priority 100），priority 差 + 单 worker 串行保证转写先执行；`ai_auto_pipeline=off` 或转写器不可用 → 仅入队 `video_analyze`（前者保持 v1.6「分析自动、转写手动」语义，后者保持退化路径）。移除既有「分析成功链式转写」。
 2. `video_analyze` 执行时若同版本已存在 transcription 表示，则抽帧计划按 `REQ-053` 修订融合转写锚点；无转写表示（未跑/失败/blocked）时退化为现行纯信号抽帧，作业消息注明「转写不可用，按场景感知策略抽帧」，不阻塞不失败。分析作业全程保持零网络（`REQ-015` 纪律不变，负向测试断言）。
-3. 分析身份（`config_hash`）输入含采样参数（既有）+ 同版本 transcription 表示的 `config_hash`（无转写以 `none` 参与）；转写引导状态变化（无→有、换引擎/模型）构成新分析身份，多份分析按 `(version, analyzer, config_hash)` 幂等并存、detail 取最新；同键内容不一致仍抛错。
+3. 分析身份（`config_hash`）输入含采样参数（既有）+ 同版本 transcription 表示的唯一身份（representation id，独立复核 P2-1 处置 2026-09-04：同引擎重转产生新转写内容即构成新身份，重分析绝不与既有分析共享帧集；无转写以 `none` 参与）；转写引导状态变化（无→有、重转、换引擎/模型）构成新分析身份，多份分析按 `(version, analyzer, config_hash)` 幂等并存、detail 取最新；同键内容不一致仍抛错。
 4. 转写晚到（分析先完成）后，用户可经 `POST /videos/{id}/analyze` 手动重分析获得转写引导帧；旧分析、旧帧与帧 artifact 保留（既有多分析并存纪律），既有引用不受影响。
 5. 分析成功仍为来源 ready（completeness=complete / processing=succeeded）唯一写点，与执行顺序无关（`REQ-033a`）；转写、摘要、帧理解失败或取消不降低版本与来源状态。
 6. 帧的持久化产物仍仅由分析作业产生（每帧独立 artifact + `video_frames` 行，reason 扩展 scene/even/transcript/silence）；摘要作业的联络表缩略图与瞬态补抽不入 `video_frames`、不落 artifact、作业结束即清理（`REQ-057.1`）。
@@ -352,3 +352,6 @@ flowchart TD
   - 实现落地（四阶段提交：双入队与链序、锚点融合、联络表三分支、手动重分析与前端）；决策 23 实现期精化——分析成功时「无转写表示且转写器可用」补链转写（入库矩阵未命中的晚配置场景），有转写表示时链式摘要，避免摘要先行终态失败；转写/分析双入队与补链经 `_chained_child_if_due` 去重。
   - 发现并修复设置键缺失：新设置项须进入 schema 默认种子（sqlite/postgres），否则 `update_settings` 的 UPDATE 语义无法写入新键（T-FRAME-001 首轮暴露）。
   - 基线并入冻结需求（REQ-056/057 新增、八项修订）、威胁模型 4 行、api-contract/acceptance-matrix/test-plan/operations/user-guide 同步；ADR-012/013 归档。
+
+- 2026-09-04（独立复核处置，随归档前修复）：
+  - 全新上下文对抗复核裁决 **APPROVE-WITH-CONDITIONS**（无 P0/P1；回归 503 通过 0 失败由复核代理亲测复现；v1.6 无转写对拍 6000 组零差异）。两项 P2 条件全部修复：P2-1 分析身份改纳入转写表示唯一身份（representation id）——同引擎重转产生新转写内容即构成新身份，消除重分析同键帧不一致导致作业失败并降级来源状态的路径（REQ-016/REQ-056.3 文本同步修订）；P2-2 三处「作业消息注明」补齐（REQ-056.2 无转写退化消息「转写不可用，已按场景感知策略抽帧」、REQ-057.6 增强能力不可行跳过注明、威胁模型行 3 联络表截断注明）。P3 处置：api-contract 链序失同步修正、联络表格子号解析排除 bool/浮点截断、锚点池显式排序；新增 3 用例（image_input 不可行矩阵格、联络表构建失败诚实 visual_gap、bool/浮点格子丢弃）。P3-4 其余测试缺口与 P3-5 观察项登记于复核报告，留后续轮次。

@@ -232,6 +232,52 @@ def test_frame_fallback_disabled_keeps_visual_gap(client_and_services, monkeypat
     assert builder_calls == []
 
 
+def test_frame_fallback_skipped_when_image_input_infeasible(client_and_services, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """P3-4 处置：兜底开关开但供应商不具备 image_input → 兜底按不可行处理，
+    回到 tier1 + visual_gap，不构建联络表（REQ-057.6）。"""
+    client, services = client_and_services
+    _configure_ai(client)
+    builder_calls: list[list[int]] = []
+    monkeypatch.setattr("app.services.jobs.build_contact_sheet", _fake_sheet_builder(tmp_path, builder_calls))
+    monkeypatch.setattr(services.jobs, "video_adapter_provider", lambda: FakeVideoAdapter(fail_video=True, image_input=False))
+    source_id, version_id = _transcribe_and_analyze(client, services, monkeypatch)
+
+    summarized = services.jobs.run_once()
+    assert summarized is not None and summarized["state"] == "succeeded", summarized
+
+    representations = client.get(f"/api/v1/documents/{version_id}/representations").json()
+    kinds = {item["kind"] for item in representations}
+    assert "visual_understanding" not in kinds
+    marker = json.loads(re.search(r"<!--yuanzhiku:suggestions (\{.*\}) -->", [i for i in representations if i["kind"] == "summary"][-1]["text_content"]).group(1))
+    assert marker["visual_gap"] is True and marker["frame_fallback"] is False
+    assert builder_calls == []
+
+
+def test_frame_fallback_honest_gap_when_sheet_build_fails(client_and_services, monkeypatch: pytest.MonkeyPatch) -> None:
+    """P3-4 处置：直送失败、兜底开启且 image_input 可行，但联络表构建失败 →
+    诚实 visual_gap（degraded 注明兜底亦未成功），绝不伪造画面条目。"""
+    client, services = client_and_services
+    _configure_ai(client)
+
+    def failing_builder(video_path, cell_times_ms, workspace, limits, cancelled, *, ffmpeg, heartbeat):
+        raise RuntimeError("关键帧联络表构建失败")
+
+    monkeypatch.setattr("app.services.jobs.build_contact_sheet", failing_builder)
+    monkeypatch.setattr(services.jobs, "video_adapter_provider", lambda: FakeVideoAdapter(fail_video=True))
+    source_id, version_id = _transcribe_and_analyze(client, services, monkeypatch)
+
+    summarized = services.jobs.run_once()
+    assert summarized is not None and summarized["state"] == "succeeded", summarized
+
+    representations = client.get(f"/api/v1/documents/{version_id}/representations").json()
+    kinds = {item["kind"] for item in representations}
+    assert "visual_understanding" not in kinds
+    text = [i for i in representations if i["kind"] == "summary"][-1]["text_content"]
+    assert "视频直送失败，画面信息未补充（关键帧画面理解兜底亦未成功）" in text
+    marker = json.loads(re.search(r"<!--yuanzhiku:suggestions (\{.*\}) -->", text).group(1))
+    assert marker["visual_gap"] is True and marker["frame_fallback"] is False and marker["tier"] == 1
+
+
 def test_frame_enrichment_runs_on_complete_transcript(client_and_services, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """转写完整 + 增强开关开 → 联络表画面补充（tier 1.5，enriched 标记）。"""
     client, services = client_and_services
@@ -324,6 +370,20 @@ def test_understand_frames_drops_out_of_range_cells(tmp_path: Path) -> None:
         "start_ms": 2_000, "end_ms": 3_000, "time_ms": 2_000,
         "description": "有效条目", "visible_text": "画面文字",
     }]
+
+    # P3-2 处置：bool（true→1）与浮点（2.9→2 / 2.0→2）一律丢弃，绝不宽化。
+    loose = QwenVideoAdapter(
+        lambda: settings, lambda: credentials, relay,
+        completion_caller=lambda **kwargs: _completion_response({
+            "moments": [
+                {"cell": True, "content": "布尔条目"},
+                {"cell": 2.9, "content": "浮点截断条目"},
+                {"cell": 2.0, "content": "整值浮点条目"},
+            ],
+        }),
+    )
+    with pytest.raises(RuntimeError):
+        loose.understand_frames(sheet, cells, "转写文本", lambda: False)
 
     empty = QwenVideoAdapter(
         lambda: settings, lambda: credentials, relay,

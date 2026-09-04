@@ -70,10 +70,12 @@ def _anchor_pool(
     transcript_anchors: list[tuple[int, str]] | None,
     duration_ms: int,
 ) -> dict[int, str]:
-    """合并场景点与转写语义点为锚点池（同刻按 scene > transcript/silence 优先保留）。"""
+    """合并场景点与转写语义点为锚点池（同刻按 scene > transcript/silence 优先保留）。
+
+    场景点显式排序：吸附并列时按锚点池顺序裁决，不依赖调用方传入顺序
+    （P3-3 处置，独立复核 2026-09-04）。"""
     anchors: dict[int, str] = {}
-    for time_ms in scene_times_ms:
-        time_ms = int(time_ms)
+    for time_ms in sorted({int(time_ms) for time_ms in scene_times_ms}):
         if 0 < time_ms < duration_ms:
             anchors.setdefault(time_ms, "scene")
     for time_ms, label in transcript_anchors or []:

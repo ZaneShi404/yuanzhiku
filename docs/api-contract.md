@@ -90,7 +90,7 @@
 
 `POST /videos/{source_id}/summarize`（`201`）入队 `video_summarize` 作业，可选 JSON 请求体 `{"force_tier2": false}`。理解分组未配置时同样终态 `blocked`；无转写产物时终态 `failed`（“请先完成语音转写”，不进重试循环）。已配置时执行两级（用户裁定 2026-08-16）：完整性判断（确定性覆盖率/静音规则 + 约束 JSON 的 LLM 判定，阈值 0.6）→ tier1 纯文本摘要；判定疑似不完整/`force_tier2` 且视频直送（`ai_video_provider`）已配置时，视频文件直送多模态模型、由其直接产出补充转写/理解+摘要+建议分类；直送不可行/失败时摘要仍按 tier1 产出并标记 `visual_gap`。摘要写入 kind=`summary` representation（parent 为转写表示），AI 建议的领域/体裁/标签在作业成功时按只填空缺规则自动写入来源元数据（领域/体裁仅在当前为空时写入、标签并集合并、已填字段不覆盖；实际写入记 `ai_classify_applied` 审计事件，只含字段与数量），同时以 `<!--yuanzhiku:suggestions ...-->` 标记（含 `applied: true`）嵌入摘要文本；无 `applied` 的旧摘要仍可由用户显式采纳（`PUT /sources/{id}/metadata` 合并，幂等）。
 
-`source_classify` 作业（REQ-051 修订）无独立入队端点：`ai_auto_pipeline` 开启且理解组已配置时，文档/粘贴的 parse 作业成功即自动入队（payload `{}`、priority 100；同版本同类作业已排队/运行中则不重复入队）；同一开关下 `video_analyze` 成功自动串联 `video_transcribe`，`video_transcribe` 成功自动串联 `video_summarize`。`source_classify` 取该版本最新 extraction 正文（截断至前 8000 字符）经理解组产出领域/体裁/标签，按同一只填空缺规则自动写入来源元数据；理解组未配置时终态 `blocked`（“未配置媒体 AI 服务”），无可分类正文时终态 `failed`（不进重试循环），失败/取消均不改变版本完整性与来源处理状态（REQ-033a）。图片不参与自动分类（无正文文本）。
+`source_classify` 作业（REQ-051 修订）无独立入队端点：`ai_auto_pipeline` 开启且理解组已配置时，文档/粘贴的 parse 作业成功即自动入队（payload `{}`、priority 100；同版本同类作业已排队/运行中则不重复入队）。v1.7 链序（REQ-056.1）：视频入库即按入队矩阵同事务入队 `video_transcribe`（priority 110）与 `video_analyze`（100），转写先执行；分析成功且已有转写表示时自动串联 `video_summarize`，`video_transcribe` 成功亦串联 `video_summarize`（去重兜底），分析成功时无转写表示且转写器可用则补链 `video_transcribe`（晚配置兜底）。`source_classify` 取该版本最新 extraction 正文（截断至前 8000 字符）经理解组产出领域/体裁/标签，按同一只填空缺规则自动写入来源元数据；理解组未配置时终态 `blocked`（“未配置媒体 AI 服务”），无可分类正文时终态 `failed`（不进重试循环），失败/取消均不改变版本完整性与来源处理状态（REQ-033a）。图片不参与自动分类（无正文文本）。
 
 ## 分类体系（REQ-050）
 

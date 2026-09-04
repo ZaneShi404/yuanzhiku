@@ -465,11 +465,13 @@ def test_analysis_config_hash_identity_combines_transcript_source() -> None:
     # 无转写：与 v1.6 身份一致（同参数纯信号抽帧幂等复用既有分析）。
     assert analysis_config_hash(analyzer_hash, None) == analyzer_hash
     assert analysis_config_hash(analyzer_hash, "") == analyzer_hash
-    # 有转写：转写来源参与身份，不同来源构成不同分析身份。
-    with_transcript = analysis_config_hash(analyzer_hash, "fake-hash")
+    # 有转写：转写表示唯一身份（representation id）参与身份。
+    with_transcript = analysis_config_hash(analyzer_hash, "rep-a")
     assert with_transcript != analyzer_hash
-    assert analysis_config_hash(analyzer_hash, "fake-hash") == with_transcript
-    assert analysis_config_hash(analyzer_hash, "other-hash") != with_transcript
+    assert analysis_config_hash(analyzer_hash, "rep-a") == with_transcript
+    # P2-1 处置（独立复核 2026-09-04）：同引擎重转产生新表示（rep id 不同），
+    # 即使 config_hash 相同也构成新分析身份，重分析绝不与旧身份共享帧集。
+    assert analysis_config_hash(analyzer_hash, "rep-b") != with_transcript
 
 
 def _recently_exited_pid() -> int:
