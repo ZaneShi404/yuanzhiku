@@ -364,6 +364,9 @@ def _category_for_source(relative: str) -> str:
         return "testing"
     if relative.startswith("reports/infrastructure/"):
         return "infrastructure"
+    if relative.startswith("reports/review/"):
+        # a2fffa0 引入 review 报告类型时类别映射遗漏（v1.7.0 归档周期处置）。
+        return "review"
     if relative.startswith("docs/"):
         return "documentation"
     if relative.startswith("tests/"):

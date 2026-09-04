@@ -489,6 +489,9 @@ def _report_category(source_path: str) -> str:
         return "infrastructure"
     if source_path.startswith("reports/versions/"):
         return "version"
+    if source_path.startswith("reports/review/"):
+        # a2fffa0 引入 review 报告类型时类别映射遗漏（v1.7.0 归档周期处置）。
+        return "review"
     raise VerificationError("报告来源路径无效")
 
 
@@ -1054,6 +1057,8 @@ def _validate_report_register(member_map: dict[str, Member]) -> None:
                 raise VerificationError("测试报告路径与类别不一致")
             if source_path.startswith("reports/infrastructure/") and metadata["report_kind"] != "infrastructure":
                 raise VerificationError("基础设施报告路径与类别不一致")
+            if source_path.startswith("reports/review/") and metadata["report_kind"] != "review":
+                raise VerificationError("复核报告路径与类别不一致")
             if source_path.startswith("reports/versions/") and metadata["report_kind"] != "version_summary":
                 raise VerificationError("版本报告路径与类别不一致")
             for reference in metadata["evidence_refs"]:
